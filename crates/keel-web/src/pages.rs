@@ -199,7 +199,7 @@ struct NewRepoPage {
     is_private: bool,
 }
 
-async fn possible_owners(state: &AppState, user: &User) -> AppResult<Vec<String>> {
+pub(crate) async fn possible_owners(state: &AppState, user: &User) -> AppResult<Vec<String>> {
     let mut owners = vec![user.username.clone()];
     owners.extend(state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username));
     Ok(owners)

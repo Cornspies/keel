@@ -1,10 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<div class="narrow-left wide">
 {% include "issues/conversation_head.html" %}
+<div class="issue-layout">
+<div class="issue-main-col">
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
 {% include "issues/timeline.html" %}
 {% include "issues/comment_form.html" %}
+</div>
+{% include "issues/sidebar.html" %}
 </div>
 {% endblock %}

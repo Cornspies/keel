@@ -1,13 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<div class="narrow-left wide">
 {% include "pulls/header.html" %}
+<div class="issue-layout">
+<div class="issue-main-col">
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
 {% include "issues/timeline.html" %}
 
 {% if let Some(m) = merge %}
 <div class="box merge-box">
+  {% if !conv.reviews.is_empty() %}
+  <ul class="review-states">
+    {% for (who, verdict) in conv.reviews %}
+    <li class="review-{{ verdict }}"><strong>{{ who }}</strong> {% if *verdict == "approved" %}approved these changes{% else %}requested changes{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   {% match m %}
   {% when MergeStatus::Ready %}
     <div class="merge-status merge-ok"><strong>This branch has no conflicts with {{ pr.base_ref }}.</strong>
@@ -18,21 +26,23 @@
         <option value="merge">Create a merge commit</option>
         <option value="squash">Squash and merge</option>
       </select>
-      <label class="check"><input type="checkbox" name="delete_branch" checked> Delete <span class="branch">{{ pr.head_ref }}</span> afterwards</label>
+      {% if can_delete_branch %}<label class="check"><input type="checkbox" name="delete_branch" checked> Delete <span class="branch">{{ pr.head_label }}</span> afterwards</label>{% endif %}
       <button class="btn btn-primary">Merge pull request</button>
     </form>
     {% endif %}
   {% when MergeStatus::Conflicts(files) %}
     <div class="merge-status merge-conflict"><strong>This branch has conflicts that must be resolved.</strong>
-      <span class="muted">Merge {{ pr.base_ref }} into {{ pr.head_ref }} locally, fix the conflicts and push.</span></div>
+      <span class="muted">Merge {{ pr.base_ref }} into {{ pr.head_label }} locally, fix the conflicts and push.</span></div>
     {% if !files.is_empty() %}<ul class="conflicts">{% for f in files %}<li class="mono">{{ f }}</li>{% endfor %}</ul>{% endif %}
   {% when MergeStatus::AlreadyMerged %}
     <div class="merge-status">{{ pr.base_ref }} already contains these commits; this pull request will be marked as merged.</div>
   {% when MergeStatus::BranchMissing %}
-    <div class="merge-status merge-conflict">The <span class="branch">{{ pr.head_ref }}</span> or <span class="branch">{{ pr.base_ref }}</span> branch no longer exists.</div>
+    <div class="merge-status merge-conflict">The <span class="branch">{{ pr.head_label }}</span> or <span class="branch">{{ pr.base_ref }}</span> branch no longer exists.</div>
   {% endmatch %}
 </div>
 {% endif %}
 {% include "issues/comment_form.html" %}
+</div>
+{% include "issues/sidebar.html" %}
 </div>
 {% endblock %}

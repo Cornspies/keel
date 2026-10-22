@@ -35,12 +35,14 @@ const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", 
 // Shared helpers and view models
 // ---------------------------------------------------------------------------
 
-/// Percent-encodes a repository path or ref for use in a URL, keeping `/`.
+/// Percent-encodes a repository path or ref for use in a URL, keeping `/`
+/// and `:` (valid in paths; it separates a fork from its branch in compare
+/// URLs).
 pub(crate) fn encode_path(p: &str) -> String {
     let mut out = String::with_capacity(p.len());
     for b in p.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
                 out.push(b as char)
             }
             _ => out.push_str(&format!("%{b:02X}")),
@@ -76,6 +78,21 @@ pub(crate) async fn with_git<T: Send + 'static>(
     tokio::task::spawn_blocking(move || f(&GitRepo::open(&path)?)).await?
 }
 
+/// Like [`with_git`], but `repo` can also read the objects of `other` (a
+/// fork, for comparing across repositories).
+pub(crate) async fn with_git_pair<T: Send + 'static>(
+    state: &AppState,
+    repo: &Repo,
+    other: &Repo,
+    f: impl FnOnce(&GitRepo) -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    if repo.id == other.id {
+        return with_git(state, repo, f).await;
+    }
+    let (path, other) = (state.core.repo_path(repo), state.core.repo_path(other));
+    tokio::task::spawn_blocking(move || f(&GitRepo::open_with(&path, &other)?)).await?
+}
+
 pub(crate) struct RepoView {
     pub owner: String,
     pub name: String,
@@ -92,6 +109,9 @@ pub(crate) struct RepoView {
     pub default_rev: String,
     pub open_issues: i64,
     pub open_pulls: i64,
+    /// `owner/name` of the repository this was forked from.
+    pub parent: Option<String>,
+    pub fork_count: i64,
 }
 
 impl RepoView {
@@ -104,7 +124,13 @@ impl RepoView {
     ) -> AppResult<Self> {
         let cfg = &state.core.config;
         let counts = state.core.issue_counts(repo.id).await?;
+        let parent = match repo.forked_from {
+            Some(id) => state.core.repo_by_id(id).await?.map(|p| format!("{}/{}", p.owner, p.name)),
+            None => None,
+        };
         Ok(Self {
+            parent,
+            fork_count: state.core.fork_count(repo.id).await?,
             open_issues: counts.open_issues,
             open_pulls: counts.open_pulls,
             owner: repo.owner.clone(),
@@ -709,6 +735,14 @@ pub(crate) struct LineView {
     pub old: String,
     pub new: String,
     pub content: String,
+    /// Row id, e.g. `file-2-n14` (new line 14) or `file-2-o9` (old line 9).
+    pub anchor: String,
+    /// Where a comment on this line attaches: the side (`new` for added
+    /// and context lines, `old` for removed ones) and line number there.
+    pub side: &'static str,
+    pub line: u32,
+    /// Inline review comments shown below the line (pull requests only).
+    pub threads: Vec<crate::pulls::ThreadView>,
 }
 
 pub(crate) struct HunkView {
@@ -728,6 +762,9 @@ pub(crate) struct FileView {
     pub collapsed: bool,
     pub hunks: Vec<HunkView>,
     pub view_url: Option<String>,
+    /// Blob ids of the two sides.
+    pub old_blob: Option<String>,
+    pub new_blob: Option<String>,
 }
 
 /// View models for a diff; "View file" links point at `rev`.
@@ -759,30 +796,42 @@ pub(crate) fn file_views(base: &str, rev: &str, diff: &keel_git::CommitDiff) -> 
             collapsed: f.collapsed,
             view_url: (f.status != DiffStatus::Deleted)
                 .then(|| format!("{base}/blob/{rev}/{}", encode_path(f.path()))),
+            old_blob: f.old_id.map(|id| id.to_string()),
+            new_blob: f.new_id.map(|id| id.to_string()),
             hunks: f
                 .hunks
                 .iter()
                 .map(|h| HunkView {
                     header: h.header.clone(),
-                    lines: h
-                        .lines
-                        .iter()
-                        .map(|l| LineView {
-                            class: match l.kind {
-                                DiffLineKind::Added => "add",
-                                DiffLineKind::Removed => "del",
-                                DiffLineKind::Context => "ctx",
-                                DiffLineKind::NoNewline => "meta",
-                            },
-                            old: l.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                            new: l.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                            content: l.content.clone(),
-                        })
-                        .collect(),
+                    lines: h.lines.iter().map(|l| line_view(i, l)).collect(),
                 })
                 .collect(),
         })
         .collect()
+}
+
+fn line_view(file: usize, l: &keel_git::DiffLine) -> LineView {
+    let (side, line) = match (l.kind, l.old_no, l.new_no) {
+        (DiffLineKind::Removed, Some(old), _) => ("old", old),
+        (DiffLineKind::NoNewline, _, _) => ("", 0),
+        (_, _, Some(new)) => ("new", new),
+        _ => ("", 0),
+    };
+    LineView {
+        class: match l.kind {
+            DiffLineKind::Added => "add",
+            DiffLineKind::Removed => "del",
+            DiffLineKind::Context => "ctx",
+            DiffLineKind::NoNewline => "meta",
+        },
+        old: l.old_no.map(|n| n.to_string()).unwrap_or_default(),
+        new: l.new_no.map(|n| n.to_string()).unwrap_or_default(),
+        content: l.content.clone(),
+        anchor: if side.is_empty() { String::new() } else { format!("file-{file}-{}{line}", &side[..1]) },
+        side,
+        line,
+        threads: Vec::new(),
+    }
 }
 
 #[derive(Template)]
@@ -798,6 +847,7 @@ struct CommitPage {
     additions: usize,
     deletions: usize,
     truncated: bool,
+    inline: Option<crate::pulls::InlineCtx>,
 }
 
 pub async fn commit(
@@ -834,6 +884,7 @@ pub async fn commit(
         additions: diff.additions,
         deletions: diff.deletions,
         truncated: diff.truncated,
+        inline: None,
     })
 }
 
@@ -892,6 +943,7 @@ struct SettingsPage {
     page: Page,
     repo: RepoView,
     error: Option<String>,
+    general_error: Option<String>,
     collaborators: Vec<(i64, String, &'static str)>,
     collaborator_error: Option<String>,
     owned_by_org: bool,
@@ -907,7 +959,7 @@ async fn writable(state: &AppState, user: &User, owner: &str, name: &str) -> App
 }
 
 async fn settings_page(state: &AppState, user: User, repo: &Repo, error: Option<String>) -> AppResult {
-    settings_page_with(state, user, repo, error, None).await
+    settings_page_with(state, user, repo, error, None, None).await
 }
 
 async fn settings_page_with(
@@ -916,6 +968,7 @@ async fn settings_page_with(
     repo: &Repo,
     error: Option<String>,
     collaborator_error: Option<String>,
+    general_error: Option<String>,
 ) -> AppResult {
     let default_branch = with_git(state, repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
     let collaborators = state
@@ -930,6 +983,7 @@ async fn settings_page_with(
         repo: RepoView::new(state, repo, Access::Admin, "settings", &default_branch).await?,
         page: Page::new(state, Some(user), format!("Settings · {}/{}", repo.owner, repo.name)),
         error,
+        general_error,
         collaborators,
         collaborator_error,
         owned_by_org,
@@ -952,7 +1006,7 @@ pub async fn set_collaborator(
     let role = Access::parse_role(&f.role).ok_or_else(|| AppError::BadRequest("Unknown role".into()))?;
     match state.core.set_collaborator(&repo, &f.username, role).await {
         Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings#collaborators", repo.owner, repo.name)).into_response()),
-        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, Some(msg)).await,
+        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, Some(msg), None).await,
         Err(e) => Err(e.into()),
     }
 }
@@ -990,8 +1044,11 @@ pub async fn update_settings(
     Form(f): Form<SettingsForm>,
 ) -> AppResult {
     let repo = writable(&state, &user, &owner, &name).await?;
-    state.core.update_repo(repo.id, &f.description, f.private.is_some()).await?;
-    Ok(Redirect::to(&format!("/{}/{}/settings", repo.owner, repo.name)).into_response())
+    match state.core.update_repo(repo.id, &f.description, f.private.is_some()).await {
+        Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings", repo.owner, repo.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, None, Some(msg)).await,
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1024,6 +1081,7 @@ mod tests {
         assert_eq!(encode_path("src/main.rs"), "src/main.rs");
         assert_eq!(encode_path("a b/c#d?.txt"), "a%20b/c%23d%3F.txt");
         assert_eq!(encode_path("ünï"), "%C3%BCn%C3%AF");
+        assert_eq!(encode_path("bob/engine:topic"), "bob/engine:topic");
     }
 
     #[test]

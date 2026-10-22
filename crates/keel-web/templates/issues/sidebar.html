@@ -1,0 +1,47 @@
+<aside class="issue-sidebar">
+  <section>
+    <div class="sidebar-head">
+      <h3>Assignees</h3>
+      {% if conv.can_triage %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Edit assignees">Edit</summary>
+        <form method="post" action="{{ conv.base_url }}/assignees" class="dropdown-menu dropdown-wide checklist">
+          {% for (id, name, on) in conv.assignee_choices %}
+          <label class="check"><input type="checkbox" name="user" value="{{ id }}"{% if *on %} checked{% endif %}> {{ name }}</label>
+          {% endfor %}
+          <button class="btn btn-small btn-primary">Apply</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% if conv.assignees.is_empty() %}<p class="muted small">No one assigned</p>
+    {% else %}<ul class="plain">{% for a in conv.assignees %}<li><a href="/{{ a }}">{{ a }}</a></li>{% endfor %}</ul>{% endif %}
+  </section>
+  <section>
+    <div class="sidebar-head">
+      <h3>Labels</h3>
+      {% if conv.can_triage %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Edit labels">Edit</summary>
+        <form method="post" action="{{ conv.base_url }}/labels" class="dropdown-menu dropdown-wide checklist">
+          {% for (l, on) in conv.label_choices %}
+          <label class="check"><input type="checkbox" name="label" value="{{ l.id }}"{% if *on %} checked{% endif %}> <span class="label label-{{ l.color }}">{{ l.name }}</span></label>
+          {% endfor %}
+          {% if conv.label_choices.is_empty() %}<p class="muted small">No labels yet.</p>{% endif %}
+          <button class="btn btn-small btn-primary">Apply</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% if conv.labels.is_empty() %}<p class="muted small">None yet</p>
+    {% else %}<div class="labels">{% for l in conv.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}</div>{% endif %}
+  </section>
+  {% if conv.is_pull && !conv.reviews.is_empty() %}
+  <section>
+    <div class="sidebar-head"><h3>Reviews</h3></div>
+    <ul class="plain review-states">
+      {% for (who, verdict) in conv.reviews %}<li class="review-{{ verdict }}"><a href="/{{ who }}">{{ who }}</a></li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</aside>

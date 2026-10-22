@@ -2,12 +2,15 @@
 {% block content %}
 {% include "repo/header.html" %}
 <h2>Compare changes</h2>
-<form method="get" action="/{{ repo.owner }}/{{ repo.name }}/compare" class="form form-inline compare-form">
+<form method="get" action="/{{ repo.owner }}/{{ repo.name }}/compare" class="form form-inline compare-form" data-autosubmit>
+  {% if base_repos.len() > 1 %}<label class="inline-label">base repository <select name="base_repo">{% for r in base_repos %}<option{% if *r == base_repo %} selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>{% endif %}
   <label class="inline-label">base <select name="base">{% for b in branches %}<option{% if *b == base %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
   <span aria-hidden="true">←</span>
-  <label class="inline-label">compare <select name="head">{% for b in branches %}<option{% if *b == head %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
+  {% if head_repos.len() > 1 %}<label class="inline-label">head repository <select name="head_repo" data-resets="head">{% for r in head_repos %}<option{% if *r == head_repo %} selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>{% endif %}
+  <label class="inline-label">compare <select name="head">{% for b in head_branches %}<option{% if *b == head %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
   <button class="btn">Compare</button>
 </form>
+{% if head_repos.len() == 1 && repo.parent.is_none() %}<p class="muted small">To propose changes without write access, <a href="/{{ repo.owner }}/{{ repo.name }}/fork">fork this repository</a>, push a branch to your fork and compare it here.</p>{% endif %}
 
 {% if let Some(n) = notice %}
 <p class="empty">{{ n }}</p>
@@ -20,7 +23,7 @@
     {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
     <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/pulls" class="form">
       <input type="hidden" name="base" value="{{ base }}">
-      <input type="hidden" name="head" value="{{ head }}">
+      <input type="hidden" name="head" value="{{ head_label }}">
       <label>Title <input name="title" value="{{ title }}" maxlength="256" required></label>
       <label>Description <textarea name="body" rows="8" placeholder="What does this change and why? Markdown is supported.">{{ body }}</textarea></label>
       <button class="btn btn-primary">Create pull request</button>

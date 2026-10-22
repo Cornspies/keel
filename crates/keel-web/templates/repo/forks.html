@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<h2>Forks</h2>
+{% if forks.is_empty() %}
+<p class="empty">No forks yet.</p>
+{% else %}
+<ul class="card-list">{% for r in forks %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+{% endblock %}

@@ -43,11 +43,37 @@ pub struct Comment {
     pub issue_id: i64,
     pub author_id: Option<i64>,
     pub author: Option<String>,
-    /// `comment`, or an event: `closed`, `reopened`, `merged`.
+    /// `comment`, `inline` (on a line of a pull request's diff), a review
+    /// verdict (`approved`, `changes_requested`) or an event: `closed`,
+    /// `reopened`, `merged`, `labeled`, `unlabeled`, `assigned`,
+    /// `unassigned` (the body is the label or user name).
     pub kind: String,
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Where an inline comment was made; see [`crate::InlineAnchor`].
+    pub path: Option<String>,
+    pub side: Option<String>,
+    pub line: Option<i64>,
+    pub commit_id: Option<String>,
+    pub blob_id: Option<String>,
+    pub hunk: Option<String>,
+    /// The inline comment this one replies to.
+    pub reply_to: Option<i64>,
+}
+
+impl Comment {
+    /// Comments the author may edit and delete (not events).
+    pub fn is_editable(&self) -> bool {
+        matches!(self.kind.as_str(), "comment" | "inline")
+    }
+}
+
+/// Which issues a list shows besides open/closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IssueFilter {
+    pub label: Option<i64>,
+    pub assignee: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,10 +93,18 @@ macro_rules! issue_select {
     };
 }
 
+/// SQL condition for an [`IssueFilter`] in parameters `?6` and `?7`.
+macro_rules! filtered {
+    () => {
+        "(?6 IS NULL OR EXISTS (SELECT 1 FROM issue_labels l WHERE l.issue_id = i.id AND l.label_id = ?6))
+         AND (?7 IS NULL OR EXISTS (SELECT 1 FROM issue_assignees a WHERE a.issue_id = i.id AND a.user_id = ?7))"
+    };
+}
+
 macro_rules! comment_select {
     () => {
         "SELECT c.id, c.issue_id, c.author_id, u.username AS author, c.kind, c.body,
-            c.created_at, c.updated_at
+            c.created_at, c.updated_at, c.path, c.side, c.line, c.commit_id, c.blob_id, c.hunk, c.reply_to
          FROM comments c LEFT JOIN users u ON u.id = c.author_id "
     };
 }
@@ -85,7 +119,7 @@ fn validate(title: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_comment(body: &str) -> Result<()> {
+pub(crate) fn validate_comment(body: &str) -> Result<()> {
     if body.trim().is_empty() {
         return invalid("Write something first.");
     }
@@ -123,7 +157,7 @@ pub(crate) async fn insert_issue(
     .await?)
 }
 
-/// Adds a timeline entry and bumps the issue's counters.
+/// Adds a timeline entry and updates the issue's counters.
 pub(crate) async fn insert_comment(
     conn: &mut SqliteConnection,
     issue_id: i64,
@@ -131,7 +165,6 @@ pub(crate) async fn insert_comment(
     kind: &str,
     body: &str,
 ) -> Result<i64> {
-    let now = now();
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
@@ -140,18 +173,27 @@ pub(crate) async fn insert_comment(
     .bind(author_id)
     .bind(kind)
     .bind(body.trim_end())
-    .bind(now)
+    .bind(now())
     .fetch_one(&mut *conn)
     .await?;
+    touch(conn, issue_id).await?;
+    Ok(id)
+}
+
+/// Bumps `updated_at` and recounts the comments of an issue: everything
+/// people wrote, but not events or review verdicts without text.
+pub(crate) async fn touch(conn: &mut SqliteConnection, issue_id: i64) -> Result<()> {
     sqlx::query(
-        "UPDATE issues SET updated_at = ?2, comment_count = comment_count + (?3 = 'comment') WHERE id = ?1",
+        "UPDATE issues SET updated_at = ?2, comment_count = (
+            SELECT COUNT(*) FROM comments WHERE issue_id = ?1 AND (kind IN ('comment', 'inline')
+                OR (kind IN ('approved', 'changes_requested') AND body != '')))
+         WHERE id = ?1",
     )
     .bind(issue_id)
-    .bind(now)
-    .bind(kind)
+    .bind(now())
     .execute(conn)
     .await?;
-    Ok(id)
+    Ok(())
 }
 
 impl Core {
@@ -177,20 +219,42 @@ impl Core {
         repo_id: i64,
         pulls: bool,
         open: bool,
+        filter: IssueFilter,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Issue>> {
         Ok(sqlx::query_as(concat!(
             issue_select!(),
-            "WHERE i.repo_id = ?1 AND i.is_pull = ?2 AND ((i.state = 'open') = ?3)
-             ORDER BY i.number DESC LIMIT ?4 OFFSET ?5"
+            "WHERE i.repo_id = ?1 AND i.is_pull = ?2 AND ((i.state = 'open') = ?3) AND ",
+            filtered!(),
+            " ORDER BY i.number DESC LIMIT ?4 OFFSET ?5"
         ))
         .bind(repo_id)
         .bind(pulls)
         .bind(open)
         .bind(limit)
         .bind(offset)
+        .bind(filter.label)
+        .bind(filter.assignee)
         .fetch_all(&self.db)
+        .await?)
+    }
+
+    /// Open and closed counts for a filtered list.
+    pub async fn filtered_counts(&self, repo_id: i64, pulls: bool, filter: IssueFilter) -> Result<(i64, i64)> {
+        Ok(sqlx::query_as(concat!(
+            "SELECT COALESCE(SUM(i.state = 'open'), 0), COALESCE(SUM(i.state != 'open'), 0)
+             FROM issues i WHERE i.repo_id = ?1 AND i.is_pull = ?2 AND ?3 = ?3 AND ?4 = ?4 AND ?5 = ?5 AND ",
+            filtered!()
+        ))
+        .bind(repo_id)
+        .bind(pulls)
+        .bind(0)
+        .bind(0)
+        .bind(0)
+        .bind(filter.label)
+        .bind(filter.assignee)
+        .fetch_one(&self.db)
         .await?)
     }
 
@@ -268,7 +332,7 @@ impl Core {
 
     pub async fn edit_comment(&self, comment: &Comment, body: &str) -> Result<()> {
         validate_comment(body)?;
-        sqlx::query("UPDATE comments SET body = ?2, updated_at = ?3 WHERE id = ?1 AND kind = 'comment'")
+        sqlx::query("UPDATE comments SET body = ?2, updated_at = ?3 WHERE id = ?1 AND kind IN ('comment', 'inline')")
             .bind(comment.id)
             .bind(body.trim_end())
             .bind(now())
@@ -277,18 +341,14 @@ impl Core {
         Ok(())
     }
 
+    /// Deletes a comment; for an inline comment, with its replies.
     pub async fn delete_comment(&self, comment: &Comment) -> Result<()> {
         let mut tx = self.db.begin().await?;
-        let done = sqlx::query("DELETE FROM comments WHERE id = ?1 AND kind = 'comment'")
+        sqlx::query("DELETE FROM comments WHERE id = ?1 AND kind IN ('comment', 'inline')")
             .bind(comment.id)
             .execute(&mut *tx)
             .await?;
-        if done.rows_affected() > 0 {
-            sqlx::query("UPDATE issues SET comment_count = comment_count - 1 WHERE id = ?1")
-                .bind(comment.issue_id)
-                .execute(&mut *tx)
-                .await?;
-        }
+        touch(&mut tx, comment.issue_id).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -324,8 +384,19 @@ mod tests {
 
         let counts = core.issue_counts(repo.id).await.unwrap();
         assert_eq!((counts.open_issues, counts.closed_issues), (1, 1));
-        assert_eq!(core.issues(repo.id, false, true, 0, 10).await.unwrap()[0].number, 2);
-        assert_eq!(core.issues(repo.id, false, false, 0, 10).await.unwrap()[0].number, 1);
+        let all = IssueFilter::default();
+        assert_eq!(core.issues(repo.id, false, true, all, 0, 10).await.unwrap()[0].number, 2);
+        assert_eq!(core.issues(repo.id, false, false, all, 0, 10).await.unwrap()[0].number, 1);
+        assert_eq!(core.filtered_counts(repo.id, false, all).await.unwrap(), (1, 1));
+        let bug = core.label_by_name(repo.id, "bug").await.unwrap().unwrap();
+        core.set_issue_labels(&first, &ada, &[bug.id]).await.unwrap();
+        let bugs = IssueFilter { label: Some(bug.id), ..all };
+        assert_eq!(core.filtered_counts(repo.id, false, bugs).await.unwrap(), (0, 1));
+        assert_eq!(core.issues(repo.id, false, false, bugs, 0, 10).await.unwrap()[0].number, 1);
+        assert!(core.issues(repo.id, false, true, bugs, 0, 10).await.unwrap().is_empty());
+        core.set_assignees(&repo, &second, &ada, &[ada.id]).await.unwrap();
+        let mine = IssueFilter { assignee: Some(ada.id), ..all };
+        assert_eq!(core.filtered_counts(repo.id, false, mine).await.unwrap(), (1, 0));
 
         let comment = core.comment(first.id, c).await.unwrap().unwrap();
         core.edit_comment(&comment, "Thanks a lot!").await.unwrap();

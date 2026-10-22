@@ -10,6 +10,37 @@
     </div>
     <article class="markdown comment-body">{{ item.body_html|safe }}</article>
   </div>
+  {% else if item.kind == "inline" %}
+  {% if let Some(t) = item.thread %}
+  <div class="event event-review" id="event-{{ item.id }}">
+    <span class="state-dot state-review" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> commented on <a class="mono" href="#thread-{{ t.id }}">{{ t.path }}</a> <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  <div class="box thread-box">{% include "pulls/thread.html" %}</div>
+  {% endif %}
+  {% else if item.kind == "approved" || item.kind == "changes_requested" %}
+  <div class="event event-{{ item.kind }}" id="comment-{{ item.id }}">
+    <span class="state-dot state-{{ item.kind }}" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "approved" %}approved these changes{% else %}requested changes{% endif %} <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  {% if !item.body_html.is_empty() %}<div class="box comment review-comment"><article class="markdown comment-body">{{ item.body_html|safe }}</article></div>{% endif %}
+  {% else if item.kind == "labeled" || item.kind == "unlabeled" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-label" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "labeled" %}added{% else %}removed{% endif %}
+    {% if let Some(l) = item.label %}<a class="label label-{{ l.color }}" href="{{ l.url }}">{{ l.name }}</a>{% endif %}
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  {% else if item.kind == "assigned" || item.kind == "unassigned" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-label" aria-hidden="true"></span>
+    {% if item.target == item.author %}
+    <strong>{{ item.author }}</strong> {% if item.kind == "assigned" %}self-assigned this{% else %}removed their assignment{% endif %}
+    {% else %}
+    <strong>{{ item.author }}</strong> {{ item.kind }} <strong>{{ item.target }}</strong>
+    {% endif %}
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
   {% else %}
   <div class="event" id="event-{{ item.id }}">
     <span class="state-dot state-{% if item.kind == "reopened" %}open{% else %}{{ item.kind }}{% endif %}" aria-hidden="true"></span>

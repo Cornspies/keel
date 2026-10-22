@@ -40,6 +40,9 @@ pub struct FileDiff {
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub status: DiffStatus,
+    /// Blob ids of the two sides (`None` for an added or deleted side).
+    pub old_id: Option<Oid>,
+    pub new_id: Option<Oid>,
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
@@ -81,6 +84,24 @@ impl GitRepo {
     /// Diff between two commits (`old` = `None` for the empty tree), with
     /// the same bounds as [`diff_commit`](Self::diff_commit).
     pub fn diff_range(&self, old: Option<Oid>, new: Oid, max_files: usize, max_lines: usize) -> Result<CommitDiff> {
+        self.diff_filtered(old, new, max_files, max_lines, None)
+    }
+
+    /// One file of [`diff_range`](Self::diff_range), by its displayed path.
+    /// Renames are detected across the whole diff first, so the file looks
+    /// exactly as it does there.
+    pub fn diff_file(&self, old: Option<Oid>, new: Oid, path: &str, max_lines: usize) -> Result<Option<FileDiff>> {
+        Ok(self.diff_filtered(old, new, 1, max_lines, Some(path))?.files.pop())
+    }
+
+    fn diff_filtered(
+        &self,
+        old: Option<Oid>,
+        new: Oid,
+        max_files: usize,
+        max_lines: usize,
+        only: Option<&str>,
+    ) -> Result<CommitDiff> {
         let new_tree = self.repo.find_commit(new)?.tree()?;
         let old_tree = match old {
             Some(c) => Some(self.repo.find_commit(c)?.tree()?),
@@ -100,6 +121,16 @@ impl GitRepo {
             if out.files.len() == max_files {
                 out.truncated = true;
                 break;
+            }
+            if let Some(only) = only {
+                let delta = diff.get_delta(idx).expect("index in range");
+                let shown = match delta.status() {
+                    Delta::Deleted => delta.old_file(),
+                    _ => delta.new_file(),
+                };
+                if shown.path_bytes() != Some(only.as_bytes()) {
+                    continue;
+                }
             }
             let Some(patch) = Patch::from_diff(&diff, idx)? else {
                 continue;
@@ -172,7 +203,10 @@ fn file_diff(patch: &Patch<'_>, budget: &mut usize) -> Result<FileDiff> {
         }
     }
 
+    let id = |f: git2::DiffFile<'_>| Some(f.id()).filter(|id| !id.is_zero());
     Ok(FileDiff {
+        old_id: (status != DiffStatus::Added).then(|| id(delta.old_file())).flatten(),
+        new_id: (status != DiffStatus::Deleted).then(|| id(delta.new_file())).flatten(),
         old_path,
         new_path,
         status,
@@ -219,6 +253,12 @@ mod tests {
         assert_eq!(renamed.status, DiffStatus::Renamed);
         assert_eq!(renamed.old_path.as_deref(), Some("old.txt"));
         assert!(d.files.iter().find(|f| f.path() == "bin.dat").unwrap().binary);
+
+        assert!(renamed.old_id.is_some() && renamed.new_id.is_some());
+
+        let one = repo.diff_file(Some(root), c, "new.txt", 1000).unwrap().unwrap();
+        assert_eq!(one.status, DiffStatus::Renamed, "rename detection still applies");
+        assert!(repo.diff_file(Some(root), c, "old.txt", 1000).unwrap().is_none());
 
         let d = repo.diff_commit(c, 1, 1000).unwrap();
         assert!(d.truncated);

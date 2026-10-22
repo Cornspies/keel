@@ -49,3 +49,43 @@ if (files) {
       }
     });
 }
+
+// Inline review comments: open the comment form below a diff line in place
+// instead of reloading the page (the link works without JavaScript too).
+const inlineTemplate = document.getElementById("inline-form-template");
+document.addEventListener("click", (event) => {
+  const add = event.target.closest(".add-comment");
+  if (add && inlineTemplate) {
+    event.preventDefault();
+    const key = `${add.dataset.side}:${add.dataset.line}:${add.dataset.path}`;
+    let row = add.closest("tr");
+    // Below the line's existing threads, unless a form is already open.
+    while (row.nextElementSibling?.classList.contains("thread-row")) {
+      row = row.nextElementSibling;
+      const open = row.querySelector(".inline-form");
+      if (open?.dataset.for === key) return open.elements.body.focus();
+    }
+    const form = inlineTemplate.content.firstElementChild.cloneNode(true);
+    form.dataset.for = key;
+    for (const key of ["path", "side", "line"]) form.elements[key].value = add.dataset[key];
+    const cell = Object.assign(document.createElement("td"), { colSpan: 3 });
+    const tr = Object.assign(document.createElement("tr"), { className: "thread-row" });
+    cell.append(form);
+    tr.append(cell);
+    row.after(tr);
+    form.elements.body.focus();
+    return;
+  }
+  const cancel = event.target.closest(".inline-form [data-cancel]");
+  if (cancel) cancel.closest("tr").remove();
+});
+
+// Forms that update as soon as a choice changes (the compare page).
+for (const form of document.querySelectorAll("form[data-autosubmit]")) {
+  form.addEventListener("change", (event) => {
+    // A branch of another repository doesn't exist in the new one.
+    const reset = event.target.dataset.resets;
+    if (reset) form.elements[reset].disabled = true;
+    form.submit();
+  });
+}

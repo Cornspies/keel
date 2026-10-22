@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::labels::insert_default_labels;
 use crate::{Core, Error, Result, User, invalid, now, validate_repo_name};
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -13,13 +14,15 @@ pub struct Repo {
     pub is_private: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The repository this one was forked from, if it still exists.
+    pub forked_from: Option<i64>,
 }
 
 // A macro rather than a const so queries stay `&'static str` via `concat!`.
 macro_rules! repo_select {
     () => {
         "SELECT r.id, r.owner_id, u.username AS owner, r.name, r.description,
-            r.is_private, r.created_at, r.updated_at
+            r.is_private, r.created_at, r.updated_at, r.forked_from
          FROM repositories r JOIN users u ON u.id = r.owner_id "
     };
 }
@@ -46,32 +49,63 @@ impl Core {
         description: &str,
         is_private: bool,
     ) -> Result<Repo> {
+        self.insert_repo(owner, name, description, is_private, None).await
+    }
+
+    /// Forks `source` into `owner`'s account as `name`. Forks of private
+    /// repositories are private.
+    pub async fn fork_repo(&self, source: &Repo, owner: &User, name: &str) -> Result<Repo> {
+        if owner.id == source.owner_id {
+            return invalid("A repository can't be forked into the account that owns it.");
+        }
+        let fork = self
+            .insert_repo(owner, name, &source.description, source.is_private, Some(source))
+            .await?;
+        // Index, warm caches and write the commit-graph like after a push.
+        self.after_push(fork.id, None).await?;
+        Ok(fork)
+    }
+
+    async fn insert_repo(
+        &self,
+        owner: &User,
+        name: &str,
+        description: &str,
+        is_private: bool,
+        fork_of: Option<&Repo>,
+    ) -> Result<Repo> {
         let name = name.trim();
         validate_repo_name(name)?;
         let mut tx = self.db.begin().await?;
         let now = now();
         let inserted = sqlx::query_as::<_, (i64,)>(
-            "INSERT INTO repositories (owner_id, name, description, is_private, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
+            "INSERT INTO repositories (owner_id, name, description, is_private, created_at, updated_at, forked_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6) RETURNING id",
         )
         .bind(owner.id)
         .bind(name)
         .bind(description.trim())
         .bind(is_private)
         .bind(now)
+        .bind(fork_of.map(|r| r.id))
         .fetch_one(&mut *tx)
         .await;
         let (id,) = match inserted {
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-                return invalid(format!("You already have a repository named “{name}”."));
+                return invalid(format!("{} already has a repository named “{name}”.", owner.username));
             }
             r => r?,
         };
+        insert_default_labels(&mut tx, id).await?;
         // Create on disk inside the transaction so a failure leaves no row.
         let path = self.config.repo_path(id);
-        tokio::task::spawn_blocking(move || keel_git::create_bare(&path, "main"))
-            .await
-            .map_err(anyhow::Error::from)??;
+        let source = fork_of.map(|r| self.repo_path(r));
+        tokio::task::spawn_blocking(move || match source {
+            Some(source) => keel_git::fork(&source, &path),
+            None => keel_git::create_bare(&path, "main"),
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
         tx.commit().await?;
         Ok(Repo {
             id,
@@ -82,7 +116,31 @@ impl Core {
             is_private,
             created_at: now,
             updated_at: now,
+            forked_from: fork_of.map(|r| r.id),
         })
+    }
+
+    /// Forks of `repo` visible to `viewer`, most recently pushed first.
+    pub async fn forks_of(&self, repo_id: i64, viewer: Option<&User>) -> Result<Vec<Repo>> {
+        Ok(sqlx::query_as(concat!(
+            repo_select!(),
+            "WHERE r.forked_from = ?1 AND ",
+            visible_to!(),
+            " ORDER BY r.updated_at DESC"
+        ))
+        .bind(repo_id)
+        .bind(viewer.map_or(-1, |u| u.id))
+        .bind(viewer.is_some_and(|u| u.is_admin))
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn fork_count(&self, repo_id: i64) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM repositories WHERE forked_from = ?1")
+            .bind(repo_id)
+            .fetch_one(&self.db)
+            .await?;
+        Ok(n)
     }
 
     /// Looks up `owner/name` (case-insensitively).
@@ -167,6 +225,16 @@ impl Core {
     }
 
     pub async fn update_repo(&self, repo_id: i64, description: &str, is_private: bool) -> Result<()> {
+        let (parent_private,): (bool,) = sqlx::query_as(
+            "SELECT COALESCE((SELECT p.is_private FROM repositories r JOIN repositories p ON p.id = r.forked_from
+                              WHERE r.id = ?1), 0)",
+        )
+        .bind(repo_id)
+        .fetch_one(&self.db)
+        .await?;
+        if parent_private && !is_private {
+            return invalid("Forks of private repositories stay private.");
+        }
         sqlx::query("UPDATE repositories SET description = ?2, is_private = ?3 WHERE id = ?1")
             .bind(repo_id)
             .bind(description.trim())
@@ -253,5 +321,35 @@ mod tests {
         core.delete_repo(&public).await.unwrap();
         assert!(!core.repo_path(&public).exists());
         assert!(core.repo("ada", "engine").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn forks() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let eve = core.register("eve", "eve@example.com", "password1").await.unwrap();
+        let engine = core.create_repo(&ada, "engine", "Analytical", false).await.unwrap();
+        let secret = core.create_repo(&ada, "secret", "", true).await.unwrap();
+
+        assert!(core.fork_repo(&engine, &ada, "engine2").await.is_err(), "same owner");
+        let fork = core.fork_repo(&engine, &bob, "engine").await.unwrap();
+        assert_eq!((fork.forked_from, fork.description.as_str()), (Some(engine.id), "Analytical"));
+        assert!(core.repo_path(&fork).join("HEAD").exists());
+        assert!(core.fork_repo(&engine, &bob, "engine").await.is_err(), "name taken");
+        assert_eq!(core.fork_count(engine.id).await.unwrap(), 1);
+        assert_eq!(core.forks_of(engine.id, None).await.unwrap().len(), 1);
+        assert_eq!(core.labels(fork.id).await.unwrap().len(), 6, "default labels");
+
+        // Forks of private repositories stay private.
+        let private_fork = core.fork_repo(&secret, &bob, "secret").await.unwrap();
+        assert!(private_fork.is_private);
+        assert!(core.forks_of(secret.id, Some(&eve)).await.unwrap().is_empty());
+        assert!(core.update_repo(private_fork.id, "", false).await.is_err());
+        core.update_repo(fork.id, "", true).await.unwrap();
+
+        // Deleting the parent detaches its forks.
+        core.delete_repo(&engine).await.unwrap();
+        assert_eq!(core.repo_by_id(fork.id).await.unwrap().unwrap().forked_from, None);
     }
 }

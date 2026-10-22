@@ -19,7 +19,7 @@ pub use read::{
 };
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
-pub use store::{create_bare, run_maintenance};
+pub use store::{create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 
 pub use git2::Oid;

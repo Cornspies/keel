@@ -21,12 +21,18 @@
   <p class="blob-note">No content changes.</p>
   {% else %}
   <div class="code-scroll">
-    <table class="code diff">
+    <table class="code diff{% if inline.is_some() %} reviewable{% endif %}">
       <tbody>
       {% for h in f.hunks %}
         <tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="lc">{{ h.header }}</td></tr>
         {% for l in h.lines %}
-        <tr class="{{ l.class }}"><td class="ln">{{ l.old }}</td><td class="ln">{{ l.new }}</td><td class="lc">{{ l.content }}</td></tr>
+        <tr class="{{ l.class }}"{% if !l.anchor.is_empty() %} id="{{ l.anchor }}"{% endif %}><td class="ln">{{ l.old }}</td><td class="ln">{{ l.new }}</td><td class="lc">{% if let Some(ic) = inline %}{% if ic.can_comment && !l.side.is_empty() %}<a class="add-comment" href="?comment={{ l.anchor }}#{{ l.anchor }}" data-path="{{ f.path }}" data-side="{{ l.side }}" data-line="{{ l.line }}" title="Comment on this line" aria-label="Comment on line {{ l.line }}">+</a>{% endif %}{% endif %}{{ l.content }}</td></tr>
+        {% for t in l.threads %}
+        <tr class="thread-row"><td colspan="3">{% include "pulls/thread.html" %}</td></tr>
+        {% endfor %}
+        {% if let Some(ic) = inline %}{% if ic.can_comment && !l.anchor.is_empty() && ic.form_at == l.anchor %}
+        <tr class="thread-row"><td colspan="3">{% include "pulls/inline_form.html" %}</td></tr>
+        {% endif %}{% endif %}
         {% endfor %}
       {% endfor %}
       </tbody>

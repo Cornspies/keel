@@ -197,6 +197,72 @@ check "global search hides private repos" bash -c "! curl -s -b '$T/eve' '$B/sea
 check "collaborators find private code" contains "$(curl -s -b "$T/bob" "$B/search?q=fn+main")" "ada/secret"
 check "short queries are explained" contains "$(curl -s "$B/search?q=fn")" "at least 3"
 
+echo "== forks"
+check "bob forks ada/engine" is "$(post "$T/bob" /ada/engine/fork owner=bob name=engine)" 303
+check "fork names its parent" contains "$(curl -s "$B/bob/engine")" "forked from"
+check "forks are listed" contains "$(curl -s "$B/ada/engine/forks")" "bob/<strong>engine"
+check "can't fork into the same account" contains "$(curl -s -b "$T/bob" -H "$O" -d "owner=bob&name=engine2" "$B/bob/engine/fork")" "forked into the account"
+check "fork a private repo" is "$(post "$T/bob" /ada/secret/fork owner=bob name=secret)" 303
+check "forks of private repos are private" is "$(status -b "$T/eve" "$B/bob/secret")" 404
+check "and stay private" contains "$(curl -s -b "$T/bob" -H "$O" -d "description=" "$B/bob/secret/settings")" "stay private"
+BOB_FORK="http://bob:password-bob@127.0.0.1:$HTTP_PORT/bob/engine.git"
+BOB_GIT="git -C $T/fork -c user.name=Bob -c user.email=bob@example.com"
+check "clone the fork" git clone -q "$BOB_FORK" "$T/fork"
+echo "from bob" >"$T/fork/bob.txt" && $BOB_GIT add -A && $BOB_GIT commit -qm "Add bob.txt"
+check "push a branch to the fork" $BOB_GIT push -q origin HEAD:topic
+check "compare across forks" contains "$(curl -s "$B/ada/engine/compare/main...bob/engine:topic")" "Add bob.txt"
+check "compare form picks the fork" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/compare?base=main&head_repo=bob/engine&head=topic")" "$B/ada/engine/compare/main...bob/engine:topic"
+check "open a pull request from the fork" is "$(post "$T/bob" /ada/engine/pulls base=main head=bob/engine:topic title="From the fork")" 303
+FPR=$(curl -s "$B/ada/engine/pulls" | grep -o 'href="/ada/engine/pull/[0-9]*"' | head -1 | grep -o '[0-9]*')
+check "pull request names the fork's branch" contains "$(curl -s "$B/ada/engine/pull/$FPR")" "bob:topic"
+echo "more" >>"$T/fork/bob.txt" && $BOB_GIT commit -qam "More from bob"
+$BOB_GIT push -q origin HEAD:topic
+check "pushing to the fork updates the pull request" eventually_contains "$B/ada/engine/pull/$FPR/commits" "More from bob"
+check "the fork's commits are fetchable from the base" git -C "$T/c1" fetch -q origin "refs/pull/$FPR/head"
+
+echo "== labels and assignees"
+check "repos start with labels" contains "$(curl -s "$B/ada/engine/labels")" "good first issue"
+check "readers can't create labels" is "$(post "$T/bob" /ada/engine/labels name=perf color=orange)" 403
+check "create a label" is "$(post "$T/ada" /ada/engine/labels name=perf color=orange description=Speed)" 303
+check "unknown colors are rejected" contains "$(curl -s -b "$T/ada" -H "$O" -d "name=x&color=chartreuse" "$B/ada/engine/labels")" "Choose one of the colors"
+LBUG=$(curl -s -b "$T/ada" "$B/ada/engine/labels" | grep -o 'labels/[0-9]*/delete' | head -1 | grep -o '[0-9]*')
+check "readers can't label issues" is "$(post "$T/bob" /ada/engine/issues/1/labels "label=$LBUG")" 403
+check "label an issue" is "$(post "$T/ada" /ada/engine/issues/1/labels "label=$LBUG")" 303
+check "label shows on the issue" contains "$(curl -s "$B/ada/engine/issues/1")" 'class="label label-red"'
+check "labeling is in the timeline" contains "$(curl -s "$B/ada/engine/issues/1")" "added"
+check "filter by label" contains "$(curl -s "$B/ada/engine/issues?state=open&label=bug")" "It crashes on start"
+check "filter leaves others out" bash -c "! curl -s '$B/ada/engine/issues?label=question' | grep -q 'It crashes'"
+ADA_ID=$(curl -s -b "$T/ada" "$B/ada/engine/issues/1" | grep -o 'name="user" value="[0-9]*"' | head -1 | grep -o '[0-9]*')
+check "ada self-assigns" is "$(post "$T/ada" /ada/engine/issues/1/assignees "user=$ADA_ID")" 303
+check "assignment is in the timeline" contains "$(curl -s "$B/ada/engine/issues/1")" "self-assigned this"
+check "filter by assignee" contains "$(curl -s "$B/ada/engine/issues?assignee=ada")" "It crashes on start"
+
+echo "== code review"
+FILES=$(curl -s -b "$T/ada" "$B/ada/engine/pull/$FPR/files")
+HEAD=$(grep -o 'name="head" value="[0-9a-f]*"' <<<"$FILES" | head -1 | cut -d'"' -f4)
+check "diff lines offer comments" contains "$FILES" 'class="add-comment"'
+check "comment on a line" is "$(post "$T/ada" /ada/engine/pull/$FPR/comments path=bob.txt side=new line=1 "head=$HEAD" body="Why bob?")" 303
+check "comment shows in the diff" contains "$(curl -s "$B/ada/engine/pull/$FPR/files")" "Why bob?"
+check "and in the conversation, with context" contains "$(curl -s "$B/ada/engine/pull/$FPR")" "from bob"
+check "comments on a stale diff are refused" is "$(post "$T/ada" /ada/engine/pull/$FPR/comments path=bob.txt side=new line=1 head=0000000000000000000000000000000000000000 body=x)" 400
+check "comments outside the diff are refused" is "$(post "$T/ada" /ada/engine/pull/$FPR/comments path=README.md side=new line=1 "head=$HEAD" body=x)" 400
+THREAD=$(curl -s "$B/ada/engine/pull/$FPR" | grep -o 'id="thread-[0-9]*"' | head -1 | grep -o '[0-9]*')
+check "reply in the thread" is "$(post "$T/bob" /ada/engine/pull/$FPR/comments/$THREAD/reply body="Because." back=files)" 303
+check "reply shows in the diff" contains "$(curl -s "$B/ada/engine/pull/$FPR/files")" "Because."
+check "authors can't approve their own pull request" is "$(post "$T/bob" /ada/engine/pull/$FPR/review verdict=approve)" 400
+check "request changes" is "$(post "$T/ada" /ada/engine/pull/$FPR/review verdict=request_changes body="Needs a test")" 303
+check "review is in the conversation" contains "$(curl -s "$B/ada/engine/pull/$FPR")" "requested changes"
+echo "changed" >"$T/fork/bob.txt" && $BOB_GIT commit -qam "Change bob.txt"
+$BOB_GIT push -q origin HEAD:topic
+check "changing the line outdates the comment" eventually_contains "$B/ada/engine/pull/$FPR" "Outdated"
+check "approve" is "$(post "$T/ada" /ada/engine/pull/$FPR/review verdict=approve)" 303
+check "approval shows in the merge box" contains "$(curl -s "$B/ada/engine/pull/$FPR")" "approved these changes"
+check "merge the fork's pull request" is "$(post "$T/ada" /ada/engine/pull/$FPR/merge style=merge delete_branch=on)" 303
+check "it is merged" contains "$(curl -s "$B/ada/engine/pull/$FPR")" "merged 3 commits into"
+check "main has the fork's change" is "$(curl -s "$B/ada/engine/raw/main/bob.txt")" changed
+# ada is the site admin (the first account), so may delete the fork's branch.
+check "fork branch was deleted" is "$(git ls-remote "$BOB_FORK" refs/heads/topic 2>/dev/null | wc -l)" 0
+
 echo "== account"
 check "wrong current password is rejected" contains "$(curl -s -b "$T/bob" -H "$O" -d "current=nope&new=password-new&confirm=password-new" "$B/settings/account/password")" "incorrect"
 check "change password" is "$(post "$T/bob" /settings/account/password current=password-bob new=password-new confirm=password-new)" 303
@@ -206,6 +272,7 @@ echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
+    /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /org/acme/settings /settings/account /settings/keys /settings/tokens; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200

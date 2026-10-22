@@ -1,0 +1,31 @@
+<div class="thread{% if t.outdated %} outdated{% endif %}" id="thread-{{ t.id }}">
+  {% if !t.in_diff %}
+  <div class="thread-file">
+    <span class="mono">{{ t.path }}</span>
+    {% if t.outdated %}<span class="badge">Outdated</span>{% endif %}
+  </div>
+  {% if !t.hunk.is_empty() %}
+  <table class="code diff thread-context"><tbody>
+    {% for (class, text) in t.hunk %}<tr class="{{ class }}"><td class="lc">{{ text }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% endif %}
+  {% endif %}
+  {% for c in t.comments %}
+  <div class="thread-comment" id="comment-{{ c.id }}">
+    <div class="comment-head">
+      <span><strong><a href="/{{ c.author }}">{{ c.author }}</a></strong> <a class="muted" href="#comment-{{ c.id }}"><time title="{{ c.when_full }}">{{ c.when }}</time></a>{% if c.edited %} <span class="muted">· edited</span>{% endif %}</span>
+      <span class="spacer"></span>
+      {% if let Some(u) = c.edit_url %}<a class="btn btn-small" href="{{ u }}">Edit</a>{% endif %}
+      {% if let Some(d) = c.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}
+    </div>
+    <article class="markdown comment-body">{{ c.body_html|safe }}</article>
+  </div>
+  {% endfor %}
+  {% if t.can_reply %}
+  <form method="post" action="{{ t.reply_url }}" class="form thread-reply">
+    <input type="hidden" name="back" value="{% if t.in_diff %}files{% endif %}">
+    <textarea name="body" rows="2" placeholder="Reply…" aria-label="Reply" required></textarea>
+    <div class="row-actions"><button class="btn btn-small">Reply</button></div>
+  </form>
+  {% endif %}
+</div>

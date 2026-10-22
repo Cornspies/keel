@@ -182,6 +182,15 @@ impl GitRepo {
         })
     }
 
+    /// Opens `path` so it can also read the objects of the repository at
+    /// `other` (e.g. a fork), for comparing across repositories without
+    /// copying anything. Only this handle sees them; nothing is written.
+    pub fn open_with(path: &Path, other: &Path) -> Result<Self> {
+        let repo = Repository::open_bare(path)?;
+        repo.odb()?.add_disk_alternate(&other.join("objects").to_string_lossy())?;
+        Ok(Self { repo })
+    }
+
     pub fn has_branches(&self) -> Result<bool> {
         Ok(self.repo.branches(Some(git2::BranchType::Local))?.next().is_some())
     }

@@ -40,6 +40,49 @@ pub fn create_bare(path: &Path, default_branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Creates `dst` as a fork of the bare repository `src`: its branches,
+/// tags and HEAD, but not keel's pull request refs. Objects are hardlinked
+/// rather than copied, so forking is fast and costs almost no disk space
+/// even for large repositories, and the fork stays independent of `src`.
+pub fn fork(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        return Err(Error::Other(format!("{} already exists", dst.display())));
+    }
+    let out = Command::new("git")
+        .args(["clone", "--bare", "--local", "--quiet"])
+        .arg(src)
+        .arg(dst)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()?;
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(dst);
+        return Err(Error::Other(format!(
+            "git clone: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let finish = || -> Result<()> {
+        let repo = git2::Repository::open_bare(dst)?;
+        // The fork shouldn't know where its parent lives on disk.
+        repo.remote_delete("origin")?;
+        // An empty source has no branch for clone to copy HEAD from.
+        let source_head = git2::Repository::open_bare(src)?
+            .find_reference("HEAD")?
+            .symbolic_target()?
+            .map(str::to_owned);
+        if let Some(target) = source_head {
+            repo.set_head(&target)?;
+        }
+        drop(repo);
+        apply_config(dst)?;
+        let _ = std::fs::remove_dir_all(dst.join("hooks"));
+        Ok(())
+    };
+    finish().inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(dst);
+    })
+}
+
 /// Runs after every push. Keeps reads fast without full `git gc` runs:
 /// - points HEAD at an existing branch if it is unborn (first push was to a
 ///   branch other than the default),
@@ -119,5 +162,23 @@ mod tests {
         let repo = GitRepo::open(&bare).unwrap();
         assert_eq!(repo.default_branch().unwrap().as_deref(), Some("trunk"));
         assert!(bare.join("objects/info/commit-graphs").exists());
+
+        // Forks get branches and HEAD, not pull refs or the parent's path.
+        repo.update_ref("refs/pull/1/head", repo.branch_tip("trunk"), None).unwrap();
+        let forked = root.path().join("f.git");
+        fork(&bare, &forked).unwrap();
+        let f = GitRepo::open(&forked).unwrap();
+        assert_eq!(f.default_branch().unwrap().as_deref(), Some("trunk"));
+        assert_eq!(f.branch_tip("trunk"), repo.branch_tip("trunk"));
+        assert_eq!(f.ref_tip("refs/pull/1/head"), None);
+        assert!(f.repo.remotes().unwrap().is_empty());
+        assert!(fork(&bare, &forked).is_err(), "exists");
+
+        // Forking an empty repository keeps its default branch name.
+        let empty = root.path().join("e.git");
+        create_bare(&empty, "dev").unwrap();
+        fork(&empty, &root.path().join("ef.git")).unwrap();
+        let ef = git2::Repository::open_bare(root.path().join("ef.git")).unwrap();
+        assert_eq!(ef.find_reference("HEAD").unwrap().symbolic_target().unwrap(), Some("refs/heads/dev"));
     }
 }

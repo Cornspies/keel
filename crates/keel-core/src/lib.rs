@@ -13,10 +13,12 @@ mod auth;
 mod cache;
 mod config;
 mod issues;
+mod labels;
 mod names;
 mod permissions;
 mod pulls;
 mod repos;
+mod reviews;
 mod ssh_keys;
 mod tokens;
 mod users;
@@ -29,11 +31,13 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 
 pub use cache::EntryCommits;
 pub use config::{Config, SshConfig};
-pub use issues::{Comment, Issue, IssueCounts};
+pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
+pub use labels::{LABEL_COLORS, Label};
 pub use names::{validate_repo_name, validate_username};
 pub use permissions::{Access, OrgRole};
-pub use pulls::{PullRequest, pull_ref};
+pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::Repo;
+pub use reviews::{InlineAnchor, Verdict};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use tokens::{AccessToken, looks_like_token};
 pub use users::User;

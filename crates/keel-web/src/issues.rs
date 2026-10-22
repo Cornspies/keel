@@ -1,14 +1,18 @@
 //! Issue pages. The list, the timeline and the comment handlers are shared
 //! with pull requests, which are issues with extra data.
 
+use std::collections::{HashMap, HashSet};
+
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{Access, Issue, Repo, User};
+use keel_core::{Access, Issue, IssueFilter, Label, Repo, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
+use crate::labels::LabelView;
+use crate::pulls::{ThreadView, inline_threads};
 use crate::render::{LinkBase, datetime, markdown_with_refs, relative_time};
 use crate::repo::{RepoView, encode_path, load, with_git};
 use crate::session::{SignedIn, Viewer};
@@ -29,11 +33,20 @@ pub(crate) struct IssueRow {
     pub opened: String,
     pub opened_full: String,
     pub comments: i64,
+    pub labels: Vec<LabelView>,
+    pub assignees: Vec<String>,
 }
 
 impl IssueRow {
-    fn new(repo: &Repo, i: &Issue) -> Self {
+    fn new(repo: &Repo, i: &Issue, labels: &mut HashMap<i64, Vec<Label>>, assignees: &mut HashMap<i64, Vec<String>>) -> Self {
         Self {
+            labels: labels
+                .remove(&i.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| LabelView::new(repo, l, i.is_pull))
+                .collect(),
+            assignees: assignees.remove(&i.id).unwrap_or_default(),
             url: issue_url(repo, i),
             number: i.number,
             title: i.title.clone(),
@@ -55,10 +68,11 @@ pub(crate) fn issue_url(repo: &Repo, issue: &Issue) -> String {
     format!("/{}/{}/{kind}/{}", repo.owner, repo.name, issue.number)
 }
 
-/// One entry of the conversation: the description, a comment or an event.
+/// One entry of the conversation: the description, a comment, a review,
+/// a thread of inline comments or an event.
 pub(crate) struct TimelineItem {
     pub id: i64,
-    /// `description`, `comment`, `closed`, `reopened` or `merged`.
+    /// `description` or a comment kind (see [`keel_core::Comment`]).
     pub kind: String,
     pub author: String,
     pub when: String,
@@ -68,6 +82,12 @@ pub(crate) struct TimelineItem {
     pub can_edit: bool,
     pub edit_url: String,
     pub delete_url: Option<String>,
+    /// For `inline`: the thread this comment starts.
+    pub thread: Option<ThreadView>,
+    /// For `labeled`/`unlabeled`: the label (gray if since deleted).
+    pub label: Option<LabelView>,
+    /// For `assigned`/`unassigned`: who.
+    pub target: String,
 }
 
 /// Everything the conversation partial (`issues/conversation.html`) needs.
@@ -86,25 +106,69 @@ pub(crate) struct Conversation {
     pub can_edit: bool,
     pub is_pull: bool,
     pub base_url: String,
+    pub labels: Vec<LabelView>,
+    pub assignees: Vec<String>,
+    /// May set labels and assignees (write access).
+    pub can_triage: bool,
+    pub label_choices: Vec<(LabelView, bool)>,
+    pub assignee_choices: Vec<(i64, String, bool)>,
+    /// Pull requests: each reviewer's latest verdict.
+    pub reviews: Vec<(String, &'static str)>,
+}
+
+/// Renders comments: Markdown with `#123` and `@name` links, and relative
+/// links resolved against the default branch.
+pub(crate) struct Renderer {
+    blob: String,
+    raw: String,
+    repo_url: String,
+}
+
+impl Renderer {
+    pub(crate) async fn new(state: &AppState, repo: &Repo) -> AppResult<Self> {
+        let repo_url = format!("/{}/{}", repo.owner, repo.name);
+        let branch = with_git(state, repo, |g| Ok(g.default_branch()?.unwrap_or_else(|| "main".into()))).await?;
+        Ok(Self {
+            blob: format!("{repo_url}/blob/{}", encode_path(&branch)),
+            raw: format!("{repo_url}/raw/{}", encode_path(&branch)),
+            repo_url,
+        })
+    }
+
+    pub(crate) fn render(&self, body: &str) -> String {
+        let links = LinkBase { blob: &self.blob, raw: &self.raw, dir: "" };
+        markdown_with_refs(body, &links, &self.repo_url)
+    }
 }
 
 /// Builds the conversation of an issue or pull request for `viewer`.
+/// `placed` holds the inline threads that still attach to the current
+/// diff; the others are shown as outdated.
 pub(crate) async fn conversation(
     state: &AppState,
     repo: &Repo,
     access: Access,
     issue: &Issue,
     viewer: Option<&User>,
+    placed: Option<&HashSet<i64>>,
 ) -> AppResult<Conversation> {
     let base_url = format!("/{}/{}/issues/{}", repo.owner, repo.name, issue.number);
-    let repo_url = format!("/{}/{}", repo.owner, repo.name);
-    let branch = with_git(state, repo, |g| Ok(g.default_branch()?.unwrap_or_else(|| "main".into()))).await?;
-    let blob = format!("{repo_url}/blob/{}", encode_path(&branch));
-    let raw = format!("{repo_url}/raw/{}", encode_path(&branch));
-    let links = LinkBase { blob: &blob, raw: &raw, dir: "" };
-    let render = |body: &str| markdown_with_refs(body, &links, &repo_url);
+    let renderer = Renderer::new(state, repo).await?;
+    let render = |body: &str| renderer.render(body);
     let writer = access >= Access::Write;
     let is_author = viewer.is_some_and(|v| issue.is_author(v));
+
+    let all_labels = state.core.labels(repo.id).await?;
+    let label_view = |name: &str| match all_labels.iter().find(|l| l.name == name) {
+        Some(l) => LabelView::new(repo, l, issue.is_pull),
+        None => LabelView {
+            id: 0,
+            name: name.to_owned(),
+            color: "gray".into(),
+            description: String::new(),
+            url: crate::labels::label_url(repo, name, issue.is_pull),
+        },
+    };
 
     let mut timeline = vec![TimelineItem {
         id: 0,
@@ -121,23 +185,78 @@ pub(crate) async fn conversation(
         can_edit: is_author || writer,
         edit_url: format!("{base_url}/edit"),
         delete_url: None,
+        thread: None,
+        label: None,
+        target: String::new(),
     }];
-    for c in state.core.comments(issue.id).await? {
+    let comments = state.core.comments(issue.id).await?;
+    let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, &render)
+        .into_iter()
+        .map(|mut t| {
+            t.outdated = placed.is_some_and(|p| !p.contains(&t.id));
+            (t.id, t)
+        })
+        .collect();
+    for c in comments {
+        if c.kind == "inline" && c.reply_to.is_some() {
+            continue; // Shown in its thread.
+        }
         let mine = viewer.is_some_and(|v| c.author_id == Some(v.id));
+        let editable = c.is_editable() && (mine || writer);
         timeline.push(TimelineItem {
             id: c.id,
             author: author_name(&c.author),
             when: relative_time(c.created_at),
             when_full: datetime(c.created_at),
-            body_html: if c.kind == "comment" { render(&c.body) } else { String::new() },
+            body_html: match c.kind.as_str() {
+                "comment" | "approved" | "changes_requested" if !c.body.is_empty() => render(&c.body),
+                _ => String::new(),
+            },
             edited: c.updated_at > c.created_at,
-            can_edit: c.kind == "comment" && (mine || writer),
+            can_edit: editable,
             edit_url: format!("{base_url}/comments/{}/edit", c.id),
-            delete_url: (c.kind == "comment" && (mine || writer))
-                .then(|| format!("{base_url}/comments/{}/delete", c.id)),
+            delete_url: editable.then(|| format!("{base_url}/comments/{}/delete", c.id)),
+            thread: threads.remove(&c.id),
+            label: matches!(c.kind.as_str(), "labeled" | "unlabeled").then(|| label_view(&c.body)),
+            target: c.body,
             kind: c.kind,
         });
     }
+
+    let mut labels = state.core.labels_of(&[issue.id]).await?.remove(&issue.id).unwrap_or_default();
+    labels.sort_by(|a, b| a.name.cmp(&b.name));
+    let assignees = state.core.assignees_of(&[issue.id]).await?.remove(&issue.id).unwrap_or_default();
+    let (label_choices, assignee_choices) = if writer {
+        (
+            all_labels
+                .iter()
+                .map(|l| (LabelView::new(repo, l, issue.is_pull), labels.iter().any(|x| x.id == l.id)))
+                .collect(),
+            state
+                .core
+                .assignable_users(repo)
+                .await?
+                .into_iter()
+                .map(|u| {
+                    let on = assignees.contains(&u.username);
+                    (u.id, u.username, on)
+                })
+                .collect(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let reviews = if issue.is_pull {
+        state
+            .core
+            .review_states(issue.id)
+            .await?
+            .into_iter()
+            .map(|(user, v)| (user, v.as_str()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Conversation {
         number: issue.number,
         title: issue.title.clone(),
@@ -151,6 +270,12 @@ pub(crate) async fn conversation(
         can_edit: is_author || writer,
         is_pull: issue.is_pull,
         base_url,
+        labels: labels.iter().map(|l| LabelView::new(repo, l, issue.is_pull)).collect(),
+        assignees,
+        can_triage: writer,
+        label_choices,
+        assignee_choices,
+        reviews,
     })
 }
 
@@ -176,12 +301,37 @@ struct ListPage {
     newer_url: Option<String>,
     older_url: Option<String>,
     signed_in: bool,
+    open_url: String,
+    closed_url: String,
+    /// Label filter choices: (name, url, selected).
+    label_filters: Vec<(LabelView, String, bool)>,
+    assignee_filters: Vec<(String, String, bool)>,
+    /// The active filters, described, and a link to clear them.
+    filter_note: Option<(String, String)>,
 }
 
 #[derive(Deserialize)]
 pub struct ListQuery {
     state: Option<String>,
     page: Option<i64>,
+    label: Option<String>,
+    assignee: Option<String>,
+}
+
+/// A query string for an issue list.
+fn list_query(open: bool, label: Option<&str>, assignee: Option<&str>, page: Option<i64>) -> String {
+    let mut q = form_urlencoded::Serializer::new(String::new());
+    q.append_pair("state", if open { "open" } else { "closed" });
+    if let Some(l) = label {
+        q.append_pair("label", l);
+    }
+    if let Some(a) = assignee {
+        q.append_pair("assignee", a);
+    }
+    if let Some(p) = page {
+        q.append_pair("page", &p.to_string());
+    }
+    q.finish()
 }
 
 pub async fn list(
@@ -204,25 +354,48 @@ pub(crate) async fn list_page(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let show_open = q.state.as_deref() != Some("closed");
     let page_no = q.page.unwrap_or(1).max(1);
+
+    let all_labels = state.core.labels(repo.id).await?;
+    let label = q.label.as_deref().filter(|l| !l.is_empty());
+    // An unknown label matches nothing rather than everything.
+    let label_id = label.map(|name| all_labels.iter().find(|l| l.name.eq_ignore_ascii_case(name)).map_or(-1, |l| l.id));
+    let assignable = state.core.assignable_users(&repo).await?;
+    let assignee = q.assignee.as_deref().filter(|a| !a.is_empty());
+    let assignee_id = match assignee {
+        Some(name) => Some(state.core.user_by_name(name).await?.map_or(-1, |u| u.id)),
+        None => None,
+    };
+    let filter = IssueFilter { label: label_id, assignee: assignee_id };
+
     let mut issues = state
         .core
-        .issues(repo.id, pulls, show_open, (page_no - 1) * PER_PAGE, PER_PAGE + 1)
+        .issues(repo.id, pulls, show_open, filter, (page_no - 1) * PER_PAGE, PER_PAGE + 1)
         .await?;
     let has_more = issues.len() as i64 > PER_PAGE;
     issues.truncate(PER_PAGE as usize);
-    let counts = state.core.issue_counts(repo.id).await?;
-    let (open_count, closed_count) = if pulls {
-        (counts.open_pulls, counts.closed_pulls)
-    } else {
-        (counts.open_issues, counts.closed_issues)
-    };
+    let (open_count, closed_count) = state.core.filtered_counts(repo.id, pulls, filter).await?;
+    let ids: Vec<i64> = issues.iter().map(|i| i.id).collect();
+    let mut labels = state.core.labels_of(&ids).await?;
+    let mut assignees = state.core.assignees_of(&ids).await?;
+
     let kind = if pulls { "pulls" } else { "issues" };
-    let here = format!(
-        "/{}/{}/{kind}?state={}",
-        repo.owner,
-        repo.name,
-        if show_open { "open" } else { "closed" }
-    );
+    let here = format!("/{}/{}/{kind}", repo.owner, repo.name);
+    let url = |open: bool, label: Option<&str>, assignee: Option<&str>, page: Option<i64>| {
+        format!("{here}?{}", list_query(open, label, assignee, page))
+    };
+    let filter_note = match (label, assignee) {
+        (None, None) => None,
+        (l, a) => {
+            let mut parts = Vec::new();
+            if let Some(l) = l {
+                parts.push(format!("labeled “{l}”"));
+            }
+            if let Some(a) = a {
+                parts.push(format!("assigned to {a}"));
+            }
+            Some((parts.join(" and "), url(show_open, None, None, None)))
+        }
+    };
     let default_branch = with_git(&state, &repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
     html(ListPage {
         repo: RepoView::new(&state, &repo, access, kind, &default_branch).await?,
@@ -235,10 +408,29 @@ pub(crate) async fn list_page(
         show_open,
         open_count,
         closed_count,
-        rows: issues.iter().map(|i| IssueRow::new(&repo, i)).collect(),
-        newer_url: (page_no > 1).then(|| format!("{here}&page={}", page_no - 1)),
-        older_url: has_more.then(|| format!("{here}&page={}", page_no + 1)),
+        rows: issues.iter().map(|i| IssueRow::new(&repo, i, &mut labels, &mut assignees)).collect(),
+        newer_url: (page_no > 1).then(|| url(show_open, label, assignee, Some(page_no - 1))),
+        older_url: has_more.then(|| url(show_open, label, assignee, Some(page_no + 1))),
         signed_in: viewer.is_some(),
+        open_url: url(true, label, assignee, None),
+        closed_url: url(false, label, assignee, None),
+        label_filters: all_labels
+            .iter()
+            .map(|l| {
+                let on = label_id == Some(l.id);
+                let target = if on { None } else { Some(l.name.as_str()) };
+                (LabelView::new(&repo, l, pulls), url(show_open, target, assignee, None), on)
+            })
+            .collect(),
+        assignee_filters: assignable
+            .iter()
+            .map(|u| {
+                let on = assignee_id == Some(u.id);
+                let target = if on { None } else { Some(u.username.as_str()) };
+                (u.username.clone(), url(show_open, label, target, None), on)
+            })
+            .collect(),
+        filter_note,
     })
 }
 
@@ -332,7 +524,7 @@ async fn show_page(
     issue: &Issue,
     error: Option<String>,
 ) -> AppResult {
-    let conv = conversation(state, repo, access, issue, viewer.as_ref()).await?;
+    let conv = conversation(state, repo, access, issue, viewer.as_ref(), None).await?;
     html(IssuePage {
         repo: RepoView::new(state, repo, access, "issues", "").await?,
         page: Page::new(state, viewer, format!("{} · Issue #{} · {}/{}", issue.title, issue.number, repo.owner, repo.name)),
@@ -473,7 +665,7 @@ async fn own_comment(
         .core
         .comment(issue.id, comment_id)
         .await?
-        .filter(|c| c.kind == "comment")
+        .filter(keel_core::Comment::is_editable)
         .ok_or(AppError::NotFound)?;
     if comment.author_id != Some(user.id) && access < Access::Write {
         return Err(AppError::Forbidden);

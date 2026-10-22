@@ -11,8 +11,12 @@ One binary, one data directory, no external services.
   with diffs, branches and tags.
 - **Code search** across all repositories you can see, or within one.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
-  `@name` links, and merging with a merge commit or squash, with conflict
-  detection.
+  `@name` links, labels, assignees, and filtering by both.
+- **Code review:** pull requests from branches or forks, comments on lines of
+  the diff (with replies, marked outdated once the line changes), approvals
+  and change requests, and merging with a merge commit or squash, with
+  conflict detection.
+- **Forks** that are created instantly and share disk space with the original.
 - **People:** accounts, organizations (owners and members), per-repository
   collaborators (read/write/admin), private repositories.
 
@@ -65,8 +69,9 @@ clone URLs use it, and session cookies are marked `Secure`.
 crates/
   keel        the binary (CLI, wiring)
   keel-core   config, SQLite schema + migrations, users, organizations,
-              sessions, SSH keys, access tokens, repositories, permissions,
-              issues, pull requests, push events
+              sessions, SSH keys, access tokens, repositories and forks,
+              permissions, issues, labels, assignees, pull requests, reviews,
+              push events
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
@@ -81,9 +86,9 @@ scripts/
 ## Design notes
 
 **Pages are rendered on the server** with compile-time-checked askama
-templates. There is no frontend build. The ~50 lines of JavaScript
-only add conveniences (copy buttons, late-loaded commit info), so every page
-works without them.
+templates. There is no frontend build. The ~100 lines of JavaScript
+only add conveniences (copy buttons, late-loaded commit info, opening the
+line-comment form in place), so every page works without them.
 
 **git itself serves clones and pushes.** keel authenticates and
 authorizes, then streams request and response bodies straight into and out of
@@ -120,12 +125,32 @@ insensitively. After a push only changed files are reindexed. On git.git: the
 initial index takes 1.7 s (11 MB), a push reindexes in about 25 ms, and queries
 take 2–170 ms.
 
-**Pull requests** are branch-to-branch within a repository. Each one's head is
-kept as `refs/pull/<n>/head` (fetchable, protected from pushes), so it stays
-viewable after the branch is deleted. Merging happens without a working tree:
-`git merge-tree --write-tree`, `git commit-tree`, then `git update-ref` with the
-expected old value, so a concurrent push is never overwritten. Pushing a
-branch's commits into the base by hand marks the pull request as merged.
+**Forks** are `git clone --bare --local` copies whose objects are hardlinked,
+so forking git.git takes about 40 ms and almost no disk space, and a fork
+never depends on its parent (deleting either is safe). Forks of private
+repositories stay private.
+
+**Pull requests** come from a branch of the same repository, or of a fork of
+it (or its parent). Each one's head is kept as `refs/pull/<n>/head` in the base
+repository (fetchable, protected from pushes), so it stays viewable after the
+branch is deleted. For a fork, its commits are fetched into that ref when the
+pull request is opened and whenever the fork's branch moves (about 40 ms on
+git.git); the compare page before that reads the fork's objects through a
+temporary libgit2 alternate instead of copying anything. Merging happens
+without a working tree: `git merge-tree --write-tree`, `git commit-tree`, then
+`git update-ref` with the expected old value, so a concurrent push is never
+overwritten. Pushing a branch's commits into the base by hand marks the pull
+request as merged.
+
+**Line comments** record the file, side, line number and the blob of that side
+they were made on. While that side of the file is unchanged in the current
+diff, the line still says the same thing, so the comment is shown there;
+otherwise it's shown as outdated in the conversation, with the diff lines it
+was made on (stored with it).
+
+**Labels** come from a fixed palette of ten colors, so they read well in light
+and dark mode without inline styles (which the Content Security Policy
+forbids). New repositories start with six common labels.
 
 **Permissions:** a user's access to a repository is the highest of: admin for
 the owner, organization owners and site admins; write for organization
@@ -163,7 +188,8 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 - Strict Content Security Policy. Raw files are served with `sandbox` and
   never as `text/html`, so user content can't run scripts on keel's origin.
 - Private repositories return 404 (web) or 401 (git) to anyone who can't see
-  them, so their names don't leak.
+  them, so their names don't leak. That includes fork lists and the
+  repositories offered on the compare page.
 - Only `git-upload-pack` and `git-receive-pack` can be run over SSH.
   Repositories never run hooks, and `GIT_PROTOCOL` values are validated before
   being passed to git.
@@ -173,7 +199,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~100 end-to-end checks against a real server
+cargo build && scripts/smoke-test.sh      # ~160 end-to-end checks against a real server
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -182,8 +208,9 @@ run automatically at startup.
 
 ## Ideas
 
-- Pull requests from forks, inline review comments, labels and assignees.
 - Webhooks and notifications (the push events are already there).
+- Branch protection (e.g. require an approval before merging), review
+  requests, suggested changes in line comments, milestones.
 - An admin page (users, instance settings) and a JSON API (tokens are ready
   for it).
 - Searching other branches, and regular-expression search.

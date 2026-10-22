@@ -3,8 +3,10 @@
 
 mod assets;
 mod error;
+mod forks;
 mod githttp;
 mod issues;
+mod labels;
 mod lastcommit;
 mod orgs;
 mod pages;
@@ -165,6 +167,16 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/pull/{number}/commits", get(pulls::commits))
         .route("/{owner}/{repo}/pull/{number}/files", get(pulls::files))
         .route("/{owner}/{repo}/pull/{number}/merge", post(pulls::merge))
+        .route("/{owner}/{repo}/pull/{number}/comments", post(pulls::inline_comment))
+        .route("/{owner}/{repo}/pull/{number}/comments/{id}/reply", post(pulls::reply))
+        .route("/{owner}/{repo}/pull/{number}/review", post(pulls::review))
+        .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
+        .route("/{owner}/{repo}/forks", get(forks::list))
+        .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))
+        .route("/{owner}/{repo}/labels/{id}", post(labels::update))
+        .route("/{owner}/{repo}/labels/{id}/delete", post(labels::delete))
+        .route("/{owner}/{repo}/issues/{number}/labels", post(labels::set_issue_labels))
+        .route("/{owner}/{repo}/issues/{number}/assignees", post(labels::set_assignees))
         .route("/{owner}/{repo}/issues", get(issues::list).post(issues::create))
         .route("/{owner}/{repo}/issues/new", get(issues::new_form))
         .route("/{owner}/{repo}/issues/{number}", get(issues::show))

@@ -29,3 +29,4 @@ flate2.workspace = true
 time.workspace = true
 sha2.workspace = true
 hex.workspace = true
+form_urlencoded.workspace = true

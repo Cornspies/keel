@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <h2>Fork {{ repo.owner }}/{{ repo.name }}</h2>
+  <p class="muted">A fork is your own copy of this repository. Push changes to it, then open a pull request to propose them here.</p>
+  {% if !existing.is_empty() %}
+  <p>You already have {% if existing.len() == 1 %}a fork{% else %}forks{% endif %}:</p>
+  <ul class="card-list">{% for r in existing %}{% include "repo_card.html" %}{% endfor %}</ul>
+  {% endif %}
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  {% if owners.is_empty() %}
+  <p class="empty">You can't fork your own repository into the same account.</p>
+  {% else %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/fork" class="form">
+    <label>Name
+      <span class="prefixed">
+        {% if owners.len() > 1 %}
+        <select name="owner" aria-label="Owner" class="owner-select">
+          {% for o in owners %}<option value="{{ o }}"{% if *o == owner %} selected{% endif %}>{{ o }}</option>{% endfor %}
+        </select>
+        {% else %}
+        <span class="prefix">{{ owner }}</span><input type="hidden" name="owner" value="{{ owner }}">
+        {% endif %}
+        <span class="prefix">/</span>
+        <input name="name" value="{{ name }}" maxlength="100" pattern="[A-Za-z0-9._\-]+" required>
+      </span>
+    </label>
+    {% if repo.is_private %}<p class="hint">Forks of private repositories are private.</p>{% endif %}
+    <button class="btn btn-primary">Create fork</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

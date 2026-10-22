@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  <nav class="state-tabs">
+    <a href="/{{ repo.owner }}/{{ repo.name }}/issues">Issues</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/labels" class="active">Labels</a>
+  </nav>
+</div>
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+{% if can_edit %}
+<details class="box new-label"{% if error.is_some() %} open{% endif %}>
+  <summary class="box-head">New label</summary>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/labels" class="form form-inline label-form">
+    <input name="name" value="{{ name }}" placeholder="Name" aria-label="Name" maxlength="50" required>
+    <input name="description" value="{{ description }}" placeholder="Description (optional)" aria-label="Description" maxlength="200">
+    <select name="color" aria-label="Color">{% for c in colors %}<option value="{{ c }}"{% if *c == color %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+    <button class="btn btn-primary">Create label</button>
+  </form>
+</details>
+{% endif %}
+{% if labels.is_empty() %}
+<p class="empty">No labels yet.</p>
+{% else %}
+<ul class="card-list label-list">
+  {% for (l, open) in labels %}
+  <li class="card-row">
+    <a class="label label-{{ l.color }}" href="{{ l.url }}">{{ l.name }}</a>
+    <span class="muted small label-desc">{{ l.description }}</span>
+    <a class="muted small nowrap" href="{{ l.url }}">{{ open }} open</a>
+    {% if can_edit %}
+    <details class="dropdown label-edit">
+      <summary class="btn btn-small">Edit</summary>
+      <div class="dropdown-menu dropdown-wide">
+        <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/labels/{{ l.id }}" class="form">
+          <label>Name <input name="name" value="{{ l.name }}" maxlength="50" required></label>
+          <label>Description <input name="description" value="{{ l.description }}" maxlength="200"></label>
+          <label>Color <select name="color">{% for c in colors %}<option value="{{ c }}"{% if **c == l.color %} selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
+          <button class="btn btn-primary btn-small">Save</button>
+        </form>
+        <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/labels/{{ l.id }}/delete" class="form">
+          <button class="btn btn-small btn-danger">Delete label</button>
+        </form>
+      </div>
+    </details>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
