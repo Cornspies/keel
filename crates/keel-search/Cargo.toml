@@ -1,0 +1,13 @@
+[package]
+name = "keel-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tantivy.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

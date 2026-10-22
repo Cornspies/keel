@@ -5,7 +5,7 @@ use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{Repo, SshKey};
+use keel_core::{OrgRole, Repo, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
@@ -48,7 +48,7 @@ struct HomePage {
 
 pub async fn home(State(state): State<AppState>, Viewer(viewer): Viewer) -> AppResult {
     let mine = match &viewer {
-        Some(u) => cards(&state.core.repos_of(u.id, Some(u)).await?),
+        Some(u) => cards(&state.core.repos_for(u).await?),
         None => Vec::new(),
     };
     let recent = cards(&state.core.recent_public_repos(30).await?);
@@ -191,15 +191,40 @@ pub async fn register(State(state): State<AppState>, Form(f): Form<RegisterForm>
 struct NewRepoPage {
     page: Page,
     error: Option<String>,
+    /// Possible owners: the user, then their organizations.
+    owners: Vec<String>,
+    owner: String,
     name: String,
     description: String,
     is_private: bool,
 }
 
-pub async fn new_repo_form(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
+async fn possible_owners(state: &AppState, user: &User) -> AppResult<Vec<String>> {
+    let mut owners = vec![user.username.clone()];
+    owners.extend(state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username));
+    Ok(owners)
+}
+
+#[derive(Deserialize)]
+pub struct OwnerQuery {
+    owner: Option<String>,
+}
+
+pub async fn new_repo_form(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Query(q): Query<OwnerQuery>,
+) -> AppResult {
+    let owners = possible_owners(&state, &user).await?;
+    let owner = q
+        .owner
+        .and_then(|o| owners.iter().find(|x| x.eq_ignore_ascii_case(&o)).cloned())
+        .unwrap_or_else(|| user.username.clone());
     html(NewRepoPage {
         page: Page::new(&state, Some(user), "New repository"),
         error: None,
+        owners,
+        owner,
         name: String::new(),
         description: String::new(),
         is_private: false,
@@ -208,6 +233,7 @@ pub async fn new_repo_form(State(state): State<AppState>, SignedIn(user): Signed
 
 #[derive(Deserialize)]
 pub struct NewRepoForm {
+    owner: Option<String>,
     name: String,
     #[serde(default)]
     description: String,
@@ -220,9 +246,20 @@ pub async fn new_repo(
     Form(f): Form<NewRepoForm>,
 ) -> AppResult {
     let is_private = f.private.is_some();
-    match state.core.create_repo(&user, &f.name, &f.description, is_private).await {
+    let owner = match f.owner.as_deref() {
+        Some(name) if !name.eq_ignore_ascii_case(&user.username) => {
+            state.core.user_by_name(name).await?.ok_or(AppError::NotFound)?
+        }
+        _ => user.clone(),
+    };
+    if !state.core.can_create_repo_in(&owner, &user).await? {
+        return Err(AppError::Forbidden);
+    }
+    match state.core.create_repo(&owner, &f.name, &f.description, is_private).await {
         Ok(repo) => Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => html(NewRepoPage {
+            owners: possible_owners(&state, &user).await?,
+            owner: owner.username,
             page: Page::new(&state, Some(user), "New repository"),
             error: Some(msg),
             name: f.name,
@@ -233,81 +270,6 @@ pub async fn new_repo(
     }
 }
 
-struct KeyView {
-    id: i64,
-    name: String,
-    fingerprint: String,
-    added: String,
-    last_used: Option<String>,
-}
-
-impl From<SshKey> for KeyView {
-    fn from(k: SshKey) -> Self {
-        Self {
-            id: k.id,
-            name: k.name,
-            fingerprint: k.fingerprint,
-            added: date(k.created_at),
-            last_used: k.last_used_at.map(relative_time),
-        }
-    }
-}
-
-#[derive(Template)]
-#[template(path = "keys.html")]
-struct KeysPage {
-    page: Page,
-    error: Option<String>,
-    keys: Vec<KeyView>,
-    name: String,
-    key: String,
-    ssh_enabled: bool,
-}
-
-async fn keys_page(state: &AppState, user: keel_core::User, error: Option<String>, name: String, key: String) -> AppResult {
-    let keys = state.core.ssh_keys(user.id).await?.into_iter().map(KeyView::from).collect();
-    html(KeysPage {
-        page: Page::new(state, Some(user), "SSH keys"),
-        error,
-        keys,
-        name,
-        key,
-        ssh_enabled: state.core.config.ssh.is_some(),
-    })
-}
-
-pub async fn keys(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
-    keys_page(&state, user, None, String::new(), String::new()).await
-}
-
-#[derive(Deserialize)]
-pub struct KeyForm {
-    #[serde(default)]
-    name: String,
-    key: String,
-}
-
-pub async fn add_key(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Form(f): Form<KeyForm>,
-) -> AppResult {
-    match state.core.add_ssh_key(user.id, &f.name, &f.key).await {
-        Ok(_) => Ok(Redirect::to("/settings/keys").into_response()),
-        Err(keel_core::Error::Invalid(msg)) => keys_page(&state, user, Some(msg), f.name, f.key).await,
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub async fn delete_key(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path(id): Path<i64>,
-) -> AppResult {
-    state.core.delete_ssh_key(user.id, id).await?;
-    Ok(Redirect::to("/settings/keys").into_response())
-}
-
 #[derive(Template)]
 #[template(path = "user.html")]
 struct UserPage {
@@ -316,6 +278,20 @@ struct UserPage {
     joined: String,
     is_self: bool,
     repos: Vec<RepoCard>,
+    orgs: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "org.html")]
+struct OrgPage {
+    page: Page,
+    name: String,
+    created: String,
+    /// The viewer may create repositories here.
+    is_member: bool,
+    is_owner: bool,
+    repos: Vec<RepoCard>,
+    members: Vec<(String, &'static str)>,
 }
 
 pub async fn user(
@@ -328,11 +304,26 @@ pub async fn user(
         return Ok(Redirect::permanent(&format!("/{}", user.username)).into_response());
     }
     let repos = cards(&state.core.repos_of(user.id, viewer.as_ref()).await?);
+    if user.is_org() {
+        let members = state.core.org_members(user.id).await?;
+        let role = viewer.as_ref().and_then(|v| members.iter().find(|(m, _)| m.id == v.id).map(|(_, r)| *r));
+        return html(OrgPage {
+            is_member: role.is_some(),
+            is_owner: role == Some(OrgRole::Owner) || viewer.as_ref().is_some_and(|v| v.is_admin),
+            page: Page::new(&state, viewer, user.username.clone()),
+            created: date(user.created_at),
+            name: user.username,
+            repos,
+            members: members.into_iter().map(|(u, r)| (u.username, r.as_str())).collect(),
+        });
+    }
+    let orgs = state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username).collect();
     html(UserPage {
         is_self: viewer.as_ref().is_some_and(|v| v.id == user.id),
         page: Page::new(&state, viewer, user.username.clone()),
         joined: date(user.created_at),
         username: user.username,
         repos,
+        orgs,
     })
 }

@@ -17,6 +17,8 @@ const REPO_CONFIG: &[(&str, &str)] = &[
     // to do maintenance.
     ("gc.auto", "0"),
     ("receive.autogc", "false"),
+    // Pull request refs are maintained by the server; pushes can't touch them.
+    ("receive.hideRefs", "refs/pull"),
 ];
 
 /// Creates a bare repository whose HEAD points at `default_branch`.
@@ -31,10 +33,8 @@ pub fn create_bare(path: &Path, default_branch: &str) -> Result<()> {
             .no_reinit(true)
             .initial_head(default_branch),
     )?;
-    let mut config = repo.config()?;
-    for (key, value) in REPO_CONFIG {
-        config.set_str(key, value)?;
-    }
+    drop(repo);
+    apply_config(path)?;
     // libgit2 creates sample hooks; keel never runs repository hooks.
     let _ = std::fs::remove_dir_all(path.join("hooks"));
     Ok(())
@@ -47,6 +47,7 @@ pub fn create_bare(path: &Path, default_branch: &str) -> Result<()> {
 /// - repacks with bitmaps once loose objects and small packs pile up.
 pub fn run_maintenance(path: &Path) -> Result<()> {
     fix_unborn_head(path)?;
+    apply_config(path)?;
     git(path, &[
         "commit-graph", "write", "--reachable", "--changed-paths", "--split",
     ])?;
@@ -58,6 +59,18 @@ pub fn run_maintenance(path: &Path) -> Result<()> {
         .count();
     if packs > 16 {
         git(path, &["repack", "-a", "-d", "--write-bitmap-index", "-q"])?;
+    }
+    Ok(())
+}
+
+/// Writes keel's repository config; also brings repositories created by
+/// older versions up to date.
+fn apply_config(path: &Path) -> Result<()> {
+    let mut config = git2::Repository::open_bare(path)?.config()?.open_level(git2::ConfigLevel::Local)?;
+    for (key, value) in REPO_CONFIG {
+        if config.get_string(key).ok().as_deref() != Some(value) {
+            config.set_str(key, value)?;
+        }
     }
     Ok(())
 }

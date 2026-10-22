@@ -1,6 +1,5 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="narrow">
+{% extends "settings/layout.html" %}
+{% block settings %}
   <h1>SSH keys</h1>
   {% if !ssh_enabled %}<p class="flash">The SSH server is disabled on this instance; use HTTPS to clone and push.</p>{% endif %}
   {% if keys.is_empty() %}
@@ -27,5 +26,4 @@
       <span class="hint">Paste the contents of e.g. <code>~/.ssh/id_ed25519.pub</code>.</span></label>
     <button class="btn btn-primary">Add key</button>
   </form>
-</div>
 {% endblock %}

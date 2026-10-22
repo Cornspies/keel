@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="narrow-left">
+  <h1><a href="/{{ name }}">{{ name }}</a> settings</h1>
+
+  <h2>Members</h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <ul class="card-list">
+    {% for m in members %}
+    <li class="card-row">
+      <div><a href="/{{ m.username }}"><strong>{{ m.username }}</strong></a> <span class="badge">{{ m.role }}</span></div>
+      <div class="row-actions">
+        <form method="post" action="/org/{{ name }}/members">
+          <input type="hidden" name="username" value="{{ m.username }}">
+          {% if m.role == "owner" %}
+          <input type="hidden" name="role" value="member"><button class="btn btn-small">Make member</button>
+          {% else %}
+          <input type="hidden" name="role" value="owner"><button class="btn btn-small">Make owner</button>
+          {% endif %}
+        </form>
+        <form method="post" action="/org/{{ name }}/members/{{ m.id }}/remove"><button class="btn btn-small btn-danger">Remove</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <form method="post" action="/org/{{ name }}/members" class="form form-inline">
+    <input name="username" placeholder="Username" aria-label="Username" required>
+    <select name="role" aria-label="Role"><option value="member">Member</option><option value="owner">Owner</option></select>
+    <button class="btn">Add member</button>
+  </form>
+
+  <h2 class="danger-title">Delete organization</h2>
+  <div class="box danger-zone">
+    <p>Deleting <strong>{{ name }}</strong> is permanent. Its repositories must be deleted first.</p>
+    <form method="post" action="/org/{{ name }}/delete" class="form"><button class="btn btn-danger">Delete this organization</button></form>
+  </div>
+</div>
+{% endblock %}

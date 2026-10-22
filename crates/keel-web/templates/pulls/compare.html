@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<h2>Compare changes</h2>
+<form method="get" action="/{{ repo.owner }}/{{ repo.name }}/compare" class="form form-inline compare-form">
+  <label class="inline-label">base <select name="base">{% for b in branches %}<option{% if *b == base %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
+  <span aria-hidden="true">←</span>
+  <label class="inline-label">compare <select name="head">{% for b in branches %}<option{% if *b == head %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
+  <button class="btn">Compare</button>
+</form>
+
+{% if let Some(n) = notice %}
+<p class="empty">{{ n }}</p>
+{% else if let Some(c) = changes %}
+  {% if let Some((number, url)) = existing %}
+  <p class="flash">Pull request <a href="{{ url }}">#{{ number }}</a> for these branches is already open.</p>
+  {% else if can_open %}
+  <div class="box pr-form">
+    <div class="box-head">Open a pull request</div>
+    {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+    <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/pulls" class="form">
+      <input type="hidden" name="base" value="{{ base }}">
+      <input type="hidden" name="head" value="{{ head }}">
+      <label>Title <input name="title" value="{{ title }}" maxlength="256" required></label>
+      <label>Description <textarea name="body" rows="8" placeholder="What does this change and why? Markdown is supported.">{{ body }}</textarea></label>
+      <button class="btn btn-primary">Create pull request</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted"><a href="/login">Sign in</a> to open a pull request.</p>
+  {% endif %}
+
+  <h3>{{ c.commits.len() }} {% if c.commits.len() == 1 %}commit{% else %}commits{% endif %}</h3>
+  <ul class="card-list commit-list">
+    {% for cm in c.commits %}
+    <li class="card-row">
+      <div class="commit-main">
+        <a class="commit-summary" href="{{ cm.url }}">{{ cm.summary }}</a>
+        <div class="muted small"><strong>{{ cm.author }}</strong> committed <time title="{{ cm.when_full }}">{{ cm.when }}</time></div>
+      </div>
+      <a class="btn btn-small mono" href="{{ cm.url }}">{{ cm.short }}</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% include "repo/diff.html" %}
+{% endif %}
+{% endblock %}

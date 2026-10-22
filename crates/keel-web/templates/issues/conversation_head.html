@@ -1,0 +1,8 @@
+<div class="issue-head">
+  <h1 class="issue-heading">{{ conv.title }} <span class="muted">#{{ conv.number }}</span></h1>
+  {% if conv.can_edit %}<a class="btn btn-small" href="{{ conv.base_url }}/edit">Edit</a>{% endif %}
+</div>
+<p class="issue-meta">
+  <span class="state-badge state-{{ conv.state }}">{{ conv.state }}</span>
+  <strong>{{ conv.author }}</strong> opened this {{ conv.opened }} · {{ conv.comment_count }} {% if conv.comment_count == 1 %}comment{% else %}comments{% endif %}
+</p>

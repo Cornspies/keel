@@ -1,0 +1,22 @@
+{% extends "settings/layout.html" %}
+{% block settings %}
+<h1>Account</h1>
+{% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
+
+<h2>Email</h2>
+{% if let Some(e) = email_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<form method="post" action="/settings/account/email" class="form">
+  <label>Email address <input name="email" type="email" value="{{ email }}" autocomplete="email" required></label>
+  <button class="btn">Update email</button>
+</form>
+
+<h2>Password</h2>
+{% if let Some(e) = password_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<form method="post" action="/settings/account/password" class="form">
+  <label>Current password <input name="current" type="password" autocomplete="current-password" required></label>
+  <label>New password <input name="new" type="password" minlength="8" autocomplete="new-password" required>
+    <span class="hint">At least 8 characters. Changing it signs out all other sessions.</span></label>
+  <label>Confirm new password <input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label>
+  <button class="btn">Change password</button>
+</form>
+{% endblock %}

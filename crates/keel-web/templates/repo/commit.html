@@ -12,41 +12,5 @@
   </div>
 </div>
 
-<p class="diff-summary">
-  Showing <strong>{{ files.len() }} changed {% if files.len() == 1 %}file{% else %}files{% endif %}</strong>
-  with <span class="additions">{{ additions }} additions</span> and <span class="deletions">{{ deletions }} deletions</span>.
-  {% if truncated %}<span class="muted">Some files were left out because this commit is very large.</span>{% endif %}
-</p>
-
-{% for f in files %}
-<div class="box diff-file" id="{{ f.anchor }}">
-  <div class="box-head file-head">
-    <span class="diff-status diff-{{ f.status_class }}">{{ f.status }}</span>
-    <span class="mono">{% if let Some(old) = f.old_path %}{{ old }} → {% endif %}{{ f.path }}</span>
-    <span class="spacer"></span>
-    <span class="small"><span class="additions">+{{ f.additions }}</span> <span class="deletions">−{{ f.deletions }}</span></span>
-    {% if let Some(u) = f.view_url %}<a class="btn btn-small" href="{{ u }}">View file</a>{% endif %}
-  </div>
-  {% if f.binary %}
-  <p class="blob-note">Binary file changed.</p>
-  {% else if f.collapsed %}
-  <p class="blob-note">This diff is too large to display.{% if let Some(u) = f.view_url %} <a href="{{ u }}">View the file</a>.{% endif %}</p>
-  {% else if f.hunks.is_empty() %}
-  <p class="blob-note">No content changes.</p>
-  {% else %}
-  <div class="code-scroll">
-    <table class="code diff">
-      <tbody>
-      {% for h in f.hunks %}
-        <tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="lc">{{ h.header }}</td></tr>
-        {% for l in h.lines %}
-        <tr class="{{ l.class }}"><td class="ln">{{ l.old }}</td><td class="ln">{{ l.new }}</td><td class="lc">{{ l.content }}</td></tr>
-        {% endfor %}
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-{% endfor %}
+{% include "repo/diff.html" %}
 {% endblock %}

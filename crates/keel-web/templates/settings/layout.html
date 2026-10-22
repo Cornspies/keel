@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="settings">
+  <nav class="side-nav" aria-label="Settings">
+    <div class="menu-title">Settings</div>
+    <a href="/settings/account"{% if nav == "account" %} class="active"{% endif %}>Account</a>
+    <a href="/settings/keys"{% if nav == "keys" %} class="active"{% endif %}>SSH keys</a>
+    <a href="/settings/tokens"{% if nav == "tokens" %} class="active"{% endif %}>Access tokens</a>
+  </nav>
+  <div class="settings-main">
+  {% block settings %}{% endblock %}
+  </div>
+</div>
+{% endblock %}

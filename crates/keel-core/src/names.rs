@@ -4,7 +4,8 @@ use crate::{Result, invalid};
 /// them.
 const RESERVED_USERNAMES: &[&str] = &[
     "about", "admin", "api", "assets", "explore", "favicon.ico", "git", "health", "help", "login",
-    "logout", "new", "register", "robots.txt", "root", "settings", "static", "user", "users",
+    "logout", "new", "org", "orgs", "organizations", "register", "robots.txt", "root", "search",
+    "settings", "static", "user", "users",
 ];
 
 pub fn validate_username(name: &str) -> Result<()> {

@@ -155,6 +155,17 @@ pub struct LinkBase<'a> {
 /// Renders Markdown to sanitized HTML. Relative links are rewritten to point
 /// into the repository, relative images to raw file URLs.
 pub fn markdown(src: &str, base: &LinkBase<'_>) -> String {
+    render_markdown(src, base, None)
+}
+
+/// Markdown for issues and comments: additionally links `#123` to issues
+/// and pull requests of the repository at `repo_url`, and `@name` to
+/// profiles.
+pub fn markdown_with_refs(src: &str, base: &LinkBase<'_>, repo_url: &str) -> String {
+    render_markdown(src, base, Some(repo_url))
+}
+
+fn render_markdown(src: &str, base: &LinkBase<'_>, repo_url: Option<&str>) -> String {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -166,7 +177,22 @@ pub fn markdown(src: &str, base: &LinkBase<'_>) -> String {
             None => url,
         }
     };
-    let events = Parser::new_ext(src, options).map(|event| match event {
+    // Inside code and links, `#1` and `@x` are left alone.
+    let mut verbatim = 0usize;
+    let events = Parser::new_ext(src, options).flat_map(move |event| {
+        match &event {
+            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. }) => verbatim += 1,
+            Event::End(pulldown_cmark::TagEnd::CodeBlock | pulldown_cmark::TagEnd::Link) => {
+                verbatim = verbatim.saturating_sub(1)
+            }
+            _ => {}
+        }
+        match (event, repo_url) {
+            (Event::Text(text), Some(url)) if verbatim == 0 => linkify(&text, url),
+            (e, _) => vec![e],
+        }
+    });
+    let events = events.map(|event| match event {
         Event::Start(Tag::Link { link_type, dest_url, title, id }) => Event::Start(Tag::Link {
             link_type,
             dest_url: rewrite(dest_url.into_static(), base.blob),
@@ -184,6 +210,59 @@ pub fn markdown(src: &str, base: &LinkBase<'_>) -> String {
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, events);
     ammonia::clean(&html)
+}
+
+/// Splits text into plain text and links for `#123` and `@name`.
+fn linkify(text: &str, repo_url: &str) -> Vec<Event<'static>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut plain_start = 0;
+    let mut i = 0;
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'&' || b == b'/';
+    while i < bytes.len() {
+        let after_boundary = i == 0 || !word(bytes[i - 1]);
+        let rest = &bytes[i + 1..];
+        let (len, html) = match bytes[i] {
+            b'#' if after_boundary => {
+                let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+                let ends_cleanly = rest.get(digits).is_none_or(|b| !b.is_ascii_alphanumeric());
+                if (1..=9).contains(&digits) && rest[0] != b'0' && ends_cleanly {
+                    let n = &text[i + 1..i + 1 + digits];
+                    (digits + 1, format!(r#"<a href="{repo_url}/issues/{n}">#{n}</a>"#))
+                } else {
+                    (0, String::new())
+                }
+            }
+            b'@' if after_boundary => {
+                let name_len = rest
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric() || **b == b'-')
+                    .count()
+                    .min(39);
+                let name = text[i + 1..i + 1 + name_len].trim_end_matches('-');
+                if !name.is_empty() && !name.starts_with('-') {
+                    (name.len() + 1, format!(r#"<a href="/{name}">@{name}</a>"#))
+                } else {
+                    (0, String::new())
+                }
+            }
+            _ => (0, String::new()),
+        };
+        if len == 0 {
+            i += 1;
+            continue;
+        }
+        if plain_start < i {
+            out.push(Event::Text(text[plain_start..i].to_owned().into()));
+        }
+        out.push(Event::InlineHtml(html.into()));
+        i += len;
+        plain_start = i;
+    }
+    if plain_start < text.len() {
+        out.push(Event::Text(text[plain_start..].to_owned().into()));
+    }
+    out
 }
 
 /// Resolves a relative URL against a directory in the repository. Returns
@@ -309,6 +388,23 @@ mod tests {
         assert!(html.contains(r#"src="/ada/engine/raw/main/docs/img/logo.png""#));
         assert!(!html.contains("<script"));
         assert_eq!(resolve_relative("", "../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn issue_references_and_mentions() {
+        let base = LinkBase { blob: "/a/r/blob/main", raw: "/a/r/raw/main", dir: "" };
+        let html = markdown_with_refs(
+            "Fixes #12, see @bob-x. Not #0, a#3, x@y.org, `#4` or [#5](https://x.org).\n\n```\n#6\n```",
+            &base,
+            "/a/r",
+        );
+        assert!(html.contains(r#"href="/a/r/issues/12" rel="noopener noreferrer">#12</a>"#), "{html}");
+        assert!(html.contains(r#"href="/bob-x" rel="noopener noreferrer">@bob-x</a>."#), "{html}");
+        for not in ["issues/0", "issues/3", "/y.org", "issues/4", "issues/5", "issues/6"] {
+            assert!(!html.contains(not), "{not} in {html}");
+        }
+        // Plain Markdown rendering leaves references alone.
+        assert!(!markdown("#12 @bob", &base).contains("<a"));
     }
 
     #[test]

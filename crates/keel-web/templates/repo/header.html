@@ -9,8 +9,11 @@
   {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
   <nav class="tabs">
     <a href="/{{ repo.owner }}/{{ repo.name }}"{% if repo.tab == "code" %} class="active"{% endif %}>Code</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/issues"{% if repo.tab == "issues" %} class="active"{% endif %}>Issues{% if repo.open_issues > 0 %} <span class="count">{{ repo.open_issues }}</span>{% endif %}</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/pulls"{% if repo.tab == "pulls" %} class="active"{% endif %}>Pull requests{% if repo.open_pulls > 0 %} <span class="count">{{ repo.open_pulls }}</span>{% endif %}</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/commits{% if !repo.default_rev.is_empty() %}/{{ repo.default_rev }}{% endif %}"{% if repo.tab == "commits" %} class="active"{% endif %}>Commits</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/branches"{% if repo.tab == "branches" %} class="active"{% endif %}>Branches</a>
-    {% if repo.can_write %}<a href="/{{ repo.owner }}/{{ repo.name }}/settings"{% if repo.tab == "settings" %} class="active"{% endif %}>Settings</a>{% endif %}
+    <a href="/{{ repo.owner }}/{{ repo.name }}/search" class="tab-search">Search</a>
+    {% if repo.can_admin %}<a href="/{{ repo.owner }}/{{ repo.name }}/settings"{% if repo.tab == "settings" %} class="active"{% endif %}>Settings</a>{% endif %}
   </nav>
 </div>

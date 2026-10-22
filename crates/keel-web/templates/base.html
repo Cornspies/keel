@@ -11,11 +11,20 @@
 <header class="topbar">
   <div class="wrap topbar-inner">
     <a class="brand" href="/">{{ page.site_name }}</a>
+    <form class="top-search" method="get" action="/search" role="search">
+      <input name="q" placeholder="Search code" aria-label="Search code">
+    </form>
     <nav class="topnav">
       {% if let Some(user) = page.viewer %}
-        <a class="btn btn-small" href="/new">New repository</a>
+        <details class="dropdown dropdown-right">
+          <summary class="btn btn-small">New</summary>
+          <div class="dropdown-menu">
+            <a href="/new">New repository</a>
+            <a href="/org/new">New organization</a>
+          </div>
+        </details>
         <a href="/{{ user.username }}">{{ user.username }}</a>
-        <a href="/settings/keys">Settings</a>
+        <a href="/settings">Settings</a>
         <form method="post" action="/logout" class="inline"><button class="linkish">Sign out</button></form>
       {% else %}
         <a href="/login">Sign in</a>

@@ -5,8 +5,17 @@
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/new" class="form">
     <label>Name
-      <span class="prefixed"><span class="prefix">{% if let Some(u) = page.viewer %}{{ u.username }}{% endif %} /</span>
-      <input name="name" value="{{ name }}" maxlength="100" pattern="[A-Za-z0-9._\-]+" required autofocus></span>
+      <span class="prefixed">
+        {% if owners.len() > 1 %}
+        <select name="owner" aria-label="Owner" class="owner-select">
+          {% for o in owners %}<option value="{{ o }}"{% if *o == owner %} selected{% endif %}>{{ o }}</option>{% endfor %}
+        </select>
+        {% else %}
+        <span class="prefix">{{ owner }}</span><input type="hidden" name="owner" value="{{ owner }}">
+        {% endif %}
+        <span class="prefix">/</span>
+        <input name="name" value="{{ name }}" maxlength="100" pattern="[A-Za-z0-9._\-]+" required autofocus>
+      </span>
     </label>
     <label>Description <span class="hint">(optional)</span> <input name="description" value="{{ description }}"></label>
     <label class="check"><input type="checkbox" name="private" {% if is_private %}checked{% endif %}> Private <span class="hint">Only you can see and clone it.</span></label>

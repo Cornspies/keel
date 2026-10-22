@@ -1,0 +1,20 @@
+<div class="timeline">
+  {% for item in conv.timeline %}
+  {% if item.kind == "comment" || item.kind == "description" %}
+  <div class="box comment" id="{% if item.kind == "description" %}description{% else %}comment-{{ item.id }}{% endif %}">
+    <div class="box-head comment-head">
+      <span><strong><a href="/{{ item.author }}">{{ item.author }}</a></strong> <span class="muted">{% if item.kind == "description" %}opened{% else %}commented{% endif %} <a class="muted" href="#{% if item.kind == "description" %}description{% else %}comment-{{ item.id }}{% endif %}"><time title="{{ item.when_full }}">{{ item.when }}</time></a>{% if item.edited %} · edited{% endif %}</span></span>
+      <span class="spacer"></span>
+      {% if item.can_edit %}<a class="btn btn-small" href="{{ item.edit_url }}">Edit</a>{% endif %}
+      {% if let Some(d) = item.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}
+    </div>
+    <article class="markdown comment-body">{{ item.body_html|safe }}</article>
+  </div>
+  {% else %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-{% if item.kind == "reopened" %}open{% else %}{{ item.kind }}{% endif %}" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {{ item.kind }} this <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>

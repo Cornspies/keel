@@ -13,21 +13,21 @@ use keel_git::{CommitSummary, DiffLineKind, DiffStatus, EntryKind, GitRepo, Oid,
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
+use crate::lastcommit::{BACKGROUND_WALK, last_commits_for};
 use crate::render::{self, LinkBase, datetime, human_size, relative_time};
 use crate::session::{SignedIn, Viewer};
 use crate::{AppError, AppState, Page};
 
 /// Commits to walk while rendering a tree page. If that doesn't resolve
 /// every entry's last commit, the page is sent without them and the browser
-/// fetches them from `last-commits` (with a much larger budget) instead, so
-/// a large history never delays the first paint.
+/// fetches them from `last-commits` (without a budget) instead, so a large
+/// history never delays the first paint.
 const LAST_COMMIT_SYNC_WALK: usize = 500;
-const LAST_COMMIT_ASYNC_WALK: usize = 500_000;
 const COMMITS_PER_PAGE: usize = 50;
 /// Larger files are offered as a raw download instead of being rendered.
 const MAX_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
-const DIFF_MAX_FILES: usize = 300;
-const DIFF_MAX_LINES: usize = 10_000;
+pub(crate) const DIFF_MAX_FILES: usize = 300;
+pub(crate) const DIFF_MAX_LINES: usize = 10_000;
 const README_NAMES: &[&str] = &["readme.md", "readme.markdown", "readme", "readme.txt"];
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"];
 
@@ -57,17 +57,17 @@ fn extension(name: &str) -> String {
 
 /// Looks up a repository the viewer may read. Private repositories the
 /// viewer can't see are reported as missing, not forbidden.
-async fn load(state: &AppState, viewer: Option<&User>, owner: &str, name: &str) -> AppResult<(Repo, Access)> {
+pub(crate) async fn load(state: &AppState, viewer: Option<&User>, owner: &str, name: &str) -> AppResult<(Repo, Access)> {
     let name = name.strip_suffix(".git").unwrap_or(name);
     let repo = state.core.repo(owner, name).await?.ok_or(AppError::NotFound)?;
-    match repo.access(viewer) {
+    match state.core.access(&repo, viewer).await? {
         Access::None => Err(AppError::NotFound),
         access => Ok((repo, access)),
     }
 }
 
 /// Runs `f` against the repository on the blocking thread pool.
-async fn with_git<T: Send + 'static>(
+pub(crate) async fn with_git<T: Send + 'static>(
     state: &AppState,
     repo: &Repo,
     f: impl FnOnce(&GitRepo) -> AppResult<T> + Send + 'static,
@@ -82,28 +82,42 @@ pub(crate) struct RepoView {
     pub description: String,
     pub is_private: bool,
     pub can_write: bool,
+    /// May change settings and collaborators.
+    pub can_admin: bool,
     pub http_url: String,
     pub ssh_url: Option<String>,
     /// Which tab is active: code, commits, branches or settings.
     pub tab: &'static str,
     /// Branch used for tab links; empty for an empty repository.
     pub default_rev: String,
+    pub open_issues: i64,
+    pub open_pulls: i64,
 }
 
 impl RepoView {
-    fn new(state: &AppState, repo: &Repo, access: Access, tab: &'static str, default_rev: &str) -> Self {
+    pub(crate) async fn new(
+        state: &AppState,
+        repo: &Repo,
+        access: Access,
+        tab: &'static str,
+        default_rev: &str,
+    ) -> AppResult<Self> {
         let cfg = &state.core.config;
-        Self {
+        let counts = state.core.issue_counts(repo.id).await?;
+        Ok(Self {
+            open_issues: counts.open_issues,
+            open_pulls: counts.open_pulls,
             owner: repo.owner.clone(),
             name: repo.name.clone(),
             description: repo.description.clone(),
             is_private: repo.is_private,
-            can_write: access == Access::Write,
+            can_write: access >= Access::Write,
+            can_admin: access == Access::Admin,
             http_url: cfg.http_clone_url(&repo.owner, &repo.name),
             ssh_url: cfg.ssh_clone_url(&repo.owner, &repo.name),
             tab,
             default_rev: encode_path(default_rev),
-        }
+        })
     }
 }
 
@@ -118,7 +132,7 @@ pub(crate) struct CommitView {
 }
 
 impl CommitView {
-    fn new(base: &str, c: &CommitSummary) -> Self {
+    pub(crate) fn new(base: &str, c: &CommitSummary) -> Self {
         Self {
             id: c.id.to_string(),
             short: c.short_id(),
@@ -223,7 +237,6 @@ enum TreeData {
         resolved: Resolved,
         default_branch: String,
         entries: Vec<keel_git::TreeEntry>,
-        last: Option<Arc<HashMap<String, CommitSummary>>>,
         latest: Option<CommitSummary>,
         readme: Option<(String, Arc<String>)>,
         refs: RefNames,
@@ -276,7 +289,6 @@ async fn render_tree(
             return Ok(TreeData::File(resolved));
         };
 
-        let last = last_commits(&st, g, resolved.commit, &resolved.path, LAST_COMMIT_SYNC_WALK)?;
         let latest = g.log(resolved.commit, &resolved.path, 0, 1)?.into_iter().next();
 
         let readme_entry = entries.iter().find(|e| {
@@ -304,7 +316,6 @@ async fn render_tree(
             default_branch: default_branch.unwrap_or_default(),
             resolved,
             entries,
-            last,
             latest,
             readme,
         })
@@ -313,7 +324,7 @@ async fn render_tree(
 
     match data {
         TreeData::Empty => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, "code", ""),
+            repo: RepoView::new(&state, &repo, access, "code", "").await?,
             page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
         }),
         TreeData::File(r) => Ok(Redirect::to(&format!(
@@ -322,7 +333,8 @@ async fn render_tree(
             encode_path(&r.path)
         ))
         .into_response()),
-        TreeData::Dir { resolved, default_branch, entries, last, latest, readme, refs } => {
+        TreeData::Dir { resolved, default_branch, entries, latest, readme, refs } => {
+            let last = last_commits_for(&state, &repo, resolved.commit, &resolved.path, LAST_COMMIT_SYNC_WALK).await?;
             let rev_url = encode_path(&resolved.rev);
             let entries = entries
                 .into_iter()
@@ -354,7 +366,7 @@ async fn render_tree(
             };
             html(TreePage {
                 page: Page::new(&state, viewer, title),
-                repo: RepoView::new(&state, &repo, access, "code", &default_branch),
+                repo: RepoView::new(&state, &repo, access, "code", &default_branch).await?,
                 crumbs: crumbs(&base, &resolved.rev, &resolved.path),
                 history_url: format!("{base}/commits/{rev_url}/{}", encode_path(&resolved.path)),
                 // A full commit id keeps the URL stable (and cacheable) even
@@ -375,29 +387,6 @@ async fn render_tree(
     }
 }
 
-/// Last commit per directory entry, from the cache or computed with a walk
-/// budget. `None` if the budget wasn't enough (partial results aren't
-/// cached).
-fn last_commits(
-    state: &AppState,
-    g: &GitRepo,
-    commit: Oid,
-    path: &str,
-    budget: usize,
-) -> AppResult<Option<Arc<HashMap<String, CommitSummary>>>> {
-    let key = (commit, path.to_owned());
-    if let Some(hit) = state.last_commits.get(&key) {
-        return Ok(Some(hit));
-    }
-    let (found, complete) = g.last_commits(commit, path, budget)?;
-    if !complete {
-        return Ok(None);
-    }
-    let found = Arc::new(found);
-    state.last_commits.insert(key, found.clone());
-    Ok(Some(found))
-}
-
 #[derive(serde::Serialize)]
 struct LastCommitJson {
     summary: String,
@@ -415,12 +404,10 @@ pub async fn last_commits_json(
 ) -> AppResult {
     let (repo, _) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let base = format!("/{}/{}", repo.owner, repo.name);
-    let st = state.clone();
-    let found = with_git(&state, &repo, move |g| {
-        let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
-        Ok(last_commits(&st, g, r.commit, &r.path, LAST_COMMIT_ASYNC_WALK)?.unwrap_or_default())
-    })
-    .await?;
+    let r = with_git(&state, &repo, move |g| g.resolve_rev_path(&rest).ok_or(AppError::NotFound)).await?;
+    let found = last_commits_for(&state, &repo, r.commit, &r.path, BACKGROUND_WALK)
+        .await?
+        .unwrap_or_default();
     let json: HashMap<&str, LastCommitJson> = found
         .iter()
         .map(|(name, c)| {
@@ -573,7 +560,7 @@ pub async fn blob(
     let path_url = encode_path(&r.path);
     html(BlobPage {
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "code", &default_branch),
+        repo: RepoView::new(&state, &repo, access, "code", &default_branch).await?,
         crumbs: crumbs(&base, &r.rev, &r.path),
         size: human_size(size),
         line_count,
@@ -677,7 +664,7 @@ pub async fn commits_default(
     match branch {
         Some(b) => Ok(Redirect::to(&format!("/{}/{}/commits/{}", repo.owner, repo.name, encode_path(&b))).into_response()),
         None => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, "commits", ""),
+            repo: RepoView::new(&state, &repo, access, "commits", "").await?,
             page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
         }),
     }
@@ -707,7 +694,7 @@ pub async fn commits(
     let here = here.trim_end_matches('/').to_owned();
     html(CommitsPage {
         page: Page::new(&state, viewer, format!("Commits · {}/{}", repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "commits", &default_branch),
+        repo: RepoView::new(&state, &repo, access, "commits", &default_branch).await?,
         commits: list.iter().map(|c| CommitView::new(&base, c)).collect(),
         newer_url: (page_no > 1).then(|| format!("{here}?page={}", page_no - 1)),
         older_url: has_older.then(|| format!("{here}?page={}", page_no + 1)),
@@ -743,6 +730,61 @@ pub(crate) struct FileView {
     pub view_url: Option<String>,
 }
 
+/// View models for a diff; "View file" links point at `rev`.
+pub(crate) fn file_views(base: &str, rev: &str, diff: &keel_git::CommitDiff) -> Vec<FileView> {
+    diff.files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| FileView {
+            anchor: format!("file-{i}"),
+            path: f.path().to_owned(),
+            old_path: (f.status == DiffStatus::Renamed).then(|| f.old_path.clone()).flatten(),
+            status: match f.status {
+                DiffStatus::Added => "added",
+                DiffStatus::Deleted => "deleted",
+                DiffStatus::Modified => "modified",
+                DiffStatus::Renamed => "renamed",
+                DiffStatus::Copied => "copied",
+                DiffStatus::TypeChange => "type changed",
+            },
+            status_class: match f.status {
+                DiffStatus::Added | DiffStatus::Copied => "added",
+                DiffStatus::Deleted => "deleted",
+                DiffStatus::Renamed => "renamed",
+                _ => "modified",
+            },
+            additions: f.additions,
+            deletions: f.deletions,
+            binary: f.binary,
+            collapsed: f.collapsed,
+            view_url: (f.status != DiffStatus::Deleted)
+                .then(|| format!("{base}/blob/{rev}/{}", encode_path(f.path()))),
+            hunks: f
+                .hunks
+                .iter()
+                .map(|h| HunkView {
+                    header: h.header.clone(),
+                    lines: h
+                        .lines
+                        .iter()
+                        .map(|l| LineView {
+                            class: match l.kind {
+                                DiffLineKind::Added => "add",
+                                DiffLineKind::Removed => "del",
+                                DiffLineKind::Context => "ctx",
+                                DiffLineKind::NoNewline => "meta",
+                            },
+                            old: l.old_no.map(|n| n.to_string()).unwrap_or_default(),
+                            new: l.new_no.map(|n| n.to_string()).unwrap_or_default(),
+                            content: l.content.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[derive(Template)]
 #[template(path = "repo/commit.html")]
 struct CommitPage {
@@ -775,63 +817,11 @@ pub async fn commit(
     })
     .await?;
 
-    let commit_id = detail.commit.id.to_string();
-    let files = diff
-        .files
-        .iter()
-        .enumerate()
-        .map(|(i, f)| FileView {
-            anchor: format!("file-{i}"),
-            path: f.path().to_owned(),
-            old_path: (f.status == DiffStatus::Renamed).then(|| f.old_path.clone()).flatten(),
-            status: match f.status {
-                DiffStatus::Added => "added",
-                DiffStatus::Deleted => "deleted",
-                DiffStatus::Modified => "modified",
-                DiffStatus::Renamed => "renamed",
-                DiffStatus::Copied => "copied",
-                DiffStatus::TypeChange => "type changed",
-            },
-            status_class: match f.status {
-                DiffStatus::Added | DiffStatus::Copied => "added",
-                DiffStatus::Deleted => "deleted",
-                DiffStatus::Renamed => "renamed",
-                _ => "modified",
-            },
-            additions: f.additions,
-            deletions: f.deletions,
-            binary: f.binary,
-            collapsed: f.collapsed,
-            view_url: (f.status != DiffStatus::Deleted)
-                .then(|| format!("{base}/blob/{commit_id}/{}", encode_path(f.path()))),
-            hunks: f
-                .hunks
-                .iter()
-                .map(|h| HunkView {
-                    header: h.header.clone(),
-                    lines: h
-                        .lines
-                        .iter()
-                        .map(|l| LineView {
-                            class: match l.kind {
-                                DiffLineKind::Added => "add",
-                                DiffLineKind::Removed => "del",
-                                DiffLineKind::Context => "ctx",
-                                DiffLineKind::NoNewline => "meta",
-                            },
-                            old: l.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                            new: l.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                            content: l.content.clone(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        })
-        .collect();
+    let files = file_views(&base, &detail.commit.id.to_string(), &diff);
 
     html(CommitPage {
         page: Page::new(&state, viewer, format!("{} · {}/{}", detail.commit.summary, repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "commits", &default_branch),
+        repo: RepoView::new(&state, &repo, access, "commits", &default_branch).await?,
         commit: CommitView::new(&base, &detail.commit),
         body: detail.body,
         committer: detail.committer.name,
@@ -886,7 +876,7 @@ pub async fn refs(
     };
     html(RefsPage {
         page: Page::new(&state, viewer, format!("Branches · {}/{}", repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "branches", &default_branch),
+        repo: RepoView::new(&state, &repo, access, "branches", &default_branch).await?,
         branches: branches.iter().map(view).collect(),
         tags: tags.iter().map(view).collect(),
     })
@@ -902,23 +892,79 @@ struct SettingsPage {
     page: Page,
     repo: RepoView,
     error: Option<String>,
+    collaborators: Vec<(i64, String, &'static str)>,
+    collaborator_error: Option<String>,
+    owned_by_org: bool,
 }
 
+/// The repository, if `user` may administer it.
 async fn writable(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
     let (repo, access) = load(state, Some(user), owner, name).await?;
-    if access != Access::Write {
+    if access != Access::Admin {
         return Err(AppError::Forbidden);
     }
     Ok(repo)
 }
 
 async fn settings_page(state: &AppState, user: User, repo: &Repo, error: Option<String>) -> AppResult {
+    settings_page_with(state, user, repo, error, None).await
+}
+
+async fn settings_page_with(
+    state: &AppState,
+    user: User,
+    repo: &Repo,
+    error: Option<String>,
+    collaborator_error: Option<String>,
+) -> AppResult {
     let default_branch = with_git(state, repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
+    let collaborators = state
+        .core
+        .collaborators(repo.id)
+        .await?
+        .into_iter()
+        .map(|(u, a)| (u.id, u.username, a.role_name()))
+        .collect();
+    let owned_by_org = state.core.user_by_id(repo.owner_id).await?.is_some_and(|o| o.is_org());
     html(SettingsPage {
-        repo: RepoView::new(state, repo, Access::Write, "settings", &default_branch),
+        repo: RepoView::new(state, repo, Access::Admin, "settings", &default_branch).await?,
         page: Page::new(state, Some(user), format!("Settings · {}/{}", repo.owner, repo.name)),
         error,
+        collaborators,
+        collaborator_error,
+        owned_by_org,
     })
+}
+
+#[derive(Deserialize)]
+pub struct CollaboratorForm {
+    username: String,
+    role: String,
+}
+
+pub async fn set_collaborator(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<CollaboratorForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    let role = Access::parse_role(&f.role).ok_or_else(|| AppError::BadRequest("Unknown role".into()))?;
+    match state.core.set_collaborator(&repo, &f.username, role).await {
+        Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings#collaborators", repo.owner, repo.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, Some(msg)).await,
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn remove_collaborator(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, user_id)): Path<(String, String, i64)>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.remove_collaborator(repo.id, user_id).await?;
+    Ok(Redirect::to(&format!("/{}/{}/settings#collaborators", repo.owner, repo.name)).into_response())
 }
 
 pub async fn settings(

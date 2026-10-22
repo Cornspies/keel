@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+{% include "issues/conversation_head.html" %}
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+{% include "issues/timeline.html" %}
+{% include "issues/comment_form.html" %}
+</div>
+{% endblock %}

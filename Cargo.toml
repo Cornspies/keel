@@ -6,13 +6,14 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 
 [workspace.dependencies]
 keel-core = { path = "crates/keel-core" }
 keel-git = { path = "crates/keel-git" }
 keel-web = { path = "crates/keel-web" }
 keel-ssh = { path = "crates/keel-ssh" }
+keel-search = { path = "crates/keel-search" }
 
 anyhow = "1"
 thiserror = "2"
@@ -44,6 +45,7 @@ flate2 = "1"
 time = { version = "0.3", features = ["formatting", "macros"] }
 russh = "0.64"
 tempfile = "3"
+tantivy = { version = "0.27", default-features = false, features = ["mmap", "lz4-compression"] }
 
 [profile.release]
 lto = "thin"

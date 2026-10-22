@@ -6,6 +6,8 @@
 //! (bitmaps, commit-graph, partial clone, protocol v2).
 
 mod diff;
+mod files;
+mod merge;
 mod read;
 mod store;
 mod transport;
@@ -15,6 +17,8 @@ pub use read::{
     Blob, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, Resolved, Signature,
     TreeEntry,
 };
+pub use files::{FileChanges, FileRef};
+pub use merge::{Identity, MergeStyle, Mergeability};
 pub use store::{create_bare, run_maintenance};
 pub use transport::{Service, git_command};
 

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="profile section-head">
+  <div>
+    <h1>{{ name }} <span class="badge">Organization</span></h1>
+    <p class="muted">Created {{ created }}</p>
+  </div>
+  {% if is_owner %}<a class="btn" href="/org/{{ name }}/settings">Settings</a>{% endif %}
+</div>
+<div class="columns">
+  <section class="column-main">
+    <div class="section-head">
+      <h2>Repositories</h2>
+      {% if is_member %}<a class="btn btn-small" href="/new?owner={{ name }}">New</a>{% endif %}
+    </div>
+    {% if repos.is_empty() %}
+    <p class="empty">No repositories yet.</p>
+    {% else %}
+    <ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+    {% endif %}
+  </section>
+  <aside class="column-side">
+    <h2>People</h2>
+    <ul class="people">
+      {% for (username, role) in members %}
+      <li><a href="/{{ username }}">{{ username }}</a>{% if *role == "owner" %} <span class="badge">owner</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </aside>
+</div>
+{% endblock %}

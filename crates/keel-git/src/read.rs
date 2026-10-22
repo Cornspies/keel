@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -66,6 +66,16 @@ pub struct RefInfo {
     /// Short name, e.g. `main` or `v1.0`.
     pub name: String,
     pub commit: CommitSummary,
+}
+
+#[derive(Default)]
+struct NameWalk {
+    found: HashMap<String, CommitSummary>,
+    /// Entries attributed to merges, to confirm with `git log -1`.
+    recheck: Vec<String>,
+    /// Every entry name any walked commit changed.
+    touched: HashSet<String>,
+    complete: bool,
 }
 
 /// The result of splitting a URL tail like `feature/x/src/lib.rs` into a
@@ -372,26 +382,98 @@ impl GitRepo {
         path: &str,
         max_commits: usize,
     ) -> Result<(HashMap<String, CommitSummary>, bool)> {
-        let Some(tree) = self.subtree(commit, path)? else {
+        let Some(mut pending) = self.dir_entries(commit, path)? else {
             return Ok((HashMap::new(), true));
         };
-        let mut pending: HashMap<String, (Oid, bool)> = tree
-            .iter()
-            .map(|e| {
-                let name = String::from_utf8_lossy(e.name_bytes()).into_owned();
-                (name, (e.id(), e.kind() == Some(ObjectType::Tree)))
-            })
-            .collect();
-        let mut found = HashMap::new();
-        let files_pending = |p: &HashMap<String, (Oid, bool)>| p.values().any(|(_, dir)| !dir);
+        let walk = self.walk_names(&[commit.to_string()], path, &mut pending, Some(max_commits))?;
+        if !walk.complete {
+            return Ok((walk.found, false));
+        }
+        let mut found = walk.found;
+        let mut rest: Vec<String> = pending.into_keys().collect();
+        rest.extend(walk.recheck);
+        found.extend(self.lookup_paths(commit, path, &rest)?);
+        Ok((found, true))
+    }
 
+    /// Like [`last_commits`](Self::last_commits), but starting from a known
+    /// result `base` (entry name → commit) for an ancestor `base_commit`.
+    /// Only the commits in `base_commit..commit` are walked; entries they
+    /// didn't touch keep their previous answer. After a push that is a
+    /// handful of commits instead of the whole history.
+    ///
+    /// Returns `None` if `base_commit` isn't an ancestor or the range has
+    /// more than `max_commits` commits.
+    pub fn last_commits_since(
+        &self,
+        commit: Oid,
+        path: &str,
+        base_commit: Oid,
+        base: &HashMap<String, Oid>,
+        max_commits: usize,
+    ) -> Result<Option<HashMap<String, CommitSummary>>> {
+        if commit != base_commit && !self.repo.graph_descendant_of(commit, base_commit)? {
+            return Ok(None);
+        }
+        let Some(mut pending) = self.dir_entries(commit, path)? else {
+            return Ok(Some(HashMap::new()));
+        };
+        let range = [commit.to_string(), format!("^{base_commit}")];
+        let walk = self.walk_names(&range, path, &mut pending, Some(max_commits))?;
+        if !walk.complete {
+            return Ok(None);
+        }
+        let mut found = walk.found;
+        let base_entries = self.dir_entries(base_commit, path)?.unwrap_or_default();
+        let mut rest = walk.recheck;
+        for (name, (id, _)) in pending {
+            let unchanged = !walk.touched.contains(&name)
+                && base_entries.get(&name).is_some_and(|(base_id, _)| *base_id == id);
+            match base.get(&name) {
+                Some(c) if unchanged => {
+                    found.insert(name, summarize(&self.repo.find_commit(*c)?));
+                }
+                _ => rest.push(name),
+            }
+        }
+        found.extend(self.lookup_paths(commit, path, &rest)?);
+        Ok(Some(found))
+    }
+
+    /// Entries of directory `path`: name → (object id, is a directory).
+    fn dir_entries(&self, commit: Oid, path: &str) -> Result<Option<HashMap<String, (Oid, bool)>>> {
+        let Some(tree) = self.subtree(commit, path)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            tree.iter()
+                .map(|e| {
+                    let name = String::from_utf8_lossy(e.name_bytes()).into_owned();
+                    (name, (e.id(), e.kind() == Some(ObjectType::Tree)))
+                })
+                .collect(),
+        ))
+    }
+
+    /// Streams `git log --name-only` over `revs`, attributing entries of
+    /// `pending` (removing them) to the first commit that produced their
+    /// current content. Stops once no files are pending, or after
+    /// `max_commits` (then `complete` is false).
+    fn walk_names(
+        &self,
+        revs: &[String],
+        path: &str,
+        pending: &mut HashMap<String, (Oid, bool)>,
+        max_commits: Option<usize>,
+    ) -> Result<NameWalk> {
+        let files_pending = |p: &HashMap<String, (Oid, bool)>| p.values().any(|(_, dir)| !dir);
         let mut cmd = Command::new("git");
         cmd.arg("--git-dir")
             .arg(self.repo.path())
             .args(["-c", "log.showSignature=false", "log", "--no-color", "-z"])
             .args(["--name-only", "--no-renames", "-c"])
             .arg("--format=%x01%P%x1f%H%x1f%an%x1f%ae%x1f%at%x1f%s")
-            .arg(commit.to_string())
+            .args(revs)
             .env("GIT_LITERAL_PATHSPECS", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -402,12 +484,14 @@ impl GitRepo {
         let stdout = child.stdout.take().expect("piped");
         let prefix = if path.is_empty() { String::new() } else { format!("{path}/") };
 
+        let mut walk = NameWalk {
+            complete: true,
+            ..NameWalk::default()
+        };
         let mut reader = BufReader::new(stdout);
         let mut token = Vec::new();
         let mut current: Option<(CommitSummary, bool)> = None;
-        let mut recheck = Vec::new();
         let mut read_commits = 0;
-        let mut complete = true;
         loop {
             token.clear();
             if reader.read_until(0, &mut token)? == 0 {
@@ -418,21 +502,18 @@ impl GitRepo {
             }
             let t = token.strip_prefix(b"\n").unwrap_or(&token);
             if let Some(header) = t.strip_prefix(b"\x01") {
-                if !files_pending(&pending) {
+                if !files_pending(pending) {
                     break;
                 }
-                if read_commits == max_commits {
-                    complete = false;
+                if max_commits == Some(read_commits) {
+                    walk.complete = false;
                     break;
                 }
                 read_commits += 1;
-                current = header
-                    .iter()
-                    .position(|&b| b == 0x1f)
-                    .and_then(|i| {
-                        let is_merge = header[..i].contains(&b' ');
-                        Some((parse_log_header(&header[i + 1..])?, is_merge))
-                    });
+                current = header.iter().position(|&b| b == 0x1f).and_then(|i| {
+                    let is_merge = header[..i].contains(&b' ');
+                    Some((parse_log_header(&header[i + 1..])?, is_merge))
+                });
                 continue;
             }
             let Some((c, is_merge)) = &current else { continue };
@@ -443,29 +524,35 @@ impl GitRepo {
             else {
                 continue;
             };
+            if !walk.touched.contains(name) {
+                walk.touched.insert(name.to_owned());
+            }
             if let Some((target, _)) = pending.get(name)
                 && self.entry_id(c.id, &prefix, name) == Some(*target)
             {
                 pending.remove(name);
                 if *is_merge {
-                    recheck.push(name.to_owned());
+                    walk.recheck.push(name.to_owned());
                 }
-                found.insert(name.to_owned(), c.clone());
+                walk.found.insert(name.to_owned(), c.clone());
             }
         }
         // Stop git early if we have what we need.
         let _ = child.kill();
         let _ = child.wait();
-        if !complete {
-            return Ok((found, false));
-        }
+        Ok(walk)
+    }
 
+    /// `git log -1 -- <path>/<name>` for each name, eight at a time.
+    fn lookup_paths(&self, commit: Oid, path: &str, names: &[String]) -> Result<Vec<(String, CommitSummary)>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
         let git_dir = self.repo.path();
-        let mut rest: Vec<String> = pending.into_keys().collect();
-        rest.extend(recheck);
+        let prefix = if path.is_empty() { String::new() } else { format!("{path}/") };
         let lookups = std::thread::scope(|scope| {
-            let workers: Vec<_> = rest
-                .chunks(rest.len().div_ceil(8).max(1))
+            let workers: Vec<_> = names
+                .chunks(names.len().div_ceil(8))
                 .map(|names| {
                     let prefix = &prefix;
                     scope.spawn(move || {
@@ -473,7 +560,7 @@ impl GitRepo {
                             .iter()
                             .map(|n| {
                                 let latest = git_log_path(git_dir, commit, &format!("{prefix}{n}"), 0, 1)?;
-                                Ok((n.clone(), latest.into_iter().next()))
+                                Ok(latest.into_iter().next().map(|c| (n.clone(), c)))
                             })
                             .collect::<Result<Vec<_>>>()
                     })
@@ -484,12 +571,7 @@ impl GitRepo {
                 .map(|w| w.join().unwrap_or_else(|_| Err(Error::Other("lookup thread panicked".into()))))
                 .collect::<Result<Vec<_>>>()
         })?;
-        for (name, latest) in lookups.into_iter().flatten() {
-            if let Some(c) = latest {
-                found.insert(name, c);
-            }
-        }
-        Ok((found, true))
+        Ok(lookups.into_iter().flatten().flatten().collect())
     }
 
     /// The object id of `<prefix><name>` at `commit`.
@@ -681,6 +763,48 @@ pub(crate) mod tests {
         // Neither branch's commit alone produced the current `dir`; the merge did.
         assert_eq!(found["dir"].id, expected);
         assert_eq!(expected, head);
+    }
+
+    #[test]
+    fn incremental_last_commits_match_full_computation() {
+        let s = Scratch::new();
+        s.write("a.txt", "1");
+        s.write("b.txt", "1");
+        s.write("dir/x", "1");
+        s.commit("base");
+        s.write("b.txt", "2");
+        let base = s.commit("change b");
+        let repo = s.open();
+        let (old, _) = repo.last_commits(base, "", 100).unwrap();
+        let old_ids: HashMap<String, Oid> = old.iter().map(|(k, v)| (k.clone(), v.id)).collect();
+
+        // New commits: change a file, a directory, add an entry; also a
+        // change that is reverted (content equal to base, but touched).
+        s.write("a.txt", "2");
+        s.commit("change a");
+        s.write("dir/y", "1");
+        s.write("new.txt", "1");
+        s.commit("add dir/y and new.txt");
+        s.write("b.txt", "3");
+        s.commit("change b again");
+        s.write("b.txt", "2");
+        let head = s.commit("revert b");
+        let repo = s.open();
+
+        let incremental = repo.last_commits_since(head, "", base, &old_ids, 100).unwrap().unwrap();
+        let (full, _) = repo.last_commits(head, "", 100).unwrap();
+        let ids = |m: &HashMap<String, CommitSummary>| {
+            let mut v: Vec<(String, Oid)> = m.iter().map(|(k, c)| (k.clone(), c.id)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&incremental), ids(&full));
+        assert_eq!(full["b.txt"].summary, "revert b");
+
+        // Same commit: everything is reused. Unrelated base: not usable.
+        assert_eq!(repo.last_commits_since(base, "", base, &old_ids, 100).unwrap().unwrap().len(), 3);
+        assert!(repo.last_commits_since(base, "", head, &old_ids, 100).unwrap().is_none());
+        assert!(repo.last_commits_since(head, "", base, &old_ids, 2).unwrap().is_none());
     }
 
     #[test]

@@ -74,10 +74,16 @@ impl GitRepo {
     /// diff lines have been collected, further files are reported with
     /// stats only.
     pub fn diff_commit(&self, commit: Oid, max_files: usize, max_lines: usize) -> Result<CommitDiff> {
-        let commit = self.repo.find_commit(commit)?;
-        let new_tree = commit.tree()?;
-        let old_tree = match commit.parents().next() {
-            Some(p) => Some(p.tree()?),
+        let parent = self.repo.find_commit(commit)?.parent_ids().next();
+        self.diff_range(parent, commit, max_files, max_lines)
+    }
+
+    /// Diff between two commits (`old` = `None` for the empty tree), with
+    /// the same bounds as [`diff_commit`](Self::diff_commit).
+    pub fn diff_range(&self, old: Option<Oid>, new: Oid, max_files: usize, max_lines: usize) -> Result<CommitDiff> {
+        let new_tree = self.repo.find_commit(new)?.tree()?;
+        let old_tree = match old {
+            Some(c) => Some(self.repo.find_commit(c)?.tree()?),
             None => None,
         };
 

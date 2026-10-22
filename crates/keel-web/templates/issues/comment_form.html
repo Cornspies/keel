@@ -1,0 +1,15 @@
+{% if conv.can_comment %}
+<form method="post" action="{{ conv.base_url }}/comments" class="form comment-form">
+  <label class="sr-only" for="comment-body">Comment</label>
+  <textarea id="comment-body" name="body" rows="6" placeholder="Leave a comment. Markdown is supported."></textarea>
+  <div class="row-actions">
+    {% if conv.can_close %}
+      {% if conv.state == "open" %}<button class="btn" name="action" value="close">Close {% if conv.is_pull %}pull request{% else %}issue{% endif %}</button>
+      {% else if conv.state == "closed" %}<button class="btn" name="action" value="reopen">Reopen</button>{% endif %}
+    {% endif %}
+    <button class="btn btn-primary" name="action" value="comment">Comment</button>
+  </div>
+</form>
+{% else %}
+<p class="muted"><a href="/login">Sign in</a> to join the conversation.</p>
+{% endif %}

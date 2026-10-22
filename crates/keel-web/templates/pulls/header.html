@@ -1,0 +1,12 @@
+{% include "issues/conversation_head.html" %}
+<p class="pr-branches muted">
+  {% if conv.state == "merged" %}<strong>{% if let Some(m) = pr.merged_by %}{{ m }}{% else %}Someone{% endif %}</strong> merged {{ pr.commit_count }} {% if pr.commit_count == 1 %}commit{% else %}commits{% endif %} into
+  {% else %}<strong>{{ conv.author }}</strong> wants to merge {{ pr.commit_count }} {% if pr.commit_count == 1 %}commit{% else %}commits{% endif %} into{% endif %}
+  <span class="branch">{{ pr.base_ref }}</span> from <span class="branch">{{ pr.head_ref }}</span>
+  {% if let Some((short, url)) = pr.merge_commit %}in <a class="mono" href="{{ url }}">{{ short }}</a>{% endif %}
+</p>
+<nav class="tabs pr-tabs">
+  <a href="{{ pr.url }}"{% if pr.tab == "conversation" %} class="active"{% endif %}>Conversation{% if conv.comment_count > 0 %} <span class="count">{{ conv.comment_count }}</span>{% endif %}</a>
+  <a href="{{ pr.url }}/commits"{% if pr.tab == "commits" %} class="active"{% endif %}>Commits <span class="count">{{ pr.commit_count }}</span></a>
+  <a href="{{ pr.url }}/files"{% if pr.tab == "files" %} class="active"{% endif %}>Files changed <span class="count">{{ pr.file_count }}</span></a>
+</nav>

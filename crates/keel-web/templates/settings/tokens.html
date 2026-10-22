@@ -1,0 +1,47 @@
+{% extends "settings/layout.html" %}
+{% block settings %}
+<h1>Access tokens</h1>
+<p class="muted">Use a token instead of your password when git asks for one over HTTPS. Tokens can be read-only, can expire, and can be revoked individually.</p>
+
+{% if let Some(secret) = created %}
+<div class="flash token-created">
+  <strong>Your new token</strong> — copy it now, it won’t be shown again.
+  <div class="copy-field"><input readonly value="{{ secret }}" aria-label="New access token"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+  <p class="small">Use it as the password, e.g. <span class="mono">git clone {{ clone_example }}</span> with username <span class="mono">{{ username }}</span>.</p>
+</div>
+{% endif %}
+
+{% if tokens.is_empty() %}
+<p class="empty">You have no access tokens.</p>
+{% else %}
+<ul class="card-list">
+  {% for t in tokens %}
+  <li class="card-row">
+    <div>
+      <strong>{{ t.name }}</strong> <span class="mono muted small">keel_…{{ t.hint }}</span>
+      {% if t.can_write %}<span class="badge">read &amp; write</span>{% else %}<span class="badge">read-only</span>{% endif %}
+      {% if t.expired %}<span class="badge badge-danger">expired</span>{% endif %}
+      <div class="muted small">Created {{ t.created }} · {% if let Some(u) = t.last_used %}Last used {{ u }}{% else %}Never used{% endif %}{% if let Some(e) = t.expires %} · {% if t.expired %}Expired{% else %}Expires{% endif %} {{ e }}{% endif %}</div>
+    </div>
+    <form method="post" action="/settings/tokens/{{ t.id }}/delete"><button class="btn btn-small btn-danger">Revoke</button></form>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2>New token</h2>
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<form method="post" action="/settings/tokens" class="form">
+  <label>Name <input name="name" placeholder="e.g. work laptop" maxlength="100" required></label>
+  <label class="check"><input type="checkbox" name="write"> Allow pushing <span class="hint">Without this, the token can only clone and fetch.</span></label>
+  <label>Expires
+    <select name="expires">
+      <option value="30">in 30 days</option>
+      <option value="90" selected>in 90 days</option>
+      <option value="365">in a year</option>
+      <option value="">never</option>
+    </select>
+  </label>
+  <button class="btn btn-primary">Create token</button>
+</form>
+{% endblock %}

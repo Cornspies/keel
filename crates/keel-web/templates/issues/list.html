@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  <nav class="state-tabs">
+    <a href="?state=open"{% if show_open %} class="active"{% endif %}><span class="state-dot state-open" aria-hidden="true"></span>{{ open_count }} Open</a>
+    <a href="?state=closed"{% if !show_open %} class="active"{% endif %}><span class="state-dot state-closed" aria-hidden="true"></span>{{ closed_count }} Closed</a>
+  </nav>
+  <div class="spacer"></div>
+  {% if pulls %}
+  <a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/compare">New pull request</a>
+  {% else if signed_in %}
+  <a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/issues/new">New issue</a>
+  {% else %}
+  <a class="btn" href="/login?next=/{{ repo.owner }}/{{ repo.name }}/issues/new">Sign in to open an issue</a>
+  {% endif %}
+</div>
+{% if rows.is_empty() %}
+<p class="empty">{% if show_open %}No open {% if pulls %}pull requests{% else %}issues{% endif %}.{% else %}Nothing closed yet.{% endif %}</p>
+{% else %}
+<ul class="card-list issue-list">
+  {% for r in rows %}
+  <li class="card-row">
+    <span class="state-icon state-{{ r.state }}" title="{{ r.state }}" aria-label="{{ r.state }}"></span>
+    <div class="issue-main">
+      <a class="issue-title" href="{{ r.url }}">{{ r.title }}</a>
+      <div class="muted small">#{{ r.number }} opened <time title="{{ r.opened_full }}">{{ r.opened }}</time> by {{ r.author }}</div>
+    </div>
+    {% if r.comments > 0 %}<a class="muted small nowrap" href="{{ r.url }}">{{ r.comments }} {% if r.comments == 1 %}comment{% else %}comments{% endif %}</a>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>
+{% endblock %}

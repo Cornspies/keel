@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
-use keel_core::{Access, Repo};
+use keel_core::{Access, Repo, User, looks_like_token};
 use keel_git::{Service, git_command};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,28 +45,51 @@ async fn authorize(
     owner: &str,
     name: &str,
     service: Service,
-) -> Result<Repo, Response> {
+) -> Result<(Repo, Option<User>), Response> {
     let internal = |e: keel_core::Error| {
         tracing::error!("git http: {e}");
         text(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
     };
-    let user = match basic_auth(headers) {
-        Some((login, password)) => match state.core.authenticate(&login, &password).await {
-            Ok(Some(user)) => Some(user),
-            Ok(None) => return Err(unauthorized()),
-            Err(e) => return Err(internal(e)),
-        },
-        None => None,
+    // Either a password or a personal access token. Tokens are recognised
+    // by their prefix (in either field, as some tools put them in the
+    // username) and may be limited to reading.
+    let (user, can_write) = match basic_auth(headers) {
+        Some((login, secret)) => {
+            let result = if looks_like_token(&secret) || looks_like_token(&login) {
+                let token = if looks_like_token(&secret) { &secret } else { &login };
+                state.core.authenticate_token(token).await
+            } else {
+                state.core.authenticate(&login, &secret).await.map(|u| u.map(|u| (u, true)))
+            };
+            match result {
+                Ok(Some((user, can_write))) => (Some(user), can_write),
+                Ok(None) => return Err(unauthorized()),
+                Err(e) => return Err(internal(e)),
+            }
+        }
+        None => (None, false),
     };
     let name = name.strip_suffix(".git").unwrap_or(name);
     let repo = state.core.repo(owner, name).await.map_err(internal)?;
     let needed = if service.is_write() { Access::Write } else { Access::Read };
-    match (repo, &user) {
-        (Some(repo), user) if repo.access(user.as_ref()) >= needed => Ok(repo),
-        (_, None) => Err(unauthorized()),
-        (Some(repo), Some(_)) if repo.access(user.as_ref()) == Access::Read => {
-            Err(text(StatusCode::FORBIDDEN, "You don't have permission to push to this repository"))
+    let access = match &repo {
+        Some(repo) => {
+            let a = state.core.access(repo, user.as_ref()).await.map_err(internal)?;
+            if can_write { a } else { a.min(Access::Read) }
         }
+        None => Access::None,
+    };
+    match (repo, &user) {
+        (Some(repo), _) if access >= needed => Ok((repo, user)),
+        (_, None) => Err(unauthorized()),
+        (Some(_), Some(_)) if access == Access::Read => Err(text(
+            StatusCode::FORBIDDEN,
+            if can_write {
+                "You don't have permission to push to this repository"
+            } else {
+                "This access token is read-only; create one with write access to push"
+            },
+        )),
         _ => Err(text(StatusCode::NOT_FOUND, "Repository not found")),
     }
 }
@@ -93,7 +116,7 @@ pub async fn info_refs(
     let Some(service) = q.service.as_deref().and_then(Service::parse) else {
         return text(StatusCode::FORBIDDEN, "Only the smart HTTP protocol is supported; please update git");
     };
-    let repo = match authorize(&state, &headers, &owner, &name, service).await {
+    let (repo, _) = match authorize(&state, &headers, &owner, &name, service).await {
         Ok(r) => r,
         Err(res) => return res,
     };
@@ -157,10 +180,11 @@ async fn rpc(
     body: Body,
     service: Service,
 ) -> Response {
-    let repo = match authorize(&state, &headers, &owner, &name, service).await {
+    let (repo, user) = match authorize(&state, &headers, &owner, &name, service).await {
         Ok(r) => r,
         Err(res) => return res,
     };
+    let pusher = user.map(|u| u.id);
     let path = state.core.repo_path(&repo);
     let mut cmd = tokio::process::Command::from(git_command(
         service,
@@ -220,7 +244,7 @@ async fn rpc(
         match child.wait().await {
             Ok(status) if status.success() => {
                 if service == Service::ReceivePack
-                    && let Err(e) = core.after_push(repo.id).await
+                    && let Err(e) = core.after_push(repo.id, pusher).await
                 {
                     tracing::warn!("after push: {e}");
                 }

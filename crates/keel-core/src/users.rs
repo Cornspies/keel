@@ -5,14 +5,24 @@ use crate::{Core, Result, invalid, now, validate_username};
 
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
 
+/// A user account or an organization (`kind == "org"`), which share one
+/// namespace.
 #[derive(Clone, sqlx::FromRow)]
 pub struct User {
     pub id: i64,
     pub username: String,
+    /// Empty for organizations.
     pub email: String,
     password_hash: String,
     pub is_admin: bool,
+    pub kind: String,
     pub created_at: i64,
+}
+
+impl User {
+    pub fn is_org(&self) -> bool {
+        self.kind == "org"
+    }
 }
 
 // Hand-written so the password hash never ends up in logs.
@@ -26,12 +36,6 @@ impl std::fmt::Debug for User {
     }
 }
 
-// A macro rather than a const so queries stay `&'static str` via `concat!`.
-macro_rules! user_columns {
-    () => {
-        "id, username, email, password_hash, is_admin, created_at"
-    };
-}
 
 impl Core {
     /// Creates an account. The very first account becomes the administrator
@@ -48,7 +52,7 @@ impl Core {
 
         let hash = hash_password(password.to_owned()).await?;
         let mut tx = self.db.begin().await?;
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE kind = 'user'")
             .fetch_one(&mut *tx)
             .await?;
         if count > 0 && !self.config.open_registration {
@@ -88,7 +92,7 @@ impl Core {
         let user = sqlx::query_as::<_, User>(concat!(
             "SELECT ",
             user_columns!(),
-            " FROM users WHERE username = ?1 OR email = ?1"
+            " FROM users WHERE kind = 'user' AND (username = ?1 OR email = ?1)"
         ))
         .bind(login.trim())
         .fetch_optional(&self.db)
@@ -121,8 +125,50 @@ impl Core {
         .await?)
     }
 
+    /// Changes a password after checking the current one, and signs out all
+    /// sessions; the caller should start a new one for the current browser.
+    pub async fn change_password(&self, user: &User, current: &str, new: &str) -> Result<()> {
+        if !verify_password(current.to_owned(), user.password_hash.clone()).await? {
+            return invalid("Your current password is incorrect.");
+        }
+        if new.chars().count() < 8 {
+            return invalid("Passwords must be at least 8 characters long.");
+        }
+        let hash = hash_password(new.to_owned()).await?;
+        let mut tx = self.db.begin().await?;
+        sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
+            .bind(user.id)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn change_email(&self, user_id: i64, email: &str) -> Result<()> {
+        let email = email.trim();
+        if !email.contains('@') || email.len() > 254 {
+            return invalid("Please enter a valid email address.");
+        }
+        let result = sqlx::query("UPDATE users SET email = ?2 WHERE id = ?1")
+            .bind(user_id)
+            .bind(email)
+            .execute(&self.db)
+            .await;
+        match result {
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                invalid("An account with that email already exists.")
+            }
+            r => r.map(|_| ()).map_err(Into::into),
+        }
+    }
+
     pub async fn has_users(&self) -> Result<bool> {
-        let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM users LIMIT 1")
+        let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE kind = 'user' LIMIT 1")
             .fetch_optional(&self.db)
             .await?;
         Ok(row.is_some())
@@ -158,7 +204,8 @@ impl Core {
 
     pub async fn session_user(&self, token: &str) -> Result<Option<User>> {
         Ok(sqlx::query_as::<_, User>(
-            "SELECT u.id, u.username, u.email, u.password_hash, u.is_admin, u.created_at
+            "SELECT u.id, u.username, COALESCE(u.email, '') AS email, u.password_hash, u.is_admin,
+                u.kind, u.created_at
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1 AND s.expires_at > ?2",
         )
@@ -212,5 +259,16 @@ mod tests {
         assert_eq!(core.session_user(&token).await.unwrap().unwrap().id, ada.id);
         core.delete_session(&token).await.unwrap();
         assert!(core.session_user(&token).await.unwrap().is_none());
+
+        let token = core.create_session(ada.id).await.unwrap();
+        assert!(core.change_password(&ada, "wrong", "new password").await.is_err());
+        assert!(core.change_password(&ada, "correct horse", "short").await.is_err());
+        core.change_password(&ada, "correct horse", "new password").await.unwrap();
+        assert!(core.session_user(&token).await.unwrap().is_none(), "sessions revoked");
+        assert!(core.authenticate("ada", "new password").await.unwrap().is_some());
+
+        assert!(core.change_email(ada.id, "bob@example.com").await.is_err());
+        core.change_email(ada.id, "lovelace@example.com").await.unwrap();
+        assert!(core.authenticate("lovelace@example.com", "new password").await.unwrap().is_some());
     }
 }

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<form method="get" action="/{{ repo.owner }}/{{ repo.name }}/search" class="form form-inline search-form">
+  <input name="q" value="{{ q }}" placeholder="Search this repository" aria-label="Search this repository" autofocus>
+  <button class="btn btn-primary">Search</button>
+</form>
+{% include "search_results.html" %}
+{% endblock %}

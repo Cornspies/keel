@@ -146,9 +146,13 @@ impl Connection {
         let user = self.user.clone();
         let repo = self.core.repo(&request.owner, &request.repo).await?;
         let needed = if request.service.is_write() { Access::Write } else { Access::Read };
+        let access = match &repo {
+            Some(r) => self.core.access(r, user.as_ref()).await?,
+            None => Access::None,
+        };
         let repo = match repo {
-            Some(r) if r.access(user.as_ref()) >= needed => r,
-            Some(r) if r.access(user.as_ref()) == Access::Read => {
+            Some(r) if access >= needed => r,
+            Some(_) if access == Access::Read => {
                 Self::fail(&handle, channel, "keel: you don't have permission to push to this repository").await;
                 return Ok(());
             }
@@ -180,6 +184,7 @@ impl Connection {
         });
 
         let core = self.core.clone();
+        let pusher = self.user.as_ref().map(|u| u.id);
         let service = request.service;
         tokio::spawn(async move {
             let out = pump(stdout, handle.clone(), channel, None);
@@ -195,7 +200,7 @@ impl Connection {
             finish(&handle, channel, code).await;
             if code == 0
                 && service == Service::ReceivePack
-                && let Err(e) = core.after_push(repo.id).await
+                && let Err(e) = core.after_push(repo.id, pusher).await
             {
                 tracing::warn!("after push: {e}");
             }

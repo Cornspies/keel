@@ -1,0 +1,30 @@
+{% if !enabled %}
+<p class="flash flash-error">Code search is unavailable on this server (see the server log).</p>
+{% else if let Some(p) = problem %}
+<p class="flash">{{ p }}</p>
+{% else if searched %}
+  {% if results.is_empty() %}
+  <p class="empty">No code matches “{{ q }}”.</p>
+  {% else %}
+  <p class="muted">{% if truncated %}Showing the first {{ results.len() }} files{% else %}{{ results.len() }} {% if results.len() == 1 %}file{% else %}files{% endif %}{% endif %} matching “{{ q }}” on default branches.</p>
+  {% for r in results %}
+  <div class="box search-result">
+    <div class="box-head file-head">
+      <a class="muted" href="{{ r.repo_url }}">{{ r.repo }}</a><span class="muted">›</span><a class="mono" href="{{ r.url }}">{{ r.path }}</a>
+    </div>
+    {% if !r.lines.is_empty() %}
+    <div class="code-scroll">
+      <table class="code">
+        <tbody>
+        {% for l in r.lines %}
+          <tr><td class="ln"><a href="{{ r.url }}">{{ l.number }}</a></td><td class="lc">{{ l.html|safe }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if r.more > 0 %}<div class="search-more muted small">and {{ r.more }} more matching {% if r.more == 1 %}line{% else %}lines{% endif %}</div>{% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endif %}

@@ -4,10 +4,16 @@
 mod assets;
 mod error;
 mod githttp;
+mod issues;
+mod lastcommit;
+mod orgs;
 mod pages;
+mod pulls;
 mod render;
 mod repo;
+mod search;
 mod session;
+mod settings;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -40,11 +46,15 @@ pub struct AppState(Arc<Inner>);
 pub struct Inner {
     pub core: Core,
     assets: assets::Assets,
+    /// `None` if the index couldn't be opened; search is then unavailable.
+    search: Option<Arc<keel_search::SearchIndex>>,
     /// Git objects are immutable, so caches keyed by object ids never need
     /// invalidation; they only need a size bound.
     last_commits: Cache<(Oid, String), Arc<HashMap<String, CommitSummary>>>,
     highlighted: Cache<(Oid, String), Arc<Vec<String>>>,
     markdown: Cache<(Oid, String), Arc<String>>,
+    /// Merge result per (base, head); `None` if head is already merged.
+    mergeability: Cache<(Oid, Oid), Option<keel_git::Mergeability>>,
 }
 
 impl Deref for AppState {
@@ -55,10 +65,20 @@ impl Deref for AppState {
 }
 
 impl AppState {
+    /// Creates the state and starts background tasks (needs a Tokio
+    /// runtime).
     pub fn new(core: Core) -> Self {
         render::warm_up();
+        let state = Self::build(core);
+        lastcommit::warm_after_pushes(state.clone());
+        search::start_indexer(state.clone());
+        state
+    }
+
+    fn build(core: Core) -> Self {
         let mib = |n: u64| n * 1024 * 1024;
         Self(Arc::new(Inner {
+            search: search::open_index(&core.config.data_dir),
             core,
             assets: assets::Assets::new(),
             last_commits: Cache::builder()
@@ -75,6 +95,7 @@ impl AppState {
                 .max_capacity(mib(32))
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
+            mergeability: Cache::new(10_000),
         }))
     }
 }
@@ -109,8 +130,20 @@ pub fn router(state: AppState) -> Router {
         .route("/register", get(pages::register_form).post(pages::register))
         .route("/logout", post(pages::logout))
         .route("/new", get(pages::new_repo_form).post(pages::new_repo))
-        .route("/settings/keys", get(pages::keys).post(pages::add_key))
-        .route("/settings/keys/{id}/delete", post(pages::delete_key))
+        .route("/org/new", get(orgs::new_form).post(orgs::create))
+        .route("/org/{org}/settings", get(orgs::settings))
+        .route("/org/{org}/members", post(orgs::set_member))
+        .route("/org/{org}/members/{user}/remove", post(orgs::remove_member))
+        .route("/org/{org}/delete", post(orgs::delete))
+        .route("/search", get(search::global))
+        .route("/settings", get(settings::index))
+        .route("/settings/account", get(settings::account))
+        .route("/settings/account/email", post(settings::change_email))
+        .route("/settings/account/password", post(settings::change_password))
+        .route("/settings/keys", get(settings::keys).post(settings::add_key))
+        .route("/settings/keys/{id}/delete", post(settings::delete_key))
+        .route("/settings/tokens", get(settings::tokens).post(settings::create_token))
+        .route("/settings/tokens/{id}/delete", post(settings::delete_token))
         .route("/static/{file}", get(assets::serve))
         .route("/{owner}", get(pages::user))
         .route("/{owner}/{repo}", get(repo::home))
@@ -124,6 +157,26 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/branches", get(repo::refs))
         .route("/{owner}/{repo}/settings", get(repo::settings).post(repo::update_settings))
         .route("/{owner}/{repo}/delete", post(repo::delete))
+        .route("/{owner}/{repo}/search", get(search::in_repo))
+        .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
+        .route("/{owner}/{repo}/compare", get(pulls::compare_index))
+        .route("/{owner}/{repo}/compare/{*spec}", get(pulls::compare))
+        .route("/{owner}/{repo}/pull/{number}", get(pulls::show))
+        .route("/{owner}/{repo}/pull/{number}/commits", get(pulls::commits))
+        .route("/{owner}/{repo}/pull/{number}/files", get(pulls::files))
+        .route("/{owner}/{repo}/pull/{number}/merge", post(pulls::merge))
+        .route("/{owner}/{repo}/issues", get(issues::list).post(issues::create))
+        .route("/{owner}/{repo}/issues/new", get(issues::new_form))
+        .route("/{owner}/{repo}/issues/{number}", get(issues::show))
+        .route("/{owner}/{repo}/issues/{number}/edit", get(issues::edit_form).post(issues::edit))
+        .route("/{owner}/{repo}/issues/{number}/comments", post(issues::comment))
+        .route(
+            "/{owner}/{repo}/issues/{number}/comments/{id}/edit",
+            get(issues::edit_comment_form).post(issues::edit_comment),
+        )
+        .route("/{owner}/{repo}/issues/{number}/comments/{id}/delete", post(issues::delete_comment))
+        .route("/{owner}/{repo}/collaborators", post(repo::set_collaborator))
+        .route("/{owner}/{repo}/collaborators/{user}/remove", post(repo::remove_collaborator))
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn_with_state(state.clone(), web_guard))
         .layer(CompressionLayer::new());
