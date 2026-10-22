@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/settings">Settings</a> / Webhooks</p>
+  <h2>Webhooks</h2>
+  <p class="muted">keel POSTs a JSON payload to each URL when the chosen events happen. Payloads and headers follow GitHub's format (<span class="mono">X-GitHub-Event</span>, <span class="mono">X-Hub-Signature-256</span>), so most services that accept GitHub webhooks accept these.</p>
+  {% if !hooks.is_empty() %}
+  <ul class="card-list hook-list">
+    {% for h in hooks %}
+    <li class="card-row">
+      <span class="hook-status hook-{% if let Some(l) = h.last %}{{ l }}{% else %}none{% endif %}" title="{% if let Some(l) = h.last %}Last delivery: {{ l }}{% else %}No deliveries yet{% endif %}"></span>
+      <div class="hook-main">
+        <a class="mono" href="/{{ repo.owner }}/{{ repo.name }}/settings/hooks/{{ h.id }}">{{ h.url }}</a>
+        <div class="muted small">{{ h.events }}{% if !h.active %} · <strong>inactive</strong>{% endif %}</div>
+      </div>
+      <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/settings/hooks/{{ h.id }}">Edit</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h3>Add a webhook</h3>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/hooks" class="form">
+    <label>Payload URL <input name="url" value="{{ url }}" placeholder="https://ci.example.com/hooks/keel" required></label>
+    {% if !allow_private %}<p class="hint">Addresses on private networks (like localhost or 10.x.x.x) can't be used on this server.</p>{% endif %}
+    <label>Secret <span class="hint">(optional) Signs each delivery so the receiver can check it came from here.</span> <input name="secret" autocomplete="off"></label>
+    {% include "repo/hook_events.html" %}
+    <label class="check"><input type="checkbox" name="active" checked> Active</label>
+    <button class="btn btn-primary">Add webhook</button>
+  </form>
+</div>
+{% endblock %}

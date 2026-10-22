@@ -7,6 +7,18 @@
     </h1>
     <div class="spacer"></div>
     <div class="fork-button">
+      {% match repo.watching %}
+      {% when Some(watching) %}
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/watch" class="inline">
+        <input type="hidden" name="to" value="{% if *watching %}off{% else %}on{% endif %}">
+        <button class="btn btn-small" title="{% if *watching %}Stop getting notifications about all issues and pull requests{% else %}Get notified about all issues and pull requests{% endif %}">{% if *watching %}Unwatch{% else %}Watch{% endif %}</button>
+      </form>
+      {% when None %}
+      <a class="btn btn-small" href="/login">Watch</a>
+      {% endmatch %}
+      <span class="btn btn-small count-button" title="Watchers" aria-label="Watchers: {{ repo.watchers }}">{{ repo.watchers }}</span>
+    </div>
+    <div class="fork-button">
       <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/fork">Fork</a>
       <a class="btn btn-small count-button" href="/{{ repo.owner }}/{{ repo.name }}/forks" title="Forks" aria-label="Forks: {{ repo.fork_count }}">{{ repo.fork_count }}</a>
     </div>

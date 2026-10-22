@@ -291,7 +291,7 @@ async fn compare_page(
     let mut base_repos = vec![full_name(repo)];
     base_repos.extend(related.iter().filter(|r| repo.forked_from == Some(r.id)).map(full_name));
     html(ComparePage {
-        repo: RepoView::new(state, repo, access, "pulls", &default).await?,
+        repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", &default).await?,
         can_open: viewer.is_some() && existing.is_none(),
         page: Page::new(state, viewer, format!("Compare {base}...{head_label} · {}/{}", repo.owner, repo.name)),
         base_repos,
@@ -485,7 +485,7 @@ async fn show_page(
     let conv = conversation(state, repo, access, &l.issue, viewer.as_ref(), Some(&placed)).await?;
     let can_delete_branch = can_delete_branch(state, repo, &l, viewer.as_ref()).await?;
     html(PullPage {
-        repo: RepoView::new(state, repo, access, "pulls", "").await?,
+        repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", "").await?,
         page: Page::new(
             state,
             viewer,
@@ -565,7 +565,7 @@ pub async fn commits(
     let (pr, changes) = header(&state, &repo, &l, "commits").await?;
     let conv = conversation(&state, &repo, access, &l.issue, viewer.as_ref(), None).await?;
     html(CommitsTab {
-        repo: RepoView::new(&state, &repo, access, "pulls", "").await?,
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "pulls", "").await?,
         page: Page::new(&state, viewer, format!("Commits · Pull request #{number}")),
         pr,
         conv,
@@ -768,7 +768,7 @@ pub async fn files(
     }
     let signed_in = viewer.is_some();
     html(FilesTab {
-        repo: RepoView::new(&state, &repo, access, "pulls", "").await?,
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "pulls", "").await?,
         can_review: viewer.as_ref().is_some_and(|v| !l.issue.is_author(v)) && l.issue.is_open(),
         signed_in,
         page: Page::new(&state, viewer, format!("Files changed · Pull request #{number}")),
@@ -953,6 +953,7 @@ pub async fn merge(
     };
     let base_ref = l.pull.base_ref.clone();
     let (name_, email) = (user.username.clone(), user.email.clone());
+    let before = state.core.ref_snapshot(repo.id).await?;
     let merged = with_git(&state, &repo, move |g| {
         let merge_base = g.merge_base(base, head)?;
         let who = Identity { name: &name_, email: &email };
@@ -971,18 +972,20 @@ pub async fn merge(
         Err(e) => return Err(e),
     };
     state.core.mark_merged(&l.issue, Some(user.id), merge_base, head, Some(commit)).await?;
-    state.core.after_push(repo.id, Some(user.id)).await?;
 
     if f.delete_branch.is_some()
         && can_delete_branch(&state, &repo, &l, Some(&user)).await?
         && let Some(head_repo) = state.core.repo_by_id(l.pull.head_repo_id.unwrap_or(-1)).await?
     {
+        let head_before = state.core.ref_snapshot(head_repo.id).await?;
         let branch = format!("refs/heads/{}", l.pull.head_ref);
         // Only if nobody pushed to it meanwhile.
         let deleted = with_git(&state, &head_repo, move |g| Ok(g.update_ref(&branch, None, Some(head)).is_ok())).await?;
         if deleted && head_repo.id != repo.id {
-            state.core.after_push(head_repo.id, Some(user.id)).await?;
+            state.core.after_push(head_repo.id, Some(user.id), Some(head_before)).await?;
         }
     }
+    // After any branch deletion here, so the push event includes it.
+    state.core.after_push(repo.id, Some(user.id), Some(before)).await?;
     Ok(Redirect::to(&issue_url(&repo, &l.issue)).into_response())
 }

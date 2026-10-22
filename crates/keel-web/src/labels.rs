@@ -90,7 +90,7 @@ async fn labels_page(
     let labels = state.core.labels(repo.id).await?;
     let counts = state.core.label_counts(repo.id).await?;
     html(LabelsPage {
-        repo: RepoView::new(state, repo, access, "labels", "").await?,
+        repo: RepoView::new(state, repo, access, viewer.as_ref(), "labels", "").await?,
         page: Page::new(state, viewer, format!("Labels · {}/{}", repo.owner, repo.name)),
         labels: labels
             .iter()

@@ -1,0 +1,11 @@
+<fieldset class="hook-events">
+  <legend>Which events?</legend>
+  <label class="check"><input type="radio" name="which" value="push"{% if events.which == "push" %} checked{% endif %}> Just pushes</label>
+  <label class="check"><input type="radio" name="which" value="all"{% if events.which == "all" %} checked{% endif %}> Everything</label>
+  <label class="check"><input type="radio" name="which" value="some"{% if events.which == "some" %} checked{% endif %}> Let me choose:</label>
+  <div class="event-choices">
+    {% for (name, about, on) in events.rows %}
+    <label class="check"><input type="checkbox" name="events" value="{{ name }}"{% if *on %} checked{% endif %}> <span class="mono">{{ name }}</span> <span class="hint">{{ about }}</span></label>
+    {% endfor %}
+  </div>
+</fieldset>

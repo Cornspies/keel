@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use sqlx::SqliteConnection;
 
+use crate::activity::{Activity, IssueAction};
 use crate::issues::insert_comment;
 use crate::{Core, Issue, Repo, Result, User, invalid, now};
 
@@ -185,6 +186,7 @@ impl Core {
             .map(|l| l.id)
             .collect();
         let mut tx = self.db.begin().await?;
+        let mut changed = Vec::new();
         for label in &available {
             let (was, is) = (current.contains(&label.id), label_ids.contains(&label.id));
             if was == is {
@@ -198,8 +200,12 @@ impl Core {
             sqlx::query(sql).bind(issue.id).bind(label.id).execute(&mut *tx).await?;
             let kind = if is { "labeled" } else { "unlabeled" };
             insert_comment(&mut tx, issue.id, Some(actor.id), kind, &label.name).await?;
+            changed.push(if is { IssueAction::Labeled(label.clone()) } else { IssueAction::Unlabeled(label.clone()) });
         }
         tx.commit().await?;
+        for action in changed {
+            self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
+        }
         Ok(())
     }
 
@@ -251,6 +257,7 @@ impl Core {
         }
         let current = self.assignees_of(&[issue.id]).await?.remove(&issue.id).unwrap_or_default();
         let mut tx = self.db.begin().await?;
+        let mut changed = Vec::new();
         for user in &candidates {
             let (was, is) = (current.contains(&user.username), user_ids.contains(&user.id));
             if was == is {
@@ -264,8 +271,12 @@ impl Core {
             sqlx::query(sql).bind(issue.id).bind(user.id).execute(&mut *tx).await?;
             let kind = if is { "assigned" } else { "unassigned" };
             insert_comment(&mut tx, issue.id, Some(actor.id), kind, &user.username).await?;
+            changed.push(if is { IssueAction::Assigned(user.clone()) } else { IssueAction::Unassigned(user.clone()) });
         }
         tx.commit().await?;
+        for action in changed {
+            self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
+        }
         Ok(())
     }
 }

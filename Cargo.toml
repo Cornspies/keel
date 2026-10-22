@@ -14,6 +14,7 @@ keel-git = { path = "crates/keel-git" }
 keel-web = { path = "crates/keel-web" }
 keel-ssh = { path = "crates/keel-ssh" }
 keel-search = { path = "crates/keel-search" }
+keel-hooks = { path = "crates/keel-hooks" }
 
 anyhow = "1"
 thiserror = "2"
@@ -42,6 +43,7 @@ sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"
 form_urlencoded = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 flate2 = "1"
 time = { version = "0.3", features = ["formatting", "macros"] }
 russh = "0.64"

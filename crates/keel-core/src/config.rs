@@ -12,6 +12,10 @@ pub struct Config {
     /// and becomes the administrator.
     pub open_registration: bool,
     pub site_name: String,
+    /// Whether webhooks may target loopback and private network addresses
+    /// (off by default, so repository admins can't probe the server's
+    /// network).
+    pub webhook_allow_private: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +34,7 @@ impl Default for Config {
             ssh: None,
             open_registration: true,
             site_name: "keel".into(),
+            webhook_allow_private: false,
         }
     }
 }

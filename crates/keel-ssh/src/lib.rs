@@ -162,6 +162,11 @@ impl Connection {
             }
         };
 
+        // What the refs were, to tell webhooks what the push changed.
+        let before = match request.service {
+            Service::ReceivePack => self.core.ref_snapshot(repo.id).await.ok(),
+            _ => None,
+        };
         let path = self.core.repo_path(&repo);
         let protocol = self.protocol.get(&channel).map(String::as_str);
         let mut cmd = tokio::process::Command::from(git_command(request.service, &path, false, false, protocol));
@@ -200,7 +205,7 @@ impl Connection {
             finish(&handle, channel, code).await;
             if code == 0
                 && service == Service::ReceivePack
-                && let Err(e) = core.after_push(repo.id, pusher).await
+                && let Err(e) = core.after_push(repo.id, pusher, before).await
             {
                 tracing::warn!("after push: {e}");
             }

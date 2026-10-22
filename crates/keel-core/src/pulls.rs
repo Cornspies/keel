@@ -2,6 +2,7 @@
 
 use keel_git::{GitRepo, Oid};
 
+use crate::activity::{Activity, IssueAction};
 use crate::issues::{insert_comment, insert_issue};
 use crate::{Access, Core, Error, Issue, Repo, Result, User, invalid, now};
 
@@ -53,7 +54,7 @@ pub fn related(base: &Repo, head: &Repo) -> bool {
 }
 
 impl Core {
-    async fn git<T: Send + 'static>(
+    pub(crate) async fn git<T: Send + 'static>(
         &self,
         repo_id: i64,
         f: impl FnOnce(&GitRepo) -> keel_git::Result<T> + Send + 'static,
@@ -147,7 +148,10 @@ impl Core {
         tx.commit().await?;
         self.git(repo.id, move |g| g.update_ref(&pull_ref(number), Some(head), None))
             .await?;
-        self.issue(repo.id, number).await?.ok_or(Error::NotFound)
+        let issue = self.issue(repo.id, number).await?.ok_or(Error::NotFound)?;
+        self.record(Activity::Issue { issue_id: issue.id, actor: Some(author.id), action: IssueAction::Opened })
+            .await;
+        Ok(issue)
     }
 
     /// The number of the open pull request for these branches, if any.
@@ -269,6 +273,7 @@ impl Core {
         .await?;
         insert_comment(&mut tx, issue.id, actor, "merged", "").await?;
         tx.commit().await?;
+        self.record(Activity::Issue { issue_id: issue.id, actor, action: IssueAction::Merged }).await;
         Ok(())
     }
 
@@ -287,9 +292,14 @@ impl Core {
         for (base_repo, number) in open {
             let Some(issue) = self.issue(base_repo, number).await? else { continue };
             let Some(pull) = self.pull(issue.id).await? else { continue };
+            let pinned = self.git(base_repo, move |g| Ok(g.ref_tip(&pull_ref(number)))).await?;
             let (Some(base), Some(head)) = self.pull_tips(&issue, &pull).await? else {
                 continue;
             };
+            if pinned.is_some_and(|p| p != head) {
+                let action = IssueAction::Synchronized;
+                self.record(Activity::Issue { issue_id: issue.id, actor: pusher, action }).await;
+            }
             // Only a push to the base repository merges; a fork resetting
             // its branch to something already merged doesn't.
             if base_repo == repo_id && self.git(base_repo, move |g| g.is_ancestor(head, base)).await? {

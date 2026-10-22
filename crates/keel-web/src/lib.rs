@@ -8,7 +8,9 @@ mod githttp;
 mod issues;
 mod labels;
 mod lastcommit;
+mod notifications;
 mod orgs;
+mod hooks;
 mod pages;
 mod pulls;
 mod render;
@@ -34,6 +36,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use error::AppError;
+use error::AppResult;
 
 pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
@@ -57,6 +60,9 @@ pub struct Inner {
     markdown: Cache<(Oid, String), Arc<String>>,
     /// Merge result per (base, head); `None` if head is already merged.
     mergeability: Cache<(Oid, Oid), Option<keel_git::Mergeability>>,
+    /// Unread notifications per user id, looked up with the session on each
+    /// request so that page headers can show it.
+    unread: Cache<i64, i64>,
 }
 
 impl Deref for AppState {
@@ -98,7 +104,15 @@ impl AppState {
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
             mergeability: Cache::new(10_000),
+            unread: Cache::new(100_000),
         }))
+    }
+
+    /// Updates the unread count shown in page headers.
+    pub(crate) async fn refresh_unread(&self, user_id: i64) -> AppResult<()> {
+        let n = self.core.unread_notifications(user_id).await?;
+        self.unread.insert(user_id, n);
+        Ok(())
     }
 }
 
@@ -110,11 +124,14 @@ pub(crate) struct Page {
     pub registration_open: bool,
     pub css_url: &'static str,
     pub js_url: &'static str,
+    /// The viewer's unread notifications.
+    pub unread: i64,
 }
 
 impl Page {
     pub fn new(state: &AppState, viewer: Option<User>, title: impl Into<String>) -> Self {
         Self {
+            unread: viewer.as_ref().and_then(|v| state.unread.get(&v.id)).unwrap_or(0),
             title: title.into(),
             site_name: state.core.config.site_name.clone(),
             viewer,
@@ -138,6 +155,9 @@ pub fn router(state: AppState) -> Router {
         .route("/org/{org}/members/{user}/remove", post(orgs::remove_member))
         .route("/org/{org}/delete", post(orgs::delete))
         .route("/search", get(search::global))
+        .route("/notifications", get(notifications::inbox))
+        .route("/notifications/read", post(notifications::mark_all_read))
+        .route("/notifications/{id}/read", post(notifications::mark_read))
         .route("/settings", get(settings::index))
         .route("/settings/account", get(settings::account))
         .route("/settings/account/email", post(settings::change_email))
@@ -170,6 +190,13 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/pull/{number}/comments", post(pulls::inline_comment))
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/reply", post(pulls::reply))
         .route("/{owner}/{repo}/pull/{number}/review", post(pulls::review))
+        .route("/{owner}/{repo}/watch", post(notifications::watch))
+        .route("/{owner}/{repo}/issues/{number}/subscription", post(notifications::subscribe))
+        .route("/{owner}/{repo}/settings/hooks", get(hooks::index).post(hooks::create))
+        .route("/{owner}/{repo}/settings/hooks/{id}", get(hooks::show).post(hooks::update))
+        .route("/{owner}/{repo}/settings/hooks/{id}/delete", post(hooks::delete))
+        .route("/{owner}/{repo}/settings/hooks/{id}/test", post(hooks::test))
+        .route("/{owner}/{repo}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::redeliver))
         .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
         .route("/{owner}/{repo}/forks", get(forks::list))
         .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))

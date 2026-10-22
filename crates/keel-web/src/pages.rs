@@ -256,7 +256,11 @@ pub async fn new_repo(
         return Err(AppError::Forbidden);
     }
     match state.core.create_repo(&owner, &f.name, &f.description, is_private).await {
-        Ok(repo) => Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response()),
+        Ok(repo) => {
+            // People watch repositories they create (also in organizations).
+            state.core.set_watching(user.id, repo.id, true).await?;
+            Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
+        }
         Err(keel_core::Error::Invalid(msg)) => html(NewRepoPage {
             owners: possible_owners(&state, &user).await?,
             owner: owner.username,

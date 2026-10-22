@@ -112,6 +112,9 @@ pub(crate) struct RepoView {
     /// `owner/name` of the repository this was forked from.
     pub parent: Option<String>,
     pub fork_count: i64,
+    pub watchers: i64,
+    /// Whether the viewer watches it (`None` when signed out).
+    pub watching: Option<bool>,
 }
 
 impl RepoView {
@@ -119,6 +122,7 @@ impl RepoView {
         state: &AppState,
         repo: &Repo,
         access: Access,
+        viewer: Option<&User>,
         tab: &'static str,
         default_rev: &str,
     ) -> AppResult<Self> {
@@ -131,6 +135,11 @@ impl RepoView {
         Ok(Self {
             parent,
             fork_count: state.core.fork_count(repo.id).await?,
+            watchers: state.core.watcher_count(repo.id).await?,
+            watching: match viewer {
+                Some(v) => Some(state.core.is_watching(v.id, repo.id).await?),
+                None => None,
+            },
             open_issues: counts.open_issues,
             open_pulls: counts.open_pulls,
             owner: repo.owner.clone(),
@@ -350,7 +359,7 @@ async fn render_tree(
 
     match data {
         TreeData::Empty => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, "code", "").await?,
+            repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", "").await?,
             page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
         }),
         TreeData::File(r) => Ok(Redirect::to(&format!(
@@ -391,8 +400,8 @@ async fn render_tree(
                 None => (String::new(), None),
             };
             html(TreePage {
+                repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
                 page: Page::new(&state, viewer, title),
-                repo: RepoView::new(&state, &repo, access, "code", &default_branch).await?,
                 crumbs: crumbs(&base, &resolved.rev, &resolved.path),
                 history_url: format!("{base}/commits/{rev_url}/{}", encode_path(&resolved.path)),
                 // A full commit id keeps the URL stable (and cacheable) even
@@ -585,8 +594,8 @@ pub async fn blob(
     let rev_url = encode_path(&r.rev);
     let path_url = encode_path(&r.path);
     html(BlobPage {
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "code", &default_branch).await?,
         crumbs: crumbs(&base, &r.rev, &r.path),
         size: human_size(size),
         line_count,
@@ -690,7 +699,7 @@ pub async fn commits_default(
     match branch {
         Some(b) => Ok(Redirect::to(&format!("/{}/{}/commits/{}", repo.owner, repo.name, encode_path(&b))).into_response()),
         None => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, "commits", "").await?,
+            repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", "").await?,
             page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
         }),
     }
@@ -719,8 +728,8 @@ pub async fn commits(
     let here = format!("{base}/commits/{}/{}", encode_path(&r.rev), encode_path(&r.path));
     let here = here.trim_end_matches('/').to_owned();
     html(CommitsPage {
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Commits · {}/{}", repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "commits", &default_branch).await?,
         commits: list.iter().map(|c| CommitView::new(&base, c)).collect(),
         newer_url: (page_no > 1).then(|| format!("{here}?page={}", page_no - 1)),
         older_url: has_older.then(|| format!("{here}?page={}", page_no + 1)),
@@ -870,8 +879,8 @@ pub async fn commit(
     let files = file_views(&base, &detail.commit.id.to_string(), &diff);
 
     html(CommitPage {
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} · {}/{}", detail.commit.summary, repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "commits", &default_branch).await?,
         commit: CommitView::new(&base, &detail.commit),
         body: detail.body,
         committer: detail.committer.name,
@@ -926,8 +935,8 @@ pub async fn refs(
         name: r.name.clone(),
     };
     html(RefsPage {
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "branches", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Branches · {}/{}", repo.owner, repo.name)),
-        repo: RepoView::new(&state, &repo, access, "branches", &default_branch).await?,
         branches: branches.iter().map(view).collect(),
         tags: tags.iter().map(view).collect(),
     })
@@ -980,7 +989,7 @@ async fn settings_page_with(
         .collect();
     let owned_by_org = state.core.user_by_id(repo.owner_id).await?.is_some_and(|o| o.is_org());
     html(SettingsPage {
-        repo: RepoView::new(state, repo, Access::Admin, "settings", &default_branch).await?,
+        repo: RepoView::new(state, repo, Access::Admin, Some(&user), "settings", &default_branch).await?,
         page: Page::new(state, Some(user), format!("Settings · {}/{}", repo.owner, repo.name)),
         error,
         general_error,

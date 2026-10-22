@@ -9,12 +9,14 @@ macro_rules! user_columns {
     };
 }
 
+mod activity;
 mod auth;
 mod cache;
 mod config;
 mod issues;
 mod labels;
 mod names;
+mod notifications;
 mod permissions;
 mod pulls;
 mod repos;
@@ -22,6 +24,7 @@ mod reviews;
 mod ssh_keys;
 mod tokens;
 mod users;
+mod webhooks;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,11 +32,13 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
+pub use activity::{Activity, IssueAction};
 pub use cache::EntryCommits;
 pub use config::{Config, SshConfig};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
 pub use names::{validate_repo_name, validate_username};
+pub use notifications::{Notification, Subscription, mentions};
 pub use permissions::{Access, OrgRole};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::Repo;
@@ -41,6 +46,7 @@ pub use reviews::{InlineAnchor, Verdict};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use tokens::{AccessToken, looks_like_token};
 pub use users::User;
+pub use webhooks::{Attempt, Delivery, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -93,6 +99,8 @@ pub struct Core {
     pub db: SqlitePool,
     pub config: Arc<Config>,
     events: tokio::sync::broadcast::Sender<RepoEvent>,
+    /// Signalled when a webhook delivery is queued.
+    hook_wakeup: Arc<tokio::sync::Notify>,
 }
 
 impl Core {
@@ -116,8 +124,10 @@ impl Core {
             db,
             config: Arc::new(config),
             events: tokio::sync::broadcast::channel(256).0,
+            hook_wakeup: Arc::default(),
         };
         core.delete_expired_sessions().await?;
+        core.prune_notifications(180).await?;
         Ok(core)
     }
 

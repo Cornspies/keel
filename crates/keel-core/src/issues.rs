@@ -3,6 +3,7 @@
 
 use sqlx::SqliteConnection;
 
+use crate::activity::{Activity, IssueAction};
 use crate::{Core, Error, Result, User, invalid, now};
 
 const MAX_TITLE: usize = 256;
@@ -199,8 +200,9 @@ pub(crate) async fn touch(conn: &mut SqliteConnection, issue_id: i64) -> Result<
 impl Core {
     pub async fn create_issue(&self, repo_id: i64, author: &User, title: &str, body: &str) -> Result<Issue> {
         let mut conn = self.db.acquire().await?;
-        let (_, number) = insert_issue(&mut conn, repo_id, author, title, body, false).await?;
+        let (issue_id, number) = insert_issue(&mut conn, repo_id, author, title, body, false).await?;
         drop(conn);
+        self.record(Activity::Issue { issue_id, actor: Some(author.id), action: IssueAction::Opened }).await;
         self.issue(repo_id, number).await?.ok_or(Error::NotFound)
     }
 
@@ -297,6 +299,7 @@ impl Core {
         let mut tx = self.db.begin().await?;
         let id = insert_comment(&mut tx, issue.id, Some(author.id), "comment", body).await?;
         tx.commit().await?;
+        self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
         Ok(id)
     }
 
@@ -315,10 +318,12 @@ impl Core {
             .await?;
         insert_comment(&mut tx, issue.id, Some(actor.id), if open { "reopened" } else { "closed" }, "").await?;
         tx.commit().await?;
+        let action = if open { IssueAction::Reopened } else { IssueAction::Closed };
+        self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
         Ok(())
     }
 
-    pub async fn edit_issue(&self, issue: &Issue, title: &str, body: &str) -> Result<()> {
+    pub async fn edit_issue(&self, issue: &Issue, actor: &User, title: &str, body: &str) -> Result<()> {
         validate(title, body)?;
         sqlx::query("UPDATE issues SET title = ?2, body = ?3, updated_at = ?4 WHERE id = ?1")
             .bind(issue.id)
@@ -327,6 +332,7 @@ impl Core {
             .bind(now())
             .execute(&self.db)
             .await?;
+        self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action: IssueAction::Edited }).await;
         Ok(())
     }
 
@@ -404,7 +410,7 @@ mod tests {
         core.delete_comment(&comment).await.unwrap();
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().comment_count, 0);
 
-        core.edit_issue(&first, "It crashes on start", "More detail").await.unwrap();
+        core.edit_issue(&first, &bob, "It crashes on start", "More detail").await.unwrap();
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().title, "It crashes on start");
 
         // Deleting the author keeps the issue.

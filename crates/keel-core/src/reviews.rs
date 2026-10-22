@@ -3,6 +3,7 @@
 
 use keel_git::Oid;
 
+use crate::activity::Activity;
 use crate::issues::{insert_comment, touch, validate_comment};
 use crate::{Comment, Core, Error, Issue, Result, User, invalid, now};
 
@@ -79,6 +80,7 @@ impl Core {
         .await?;
         touch(&mut tx, issue.id).await?;
         tx.commit().await?;
+        self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
         Ok(id)
     }
 
@@ -106,6 +108,7 @@ impl Core {
         .await?;
         touch(&mut tx, issue.id).await?;
         tx.commit().await?;
+        self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
         Ok(id)
     }
 
@@ -127,6 +130,7 @@ impl Core {
         let mut tx = self.db.begin().await?;
         let id = insert_comment(&mut tx, issue.id, Some(author.id), verdict.as_str(), body).await?;
         tx.commit().await?;
+        self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
         Ok(id)
     }
 

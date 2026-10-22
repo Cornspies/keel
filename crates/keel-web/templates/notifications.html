@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="narrow-left wide">
+  <div class="section-head">
+    <h1>Notifications</h1>
+    {% if unread > 0 %}<form method="post" action="/notifications/read"><button class="btn btn-small">Mark all as read</button></form>{% endif %}
+  </div>
+  <nav class="state-tabs inbox-tabs">
+    <a href="/notifications"{% if !show_all %} class="active"{% endif %}>Unread{% if unread > 0 %} <span class="count">{{ unread }}</span>{% endif %}</a>
+    <a href="/notifications?all=1"{% if show_all %} class="active"{% endif %}>All</a>
+  </nav>
+  {% if items.is_empty() %}
+  <p class="empty">{% if show_all %}No notifications yet. You'll hear about issues and pull requests you take part in, are mentioned or assigned in, and about repositories you watch.{% else %}All caught up.{% endif %}</p>
+  {% else %}
+  <ul class="card-list notification-list">
+    {% for n in items %}
+    <li class="card-row{% if n.unread %} unread{% endif %}">
+      <span class="state-icon state-{{ n.state }}" title="{% if n.is_pull %}Pull request{% else %}Issue{% endif %}, {{ n.state }}"></span>
+      <div class="issue-main">
+        <div class="muted small">{{ n.repo }} #{{ n.number }}</div>
+        <a class="issue-title" href="{{ n.url }}">{{ n.title }}</a>
+        <div class="muted small">{{ n.summary }} <time title="{{ n.when_full }}">{{ n.when }}</time></div>
+      </div>
+      <span class="badge">{{ n.reason }}</span>
+      {% if n.unread %}<form method="post" action="/notifications/{{ n.id }}/read"><button class="btn btn-small" title="Mark as read">Done</button></form>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <div class="pager">
+    {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+    {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

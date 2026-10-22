@@ -17,10 +17,15 @@ One binary, one data directory, no external services.
   and change requests, and merging with a merge commit or squash, with
   conflict detection.
 - **Forks** that are created instantly and share disk space with the original.
+- **Notifications:** an inbox for issues and pull requests you opened, commented
+  on, are assigned to or mentioned in, or whose repository you watch; with
+  per-thread subscribe/unsubscribe.
+- **Webhooks** for pushes, issues, comments, pull requests and reviews, in
+  GitHub's payload format and signed, with retries and a delivery log.
 - **People:** accounts, organizations (owners and members), per-repository
   collaborators (read/write/admin), private repositories.
 
-CI and webhooks are not built in.
+CI is not built in; connect one with a webhook.
 
 ## Quick start
 
@@ -59,6 +64,7 @@ Every flag can also be set as an environment variable.
 | `--ssh-host` / `--ssh-port` | `KEEL_SSH_HOST` / `KEEL_SSH_PORT` | host of `--base-url` / port of `--ssh-addr` |
 | `--closed-registration` | `KEEL_CLOSED_REGISTRATION` | open |
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
+| `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks can't reach loopback/private addresses |
 
 Behind a reverse proxy with TLS, set `--base-url https://git.example.com`:
 clone URLs use it, and session cookies are marked `Secure`.
@@ -71,10 +77,11 @@ crates/
   keel-core   config, SQLite schema + migrations, users, organizations,
               sessions, SSH keys, access tokens, repositories and forks,
               permissions, issues, labels, assignees, pull requests, reviews,
-              push events
+              notifications, webhook queue and payloads, push events
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
+  keel-hooks  webhook delivery worker (reqwest)
   keel-web    axum router: server-rendered pages (askama templates), smart
               HTTP git protocol, background cache warming and search indexing,
               assets (compiled into the binary)
@@ -152,6 +159,22 @@ was made on (stored with it).
 and dark mode without inline styles (which the Content Security Policy
 forbids). New repositories start with six common labels.
 
+**Notifications and webhooks** come from one place: each change to an issue
+or pull request, and each push, is recorded once in `keel-core`, which updates
+the inboxes of the people following it and queues a webhook delivery (with the
+finished payload) for every hook that wants the event. Deliveries live in
+SQLite, so they survive restarts; a background worker sends them with a 10 s
+timeout and retries failures after 30 s, 2 min, 10 min and 1 h. The delivery
+log keeps the last 100 per hook, with payload and response, and any of them
+can be redelivered. Push payloads list what each ref update added: the
+refs are snapshotted before `git receive-pack` runs and compared afterwards.
+
+Webhooks don't follow redirects or use proxies. Unless
+`--webhook-allow-private` is set, they can't reach loopback, private, link-local
+or other internal addresses: names are resolved by keel and checked on the
+addresses actually connected to, so a hostname pointing at an internal address
+doesn't get around it.
+
 **Permissions:** a user's access to a repository is the highest of: admin for
 the owner, organization owners and site admins; write for organization
 members; the collaborator role; read for anyone if the repository is public.
@@ -182,6 +205,9 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 - Passwords: Argon2id. Session tokens are 256-bit random values, stored only
   as SHA-256 hashes, sent in `HttpOnly; SameSite=Lax` cookies.
 - State-changing requests must come from the same origin (CSRF).
+- Webhook deliveries are signed with HMAC-SHA256 when a secret is set
+  (`X-Hub-Signature-256: sha256=…`), and can't target internal addresses by
+  default (see above).
 - Personal access tokens are shown once and stored hashed; they can be
   read-only, expire, and be revoked individually. Changing a password signs
   out all other sessions.
@@ -199,7 +225,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~160 end-to-end checks against a real server
+cargo build && scripts/smoke-test.sh      # ~180 end-to-end checks (needs git, ssh, curl, python3, openssl)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -208,7 +234,8 @@ run automatically at startup.
 
 ## Ideas
 
-- Webhooks and notifications (the push events are already there).
+- Email notifications (the inbox and recipients are there; it needs SMTP
+  settings), and webhooks for whole organizations.
 - Branch protection (e.g. require an approval before merging), review
   requests, suggested changes in line comments, milestones.
 - An admin page (users, instance settings) and a JSON API (tokens are ready

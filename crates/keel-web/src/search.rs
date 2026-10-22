@@ -346,7 +346,7 @@ pub async fn in_repo(
     };
     html(RepoSearchPage {
         enabled: state.search.is_some(),
-        repo: RepoView::new(&state, &repo, access, "code", "").await?,
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", "").await?,
         page: Page::new(&state, viewer, format!("Search · {}/{}", repo.owner, repo.name)),
         q,
         problem,

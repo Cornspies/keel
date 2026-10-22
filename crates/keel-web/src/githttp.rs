@@ -185,6 +185,11 @@ async fn rpc(
         Err(res) => return res,
     };
     let pusher = user.map(|u| u.id);
+    // What the refs were, to tell webhooks what the push changed.
+    let before = match service {
+        Service::ReceivePack => state.core.ref_snapshot(repo.id).await.ok(),
+        _ => None,
+    };
     let path = state.core.repo_path(&repo);
     let mut cmd = tokio::process::Command::from(git_command(
         service,
@@ -244,7 +249,7 @@ async fn rpc(
         match child.wait().await {
             Ok(status) if status.success() => {
                 if service == Service::ReceivePack
-                    && let Err(e) = core.after_push(repo.id, pusher).await
+                    && let Err(e) = core.after_push(repo.id, pusher, before).await
                 {
                     tracing::warn!("after push: {e}");
                 }

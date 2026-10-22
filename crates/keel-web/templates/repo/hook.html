@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/settings">Settings</a> / <a href="{{ hooks_url }}">Webhooks</a></p>
+  <h2 class="mono hook-title">{{ hook.url }}</h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="{{ url }}" class="form">
+    <label>Payload URL <input name="url" value="{{ hook.url }}" required></label>
+    <label>Secret <span class="hint">{% if hook.secret.is_empty() %}None set.{% else %}Set; leave empty to keep it.{% endif %}</span> <input name="secret" autocomplete="off" placeholder="{% if !hook.secret.is_empty() %}••••••••{% endif %}"></label>
+    {% if !hook.secret.is_empty() %}<label class="check"><input type="checkbox" name="clear_secret"> Remove the secret</label>{% endif %}
+    {% include "repo/hook_events.html" %}
+    <label class="check"><input type="checkbox" name="active"{% if hook.active %} checked{% endif %}> Active</label>
+    <div class="row-actions"><button class="btn btn-primary">Save</button></div>
+  </form>
+  <div class="row-actions">
+    <form method="post" action="{{ url }}/test"><button class="btn">Send a test ping</button></form>
+    <form method="post" action="{{ url }}/delete"><button class="btn btn-danger">Delete webhook</button></form>
+  </div>
+
+  <h2 id="deliveries">Recent deliveries</h2>
+  {% if deliveries.is_empty() %}
+  <p class="empty">Nothing delivered yet.</p>
+  {% else %}
+  <div class="deliveries">
+    {% for d in deliveries %}
+    <details class="box delivery" id="delivery-{{ d.id }}">
+      <summary class="box-head delivery-head">
+        <span class="hook-status hook-{% if d.status == "ok" %}ok{% else if d.status == "failed" || d.attempts > 0 %}failed{% else %}pending{% endif %}"></span>
+        <span class="mono">{{ d.event }}</span>
+        <span class="muted small mono">{{ d.guid }}</span>
+        <span class="spacer"></span>
+        <span class="small">{% if let Some(s) = d.response_status %}HTTP {{ s }}{% else if d.status == "pending" && d.attempts == 0 %}queued{% else %}no response{% endif %}</span>
+        <time class="muted small" title="{{ d.when_full }}">{{ d.when }}</time>
+      </summary>
+      <div class="delivery-body">
+        <p class="small">
+          {% if d.status == "ok" %}Delivered{% else if d.status == "failed" %}Gave up{% else if d.attempts > 0 %}Failed; retrying {% if let Some(n) = d.next_attempt %}{{ n }}{% endif %}{% else %}Queued{% endif %}
+          after {{ d.attempts }} {% if d.attempts == 1 %}attempt{% else %}attempts{% endif %}{% if let Some(ms) = d.duration_ms %} · {{ ms }} ms{% endif %}.
+        </p>
+        {% if let Some(e) = d.error %}<p class="flash flash-error mono small">{{ e }}</p>{% endif %}
+        <h4>Payload</h4>
+        <pre class="payload">{{ d.payload }}</pre>
+        {% if !d.response_body.is_empty() %}<h4>Response</h4><pre class="payload">{{ d.response_body }}</pre>{% endif %}
+        <form method="post" action="{{ url }}/deliveries/{{ d.id }}/redeliver"><button class="btn btn-small">Redeliver</button></form>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

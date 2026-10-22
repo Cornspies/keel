@@ -8,6 +8,7 @@
 mod diff;
 mod files;
 mod merge;
+mod push;
 mod read;
 mod store;
 mod transport;
@@ -19,6 +20,7 @@ pub use read::{
 };
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
+pub use push::{RefChange, Refs, ref_changes};
 pub use store::{create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 

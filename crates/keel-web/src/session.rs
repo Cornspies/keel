@@ -37,6 +37,9 @@ impl FromRequestParts<AppState> for Viewer {
             Some(token) => state.core.session_user(token).await?,
             None => None,
         };
+        if let Some(u) = &user {
+            state.refresh_unread(u.id).await?;
+        }
         let viewer = Viewer(user);
         parts.extensions.insert(viewer.clone());
         Ok(viewer)

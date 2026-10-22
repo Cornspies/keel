@@ -58,6 +58,12 @@ struct ServeArgs {
     /// Name shown in the page header.
     #[arg(long, env = "KEEL_SITE_NAME", default_value = "keel")]
     site_name: String,
+
+    /// Let webhooks reach loopback and private network addresses (e.g. a
+    /// CI server on the same network). Off by default, so repository
+    /// admins can't use webhooks to probe the server's network.
+    #[arg(long, env = "KEEL_WEBHOOK_ALLOW_PRIVATE")]
+    webhook_allow_private: bool,
 }
 
 #[tokio::main]
@@ -115,11 +121,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         ssh,
         open_registration: !args.closed_registration,
         site_name: args.site_name,
+        webhook_allow_private: args.webhook_allow_private,
     };
     let core = Core::open(config)
         .await
         .context("opening the data directory")?;
 
+    keel_hooks::start(core.clone());
     let app = keel_web::router(keel_web::AppState::new(core.clone()));
     let listener = tokio::net::TcpListener::bind(args.http_addr)
         .await

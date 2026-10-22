@@ -62,7 +62,7 @@ impl Core {
             .insert_repo(owner, name, &source.description, source.is_private, Some(source))
             .await?;
         // Index, warm caches and write the commit-graph like after a push.
-        self.after_push(fork.id, None).await?;
+        self.after_push(fork.id, None, None).await?;
         Ok(fork)
     }
 
@@ -97,6 +97,15 @@ impl Core {
             r => r?,
         };
         insert_default_labels(&mut tx, id).await?;
+        // People watch their own repositories.
+        if !owner.is_org() {
+            sqlx::query("INSERT INTO watches (user_id, repo_id, created_at) VALUES (?1, ?2, ?3)")
+                .bind(owner.id)
+                .bind(id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
         // Create on disk inside the transaction so a failure leaves no row.
         let path = self.config.repo_path(id);
         let source = fork_of.map(|r| self.repo_path(r));
@@ -244,10 +253,17 @@ impl Core {
         Ok(())
     }
 
+    /// The repository's branches and tags, to pass to
+    /// [`after_push`](Self::after_push) once they changed.
+    pub async fn ref_snapshot(&self, repo_id: i64) -> Result<keel_git::Refs> {
+        self.git(repo_id, |g| g.refs_snapshot()).await
+    }
+
     /// Records that refs changed (a push by `pusher`, or a merge), then in
-    /// the background: runs repository maintenance, updates pull requests
-    /// and notifies subscribers.
-    pub async fn after_push(&self, repo_id: i64, pusher: Option<i64>) -> Result<()> {
+    /// the background: runs repository maintenance, updates pull requests,
+    /// sends `push` webhooks for what changed since `before` (if given) and
+    /// notifies subscribers.
+    pub async fn after_push(&self, repo_id: i64, pusher: Option<i64>, before: Option<keel_git::Refs>) -> Result<()> {
         sqlx::query("UPDATE repositories SET updated_at = ?2 WHERE id = ?1")
             .bind(repo_id)
             .bind(now())
@@ -259,6 +275,15 @@ impl Core {
             let maintenance = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&path)).await;
             if let Ok(Err(e)) = maintenance {
                 tracing::warn!(repo = repo_id, "maintenance failed: {e}");
+            }
+            if let Some(before) = before {
+                match core.ref_snapshot(repo_id).await {
+                    Ok(after) => {
+                        let changes = keel_git::ref_changes(&before, &after);
+                        core.record(crate::Activity::Push { repo_id, pusher, before, changes }).await;
+                    }
+                    Err(e) => tracing::warn!(repo = repo_id, "reading refs failed: {e}"),
+                }
             }
             if let Err(e) = core.sync_pulls(repo_id, pusher).await {
                 tracing::warn!(repo = repo_id, "updating pull requests failed: {e}");

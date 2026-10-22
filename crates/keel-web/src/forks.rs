@@ -45,7 +45,7 @@ pub async fn form(
         .map(RepoCard::from)
         .collect();
     html(ForkPage {
-        repo: RepoView::new(&state, &repo, access, "code", "").await?,
+        repo: RepoView::new(&state, &repo, access, Some(&user), "code", "").await?,
         page: Page::new(&state, Some(user), format!("Fork {}/{}", repo.owner, repo.name)),
         owner: owners.first().cloned().unwrap_or_default(),
         owners,
@@ -73,9 +73,12 @@ pub async fn create(
         return Err(AppError::Forbidden);
     }
     match state.core.fork_repo(&repo, &target, &f.name).await {
-        Ok(fork) => Ok(Redirect::to(&format!("/{}/{}", fork.owner, fork.name)).into_response()),
+        Ok(fork) => {
+            state.core.set_watching(user.id, fork.id, true).await?;
+            Ok(Redirect::to(&format!("/{}/{}", fork.owner, fork.name)).into_response())
+        }
         Err(keel_core::Error::Invalid(msg)) => html(ForkPage {
-            repo: RepoView::new(&state, &repo, access, "code", "").await?,
+            repo: RepoView::new(&state, &repo, access, Some(&user), "code", "").await?,
             owners: possible_owners(&state, &user).await?.into_iter().filter(|o| *o != repo.owner).collect(),
             page: Page::new(&state, Some(user), format!("Fork {}/{}", repo.owner, repo.name)),
             owner: f.owner,
@@ -103,7 +106,7 @@ pub async fn list(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let forks = state.core.forks_of(repo.id, viewer.as_ref()).await?;
     html(ForksPage {
-        repo: RepoView::new(&state, &repo, access, "code", "").await?,
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", "").await?,
         page: Page::new(&state, viewer, format!("Forks · {}/{}", repo.owner, repo.name)),
         forks: forks.iter().map(RepoCard::from).collect(),
     })

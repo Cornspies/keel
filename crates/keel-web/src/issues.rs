@@ -112,6 +112,8 @@ pub(crate) struct Conversation {
     pub can_triage: bool,
     pub label_choices: Vec<(LabelView, bool)>,
     pub assignee_choices: Vec<(i64, String, bool)>,
+    /// Whether the viewer gets notified, and why (signed in only).
+    pub subscription: Option<keel_core::Subscription>,
     /// Pull requests: each reviewer's latest verdict.
     pub reviews: Vec<(String, &'static str)>,
 }
@@ -153,6 +155,15 @@ pub(crate) async fn conversation(
     placed: Option<&HashSet<i64>>,
 ) -> AppResult<Conversation> {
     let base_url = format!("/{}/{}/issues/{}", repo.owner, repo.name, issue.number);
+    let subscription = match viewer {
+        Some(v) => {
+            if state.core.mark_issue_read(v.id, issue.id).await? {
+                state.refresh_unread(v.id).await?;
+            }
+            Some(state.core.subscription(v, issue).await?)
+        }
+        None => None,
+    };
     let renderer = Renderer::new(state, repo).await?;
     let render = |body: &str| renderer.render(body);
     let writer = access >= Access::Write;
@@ -275,6 +286,7 @@ pub(crate) async fn conversation(
         can_triage: writer,
         label_choices,
         assignee_choices,
+        subscription,
         reviews,
     })
 }
@@ -398,7 +410,7 @@ pub(crate) async fn list_page(
     };
     let default_branch = with_git(&state, &repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
     html(ListPage {
-        repo: RepoView::new(&state, &repo, access, kind, &default_branch).await?,
+        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), kind, &default_branch).await?,
         page: Page::new(
             &state,
             viewer.clone(),
@@ -455,7 +467,7 @@ pub async fn new_form(
 ) -> AppResult {
     let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
     html(NewIssuePage {
-        repo: RepoView::new(&state, &repo, access, "issues", "").await?,
+        repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
         page: Page::new(&state, Some(user), format!("New issue · {}/{}", repo.owner, repo.name)),
         error: None,
         title: String::new(),
@@ -480,7 +492,7 @@ pub async fn create(
     match state.core.create_issue(repo.id, &user, &f.title, &f.body).await {
         Ok(issue) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => html(NewIssuePage {
-            repo: RepoView::new(&state, &repo, access, "issues", "").await?,
+            repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
             page: Page::new(&state, Some(user), format!("New issue · {}/{}", repo.owner, repo.name)),
             error: Some(msg),
             title: f.title,
@@ -526,7 +538,7 @@ async fn show_page(
 ) -> AppResult {
     let conv = conversation(state, repo, access, issue, viewer.as_ref(), None).await?;
     html(IssuePage {
-        repo: RepoView::new(state, repo, access, "issues", "").await?,
+        repo: RepoView::new(state, repo, access, viewer.as_ref(), "issues", "").await?,
         page: Page::new(state, viewer, format!("{} · Issue #{} · {}/{}", issue.title, issue.number, repo.owner, repo.name)),
         conv,
         error,
@@ -610,7 +622,7 @@ pub async fn edit_form(
     }
     let tab = if issue.is_pull { "pulls" } else { "issues" };
     html(EditPage {
-        repo: RepoView::new(&state, &repo, access, tab, "").await?,
+        repo: RepoView::new(&state, &repo, access, Some(&user), tab, "").await?,
         page: Page::new(&state, Some(user), format!("Edit #{}", issue.number)),
         heading: format!("Edit #{}", issue.number),
         action: format!("/{}/{}/issues/{}/edit", repo.owner, repo.name, issue.number),
@@ -633,10 +645,10 @@ pub async fn edit(
     if !(issue.is_author(&user) || access >= Access::Write) {
         return Err(AppError::Forbidden);
     }
-    match state.core.edit_issue(&issue, &f.title, &f.body).await {
+    match state.core.edit_issue(&issue, &user, &f.title, &f.body).await {
         Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => html(EditPage {
-            repo: RepoView::new(&state, &repo, access, "issues", "").await?,
+            repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
             page: Page::new(&state, Some(user), format!("Edit #{}", issue.number)),
             heading: format!("Edit #{}", issue.number),
             action: format!("/{}/{}/issues/{}/edit", repo.owner, repo.name, issue.number),
@@ -680,7 +692,7 @@ pub async fn edit_comment_form(
 ) -> AppResult {
     let (repo, access, issue, comment) = own_comment(&state, &user, &owner, &name, number, id).await?;
     html(EditPage {
-        repo: RepoView::new(&state, &repo, access, if issue.is_pull { "pulls" } else { "issues" }, "").await?,
+        repo: RepoView::new(&state, &repo, access, Some(&user), if issue.is_pull { "pulls" } else { "issues" }, "").await?,
         page: Page::new(&state, Some(user), "Edit comment"),
         heading: "Edit comment".into(),
         action: format!("/{}/{}/issues/{}/comments/{id}/edit", repo.owner, repo.name, number),
@@ -707,7 +719,7 @@ pub async fn edit_comment(
     match state.core.edit_comment(&comment, &f.body).await {
         Ok(()) => Ok(Redirect::to(&format!("{}#comment-{id}", issue_url(&repo, &issue))).into_response()),
         Err(keel_core::Error::Invalid(msg)) => html(EditPage {
-            repo: RepoView::new(&state, &repo, access, "issues", "").await?,
+            repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
             page: Page::new(&state, Some(user), "Edit comment"),
             heading: "Edit comment".into(),
             action: format!("/{}/{}/issues/{}/comments/{id}/edit", repo.owner, repo.name, number),

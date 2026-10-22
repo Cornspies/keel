@@ -36,6 +36,24 @@
     {% if conv.labels.is_empty() %}<p class="muted small">None yet</p>
     {% else %}<div class="labels">{% for l in conv.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}</div>{% endif %}
   </section>
+  {% if let Some(sub) = conv.subscription %}
+  <section>
+    <div class="sidebar-head"><h3>Notifications</h3></div>
+    <form method="post" action="{{ conv.base_url }}/subscription" class="subscription">
+      <input type="hidden" name="to" value="{% if sub.subscribed %}off{% else %}on{% endif %}">
+      <button class="btn btn-small">{% if sub.subscribed %}Unsubscribe{% else %}Subscribe{% endif %}</button>
+      <p class="muted small">{% match sub.reason %}
+        {% when "assigned" %}You're getting notifications because you're assigned.
+        {% when "author" %}You're getting notifications because you opened this.
+        {% when "participating" %}You're getting notifications because you commented.
+        {% when "watching" %}You're getting notifications because you watch this repository.
+        {% when "subscribed" %}You're subscribed to this thread.
+        {% when "unsubscribed" %}You won't get notifications about this.
+        {% else %}You're not getting notifications about this.
+      {% endmatch %}</p>
+    </form>
+  </section>
+  {% endif %}
   {% if conv.is_pull && !conv.reviews.is_empty() %}
   <section>
     <div class="sidebar-head"><h3>Reviews</h3></div>

@@ -44,7 +44,7 @@ ssh-keygen -q -t ed25519 -N "" -C ada@test -f "$T/key"
 export GIT_SSH_COMMAND="ssh -i $T/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
 "$BIN" serve --data-dir "$T/data" --http-addr "127.0.0.1:$HTTP_PORT" \
-    --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" >"$T/server.log" 2>&1 &
+    --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private >"$T/server.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -263,6 +263,75 @@ check "main has the fork's change" is "$(curl -s "$B/ada/engine/raw/main/bob.txt
 # ada is the site admin (the first account), so may delete the fork's branch.
 check "fork branch was deleted" is "$(git ls-remote "$BOB_FORK" refs/heads/topic 2>/dev/null | wc -l)" 0
 
+echo "== webhooks"
+# A receiver that saves each request's event, signature and body.
+HOOK_PORT=$((HTTP_PORT + 2))
+mkdir -p "$T/hooks"
+python3 - "$HOOK_PORT" "$T/hooks" <<'PY' &
+import http.server, sys, itertools
+port, out = int(sys.argv[1]), sys.argv[2]
+n = itertools.count()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        i = next(n)
+        open(f"{out}/{i}.json", "wb").write(body)
+        open(f"{out}/{i}.hdr", "w").write(f"{self.headers['X-GitHub-Event']} {self.headers.get('X-Hub-Signature-256', '')}\n")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"thanks")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+HOOK_PID=$!
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$HOOK_PORT/" && break; sleep 0.1; done
+received() { # received <event> <text>: waits up to 5s for a delivery of <event> containing <text>
+    for _ in $(seq 1 50); do
+        for h in "$T"/hooks/*.hdr; do
+            [ -e "$h" ] || continue
+            if grep -q "^$1 " "$h" && grep -q -- "$2" "${h%.hdr}.json"; then echo "${h%.hdr}"; return 0; fi
+        done
+        sleep 0.1
+    done
+    echo "no $1 delivery containing '$2'"
+    return 1
+}
+check "readers can't manage webhooks" is "$(status -b "$T/bob" "$B/ada/engine/settings/hooks")" 403
+check "add a webhook" is "$(post "$T/ada" /ada/engine/settings/hooks "url=http://127.0.0.1:$HOOK_PORT/hook" secret=s3cret which=all active=on)" 303
+check "it gets pinged" received ping '"zen"'
+git -C "$W" checkout -q main && git -C "$W" fetch -q "$ADA_HTTP" main && git -C "$W" reset -q --hard FETCH_HEAD
+echo "hooked" >>"$W/README.md" && git -C "$W" commit -qam "Hooked commit"
+git -C "$W" push -q "$ADA_HTTP" main
+check "push is delivered" received push '"message":"Hooked commit"'
+D=$(received push '"message":"Hooked commit"')
+check "deliveries are signed" is "$(cut -d' ' -f2 "$D.hdr")" "sha256=$(openssl dgst -sha256 -hmac s3cret -r "$D.json" | cut -d' ' -f1)"
+check "opening an issue is delivered" is "$(post "$T/bob" /ada/engine/issues title="Hook me" body="cc @eve")" 303
+check "issues event" received issues '"title":"Hook me"'
+HOOK=$(curl -s -b "$T/ada" "$B/ada/engine/settings/hooks" | grep -o 'settings/hooks/[0-9]*' | head -1 | grep -o '[0-9]*$')
+logged() { for _ in $(seq 1 50); do curl -s -b "$T/ada" "$B/ada/engine/settings/hooks/$HOOK" | grep -q "HTTP 200" && return 0; sleep 0.1; done; return 1; }
+check "delivery log shows the response" logged
+DELIVERY=$(curl -s -b "$T/ada" "$B/ada/engine/settings/hooks/$HOOK" | grep -o 'deliveries/[0-9]*/redeliver' | head -1 | grep -o '[0-9]*')
+BEFORE=$(ls "$T"/hooks/*.json | wc -l)
+check "redeliver" is "$(post "$T/ada" "/ada/engine/settings/hooks/$HOOK/deliveries/$DELIVERY/redeliver" x=1)" 303
+redelivered() { for _ in $(seq 1 50); do [ "$(ls "$T"/hooks/*.json | wc -l)" -gt "$BEFORE" ] && return 0; sleep 0.1; done; return 1; }
+check "redelivery arrives" redelivered
+check "invalid URLs are rejected" contains "$(curl -s -b "$T/ada" -H "$O" -d "url=ftp://x&which=push" "$B/ada/engine/settings/hooks")" "start with http"
+kill "$HOOK_PID" 2>/dev/null
+
+echo "== notifications"
+HOOKED=$(curl -s "$B/ada/engine/issues" | grep -o 'href="/ada/engine/issues/[0-9]*">Hook me' | grep -o '[0-9]*')
+check "watchers hear about new issues" contains "$(curl -s -b "$T/ada" "$B/notifications")" "Hook me"
+check "unread count in the header" contains "$(curl -s -b "$T/ada" "$B/")" 'class="unread-count"'
+check "mentioned people hear too" contains "$(curl -s -b "$T/eve" "$B/notifications")" "Mentioned"
+check "viewing the issue marks it read" bash -c "curl -s -b '$T/ada' '$B/ada/engine/issues/$HOOKED' >/dev/null; ! curl -s -b '$T/ada' '$B/notifications' | grep -q 'Hook me'"
+check "ada comments" is "$(post "$T/ada" "/ada/engine/issues/$HOOKED/comments" body="On it" action=comment)" 303
+check "the author hears about comments" contains "$(curl -s -b "$T/bob" "$B/notifications")" "ada commented"
+check "eve unsubscribes" is "$(post "$T/eve" "/ada/engine/issues/$HOOKED/subscription" to=off)" 303
+check "mark all read" is "$(post "$T/eve" /notifications/read x=1)" 303
+check "ada comments again" is "$(post "$T/ada" "/ada/engine/issues/$HOOKED/comments" body="Done" action=comment)" 303
+check "unsubscribed people don't" contains "$(curl -s -b "$T/eve" "$B/notifications")" "All caught up"
+check "eve watches the repository" is "$(post "$T/eve" /ada/engine/watch to=on)" 303
+check "watch button reflects it" contains "$(curl -s -b "$T/eve" "$B/ada/engine")" "Unwatch"
+check "private repos don't notify outsiders" bash -c "! curl -s -b '$T/eve' '$B/notifications?all=1' | grep -q 'ada/secret'"
+
 echo "== account"
 check "wrong current password is rejected" contains "$(curl -s -b "$T/bob" -H "$O" -d "current=nope&new=password-new&confirm=password-new" "$B/settings/account/password")" "incorrect"
 check "change password" is "$(post "$T/bob" /settings/account/password current=password-bob new=password-new confirm=password-new)" 303
@@ -272,7 +341,7 @@ echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
-    /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
+    /notifications "/notifications?all=1" /ada/engine/settings/hooks /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /org/acme/settings /settings/account /settings/keys /settings/tokens; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200

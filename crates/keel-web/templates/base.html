@@ -23,6 +23,7 @@
             <a href="/org/new">New organization</a>
           </div>
         </details>
+        <a class="inbox-link{% if page.unread > 0 %} has-unread{% endif %}" href="/notifications" title="Notifications" aria-label="Notifications{% if page.unread > 0 %} ({{ page.unread }} unread){% endif %}"><span class="bell" aria-hidden="true"></span>{% if page.unread > 0 %}<span class="unread-count">{{ page.unread }}</span>{% endif %}</a>
         <a href="/{{ user.username }}">{{ user.username }}</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/logout" class="inline"><button class="linkish">Sign out</button></form>
