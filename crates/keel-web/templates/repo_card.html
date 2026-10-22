@@ -1,0 +1,8 @@
+<li class="card-row">
+  <div>
+    <a class="repo-link" href="/{{ r.owner }}/{{ r.name }}">{{ r.owner }}/<strong>{{ r.name }}</strong></a>
+    {% if r.is_private %}<span class="badge">Private</span>{% endif %}
+    {% if !r.description.is_empty() %}<p class="muted small">{{ r.description }}</p>{% endif %}
+  </div>
+  <span class="muted small nowrap">Updated {{ r.updated }}</span>
+</li>

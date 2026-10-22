@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+{% if first_run %}
+<section class="hero">
+  <h1>Welcome to {{ page.site_name }}</h1>
+  <p>There are no accounts yet. The first account you create becomes the administrator.</p>
+  <p><a class="btn btn-primary" href="/register">Create the first account</a></p>
+</section>
+{% endif %}
+
+{% if page.viewer.is_some() %}
+<div class="section-head">
+  <h2>Your repositories</h2>
+  <a class="btn btn-small" href="/new">New</a>
+</div>
+{% if mine.is_empty() %}
+<p class="empty">You don’t have any repositories yet. <a href="/new">Create one</a>.</p>
+{% else %}
+<ul class="card-list">{% for r in mine %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+{% endif %}
+
+{% if !first_run %}
+<div class="section-head"><h2>Recently updated</h2></div>
+{% if recent.is_empty() %}
+<p class="empty">No public repositories yet.</p>
+{% else %}
+<ul class="card-list">{% for r in recent %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+{% endif %}
+{% endblock %}

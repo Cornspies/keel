@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="profile">
+  <h1>{{ username }}</h1>
+  <p class="muted">Joined {{ joined }}</p>
+</div>
+<div class="section-head">
+  <h2>Repositories</h2>
+  {% if is_self %}<a class="btn btn-small" href="/new">New</a>{% endif %}
+</div>
+{% if repos.is_empty() %}
+<p class="empty">No repositories yet.</p>
+{% else %}
+<ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+{% endblock %}

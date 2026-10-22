@@ -1,0 +1,16 @@
+<div class="repo-head">
+  <div class="repo-title-row">
+    <h1 class="repo-title">
+      <a href="/{{ repo.owner }}">{{ repo.owner }}</a> <span class="sep">/</span>
+      <a href="/{{ repo.owner }}/{{ repo.name }}"><strong>{{ repo.name }}</strong></a>
+      {% if repo.is_private %}<span class="badge">Private</span>{% endif %}
+    </h1>
+  </div>
+  {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
+  <nav class="tabs">
+    <a href="/{{ repo.owner }}/{{ repo.name }}"{% if repo.tab == "code" %} class="active"{% endif %}>Code</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/commits{% if !repo.default_rev.is_empty() %}/{{ repo.default_rev }}{% endif %}"{% if repo.tab == "commits" %} class="active"{% endif %}>Commits</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/branches"{% if repo.tab == "branches" %} class="active"{% endif %}>Branches</a>
+    {% if repo.can_write %}<a href="/{{ repo.owner }}/{{ repo.name }}/settings"{% if repo.tab == "settings" %} class="active"{% endif %}>Settings</a>{% endif %}
+  </nav>
+</div>

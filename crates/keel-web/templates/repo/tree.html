@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  {% include "repo/refswitch.html" %}
+  {% if !path.is_empty() %}{% include "repo/crumbs.html" %}{% endif %}
+  <div class="spacer"></div>
+  {% include "repo/clone.html" %}
+</div>
+<div class="box">
+  {% include "repo/latest.html" %}
+  <table class="files"{% if let Some(u) = last_commits_url %} data-last-commits="{{ u }}"{% endif %}>
+    <tbody>
+    {% if !path.is_empty() %}
+      <tr><td class="icon"></td><td colspan="3"><a href="{% if crumbs.len() > 1 %}{{ crumbs[crumbs.len() - 2].url }}{% else %}/{{ repo.owner }}/{{ repo.name }}/tree/{{ rev_url }}{% endif %}">..</a></td></tr>
+    {% endif %}
+    {% for e in entries %}
+      <tr data-name="{{ e.name }}">
+        <td class="icon"><span class="ficon ficon-{{ e.kind }}" aria-hidden="true"></span></td>
+        <td class="name"><a href="{{ e.url }}">{{ e.name }}</a>{% if e.kind == "submodule" %} <span class="muted small">(submodule)</span>{% endif %}</td>
+        {% if let Some(c) = e.last %}
+        <td class="msg"><a class="muted" href="{{ c.url }}">{{ c.summary }}</a></td>
+        <td class="when muted"><time title="{{ c.when_full }}">{{ c.when }}</time></td>
+        {% else %}
+        <td class="msg"></td><td class="when"></td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if let Some(html) = readme %}
+<div class="box readme">
+  <div class="box-head">{{ readme_name }}</div>
+  <article class="markdown">{{ html|safe }}</article>
+</div>
+{% endif %}
+{% endblock %}

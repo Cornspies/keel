@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="box empty-repo">
+  <h2>This repository is empty</h2>
+  {% if repo.can_write %}
+  <p>Push an existing repository:</p>
+  <pre class="cmd">git remote add origin {% if let Some(ssh) = repo.ssh_url %}{{ ssh }}{% else %}{{ repo.http_url }}{% endif %}
+git push -u origin main</pre>
+  <p>Or start a new one:</p>
+  <pre class="cmd">git init -b main
+echo "# {{ repo.name }}" &gt; README.md
+git add README.md
+git commit -m "Initial commit"
+git remote add origin {% if let Some(ssh) = repo.ssh_url %}{{ ssh }}{% else %}{{ repo.http_url }}{% endif %}
+git push -u origin main</pre>
+  <p class="muted small">HTTPS: <span class="mono">{{ repo.http_url }}</span>{% if let Some(ssh) = repo.ssh_url %} · SSH: <span class="mono">{{ ssh }}</span> (add your key under <a href="/settings/keys">SSH keys</a>){% endif %}</p>
+  {% else %}
+  <p class="muted">Nothing has been pushed yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

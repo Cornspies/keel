@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<h2>Branches</h2>
+{% if branches.is_empty() %}
+<p class="empty">No branches yet.</p>
+{% else %}
+<ul class="card-list">
+  {% for b in branches %}
+  <li class="card-row">
+    <div>
+      <a class="mono" href="{{ b.url }}"><strong>{{ b.name }}</strong></a>{% if b.is_default %} <span class="badge">default</span>{% endif %}
+      <div class="muted small"><a class="muted" href="{{ b.commit.url }}">{{ b.commit.summary }}</a> · {{ b.commit.author }} · <time title="{{ b.commit.when_full }}">{{ b.commit.when }}</time></div>
+    </div>
+    <a class="btn btn-small mono" href="{{ b.commit.url }}">{{ b.commit.short }}</a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if !tags.is_empty() %}
+<h2>Tags</h2>
+<ul class="card-list">
+  {% for t in tags %}
+  <li class="card-row">
+    <div>
+      <a class="mono" href="{{ t.url }}"><strong>{{ t.name }}</strong></a>
+      <div class="muted small"><a class="muted" href="{{ t.commit.url }}">{{ t.commit.summary }}</a> · <time title="{{ t.commit.when_full }}">{{ t.commit.when }}</time></div>
+    </div>
+    <a class="btn btn-small mono" href="{{ t.commit.url }}">{{ t.commit.short }}</a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

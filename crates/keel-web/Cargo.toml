@@ -1,0 +1,30 @@
+[package]
+name = "keel-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+keel-core.workspace = true
+keel-git.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+askama.workspace = true
+syntect.workspace = true
+two-face.workspace = true
+pulldown-cmark.workspace = true
+ammonia.workspace = true
+moka.workspace = true
+base64.workspace = true
+flate2.workspace = true
+time.workspace = true
+sha2.workspace = true
+hex.workspace = true

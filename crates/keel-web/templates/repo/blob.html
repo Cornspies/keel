@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  {% include "repo/refswitch.html" %}
+  {% include "repo/crumbs.html" %}
+</div>
+<div class="box">
+  {% include "repo/latest.html" %}
+  <div class="box-head file-head">
+    <span class="muted small">{% if line_count > 0 %}{{ line_count }} lines · {% endif %}{{ size }}</span>
+    <span class="spacer"></span>
+    {% if is_markdown %}
+      {% if plain %}<a class="btn btn-small" href="?">Preview</a>{% else %}<a class="btn btn-small" href="?plain=1">Source</a>{% endif %}
+    {% endif %}
+    <a class="btn btn-small" href="{{ raw_url }}">Raw</a>
+  </div>
+  {% match content %}
+  {% when BlobContent::Lines(lines) %}
+  <div class="code-scroll">
+    <table class="code">
+      <tbody>
+      {% for line in lines.iter() %}
+        <tr id="L{{ loop.index }}"><td class="ln"><a href="#L{{ loop.index }}">{{ loop.index }}</a></td><td class="lc">{{ line|safe }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% when BlobContent::Rendered(html) %}
+  <article class="markdown">{{ html|safe }}</article>
+  {% when BlobContent::Image %}
+  <div class="blob-image"><img src="{{ raw_url }}" alt="{{ path }}"></div>
+  {% when BlobContent::Binary %}
+  <p class="blob-note">Binary file not shown. <a href="{{ raw_url }}">Download</a></p>
+  {% when BlobContent::TooLarge %}
+  <p class="blob-note">This file is too large to display. <a href="{{ raw_url }}">View raw</a></p>
+  {% endmatch %}
+</div>
+{% endblock %}

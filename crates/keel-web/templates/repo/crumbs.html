@@ -1,0 +1,4 @@
+<nav class="crumbs">
+  <a href="/{{ repo.owner }}/{{ repo.name }}/tree/{{ rev_url }}">{{ repo.name }}</a>
+  {% for c in crumbs %}<span class="sep">/</span>{% if loop.last %}<strong>{{ c.name }}</strong>{% else %}<a href="{{ c.url }}">{{ c.name }}</a>{% endif %}{% endfor %}
+</nav>

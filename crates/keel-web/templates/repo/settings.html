@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <h2>General</h2>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings" class="form">
+    <label>Description <input name="description" value="{{ repo.description }}"></label>
+    <label class="check"><input type="checkbox" name="private" {% if repo.is_private %}checked{% endif %}> Private <span class="hint">Only you can see and clone it.</span></label>
+    <button class="btn btn-primary">Save</button>
+  </form>
+
+  <h2 class="danger-title">Delete repository</h2>
+  <div class="box danger-zone">
+    <p>This permanently deletes <strong>{{ repo.owner }}/{{ repo.name }}</strong> and all of its history. It cannot be undone.</p>
+    {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+    <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/delete" class="form">
+      <label>Type <span class="mono">{{ repo.owner }}/{{ repo.name }}</span> to confirm <input name="confirm" autocomplete="off" required></label>
+      <button class="btn btn-danger">Delete this repository</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

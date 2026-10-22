@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page.title }}{% if page.title != page.site_name %} · {{ page.site_name }}{% endif %}</title>
+<link rel="stylesheet" href="{{ page.css_url }}">
+<script src="{{ page.js_url }}" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="/">{{ page.site_name }}</a>
+    <nav class="topnav">
+      {% if let Some(user) = page.viewer %}
+        <a class="btn btn-small" href="/new">New repository</a>
+        <a href="/{{ user.username }}">{{ user.username }}</a>
+        <a href="/settings/keys">Settings</a>
+        <form method="post" action="/logout" class="inline"><button class="linkish">Sign out</button></form>
+      {% else %}
+        <a href="/login">Sign in</a>
+        {% if page.registration_open %}<a class="btn btn-small" href="/register">Sign up</a>{% endif %}
+      {% endif %}
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  {% include "repo/refswitch.html" %}
+  {% if !path.is_empty() %}<span class="muted">History for</span> <span class="mono">{{ path }}</span>{% endif %}
+</div>
+{% if commits.is_empty() %}
+<p class="empty">No commits found.</p>
+{% else %}
+<ul class="card-list commit-list">
+  {% for c in commits %}
+  <li class="card-row">
+    <div class="commit-main">
+      <a class="commit-summary" href="{{ c.url }}">{{ c.summary }}</a>
+      <div class="muted small"><strong>{{ c.author }}</strong> committed <time title="{{ c.when_full }}">{{ c.when }}</time></div>
+    </div>
+    <a class="btn btn-small mono" href="{{ c.url }}">{{ c.short }}</a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>
+{% endblock %}

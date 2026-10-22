@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="narrow">
+  <h1>SSH keys</h1>
+  {% if !ssh_enabled %}<p class="flash">The SSH server is disabled on this instance; use HTTPS to clone and push.</p>{% endif %}
+  {% if keys.is_empty() %}
+  <p class="empty">You haven’t added any SSH keys yet.</p>
+  {% else %}
+  <ul class="card-list">
+    {% for k in keys %}
+    <li class="card-row">
+      <div>
+        <strong>{{ k.name }}</strong>
+        <div class="mono small">{{ k.fingerprint }}</div>
+        <div class="muted small">Added {{ k.added }} · {% if let Some(used) = k.last_used %}Last used {{ used }}{% else %}Never used{% endif %}</div>
+      </div>
+      <form method="post" action="/settings/keys/{{ k.id }}/delete"><button class="btn btn-small btn-danger">Delete</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <h2>Add a key</h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/settings/keys" class="form">
+    <label>Title <span class="hint">(optional, defaults to the key comment)</span> <input name="name" value="{{ name }}"></label>
+    <label>Public key <textarea name="key" rows="4" class="mono" placeholder="ssh-ed25519 AAAA… you@laptop" required>{{ key }}</textarea>
+      <span class="hint">Paste the contents of e.g. <code>~/.ssh/id_ed25519.pub</code>.</span></label>
+    <button class="btn btn-primary">Add key</button>
+  </form>
+</div>
+{% endblock %}

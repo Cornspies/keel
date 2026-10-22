@@ -1,0 +1,50 @@
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/keel"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.dependencies]
+keel-core = { path = "crates/keel-core" }
+keel-git = { path = "crates/keel-git" }
+keel-web = { path = "crates/keel-web" }
+keel-ssh = { path = "crates/keel-ssh" }
+
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1.54", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.6", features = ["derive", "env"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+axum = "0.8"
+tower-http = { version = "0.7", features = ["compression-gzip", "compression-br", "trace"] }
+askama = "0.16"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+ammonia = "4"
+moka = { version = "0.12", features = ["sync"] }
+argon2 = "0.6"
+getrandom = "0.4"
+sha2 = "0.11"
+base64 = "0.23"
+hex = "0.4"
+flate2 = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+russh = "0.64"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

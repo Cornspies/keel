@@ -1,0 +1,11 @@
+<details class="dropdown dropdown-right">
+  <summary class="btn btn-primary">Clone</summary>
+  <div class="dropdown-menu clone-menu">
+    <div class="menu-title">HTTPS</div>
+    <div class="copy-field"><input readonly value="{{ repo.http_url }}" aria-label="HTTPS clone URL"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+    {% if let Some(ssh) = repo.ssh_url %}
+    <div class="menu-title">SSH</div>
+    <div class="copy-field"><input readonly value="{{ ssh }}" aria-label="SSH clone URL"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+    {% endif %}
+  </div>
+</details>

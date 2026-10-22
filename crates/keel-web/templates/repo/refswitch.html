@@ -1,0 +1,11 @@
+<details class="dropdown">
+  <summary class="btn"><span class="ref-icon" aria-hidden="true"></span>{{ rev }}</summary>
+  <div class="dropdown-menu refs-menu">
+    <div class="menu-title">Branches</div>
+    {% for b in refs.branches %}<a href="{{ b.url }}"{% if b.name == rev %} class="current"{% endif %}>{{ b.name }}</a>{% endfor %}
+    {% if !refs.tags.is_empty() %}
+    <div class="menu-title">Tags</div>
+    {% for t in refs.tags %}<a href="{{ t.url }}"{% if t.name == rev %} class="current"{% endif %}>{{ t.name }}</a>{% endfor %}
+    {% endif %}
+  </div>
+</details>
