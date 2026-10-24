@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="box empty-repo">
+  <h2>This wiki has no pages yet</h2>
+  <p>A wiki holds documentation for {{ repo.name }}: Markdown pages anyone who can see the repository can read{% if wiki.can_write %}, and you can edit{% endif %}.</p>
+  {% if wiki.can_write %}
+  <p><a class="btn btn-primary" href="{{ wiki.base }}/_new">Create the first page</a></p>
+  <p>Or push pages from your computer — the wiki is a git repository of <span class="mono">.md</span> files, with <span class="mono">Home.md</span> as the front page:</p>
+  <pre class="cmd">git init -b main {{ repo.name }}.wiki
+cd {{ repo.name }}.wiki
+echo "# Welcome" &gt; Home.md
+git add Home.md
+git commit -m "Create Home"
+git remote add origin {% if let Some(ssh) = wiki.ssh_url %}{{ ssh }}{% else %}{{ wiki.http_url }}{% endif %}
+git push -u origin main</pre>
+  {% else %}
+  <p class="muted">Nobody has written one yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

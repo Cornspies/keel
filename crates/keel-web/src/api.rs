@@ -47,6 +47,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/commits/{sha}/status", get(combined_status))
         .route("/api/v1/repos/{owner}/{repo}/statuses/{sha}", get(statuses).post(create_status))
         .route("/api/v1/repos/{owner}/{repo}/transfer", post(transfer))
+        .route("/api/v1/repos/{owner}/{repo}/topics", get(topics).put(set_topics))
+        .route("/api/v1/search/repositories", get(search_repos))
         .route("/api/v1/repos/{owner}/{repo}/releases", get(list_releases).post(create_release))
         .route("/api/v1/repos/{owner}/{repo}/releases/latest", get(latest_release))
         .route("/api/v1/repos/{owner}/{repo}/releases/tags/{*tag}", get(release_by_tag))
@@ -484,6 +486,73 @@ async fn update_repo(
     }
     let r = state.core.repo_by_id(r.id).await?.ok_or_else(not_found_error)?;
     Ok(Json(repo_value(&state, &r).await?))
+}
+
+#[derive(Deserialize)]
+pub struct Topics {
+    names: Vec<String>,
+}
+
+async fn topics(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    Ok(Json(json!({ "names": r.topics().collect::<Vec<_>>() })))
+}
+
+async fn set_topics(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Body(body): Body<Topics>,
+) -> ApiResult<Json<Value>> {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Admin)?;
+    if body.names.iter().any(|n| n.contains([' ', ','])) {
+        return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Topics can't contain spaces or commas"));
+    }
+    let names = keel_core::parse_topics(&body.names.join(" "))?;
+    state.core.set_topics(r.id, &names).await?;
+    Ok(Json(json!({ "names": names })))
+}
+
+#[derive(Deserialize)]
+pub struct RepoSearch {
+    /// Words to find in `owner/name` and descriptions, and `topic:x`.
+    #[serde(default)]
+    q: String,
+    /// `updated` (default), `created`, `watchers` or `name`.
+    sort: Option<String>,
+    #[serde(flatten)]
+    paging: Paging,
+}
+
+/// Like GitHub's `GET /search/repositories`, for the repositories the
+/// caller can read.
+async fn search_repos(State(state): State<AppState>, caller: Caller, Q(q): Q<RepoSearch>) -> ApiResult<Json<Value>> {
+    let mut words = Vec::new();
+    let mut topic = None;
+    for w in q.q.split_whitespace() {
+        match w.strip_prefix("topic:") {
+            Some(t) => topic = Some(t.to_lowercase()),
+            None => words.push(w),
+        }
+    }
+    let sort = match q.sort.as_deref() {
+        None | Some("" | "updated" | "best-match") => keel_core::ExploreSort::Updated,
+        Some(s) => keel_core::ExploreSort::parse(s)
+            .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, "sort is updated, created, watchers or name"))?,
+    };
+    let query = keel_core::ExploreQuery { text: words.join(" "), topic, sort };
+    let (repos, total) =
+        state.core.explore(caller.user.as_ref(), &query, q.paging.offset(), q.paging.per_page()).await?;
+    let mut items = Vec::new();
+    for r in &repos {
+        items.push(repo_value(&state, r).await?);
+    }
+    Ok(Json(json!({ "total_count": total, "incomplete_results": false, "items": items })))
 }
 
 #[derive(Deserialize)]

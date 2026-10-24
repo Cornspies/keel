@@ -19,6 +19,7 @@ pub(crate) struct RepoCard {
     pub description: String,
     pub is_private: bool,
     pub updated: String,
+    pub topics: Vec<String>,
 }
 
 impl From<&Repo> for RepoCard {
@@ -29,11 +30,12 @@ impl From<&Repo> for RepoCard {
             description: r.description.clone(),
             is_private: r.is_private,
             updated: relative_time(r.updated_at),
+            topics: r.topics().map(str::to_owned).collect(),
         }
     }
 }
 
-fn cards(repos: &[Repo]) -> Vec<RepoCard> {
+pub(crate) fn cards(repos: &[Repo]) -> Vec<RepoCard> {
     repos.iter().map(RepoCard::from).collect()
 }
 

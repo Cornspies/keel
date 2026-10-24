@@ -11,6 +11,10 @@ One binary, one data directory, no external services.
   with diffs, branches and tags, and downloading any of them as `.zip` or
   `.tar.gz`.
 - **Releases:** notes and files for a tag, with drafts and pre-releases.
+- **Wikis:** Markdown pages edited on the web or cloned and pushed with git,
+  with `[[links]]`, page history, a sidebar and a footer.
+- **Topics and Explore:** tag repositories with topics and find them by
+  topic, name or description.
 - **Activity feed** on the home page (repositories you watch) and on
   profiles.
 - **Code search** across all repositories you can see, or within one on any
@@ -36,7 +40,7 @@ One binary, one data directory, no external services.
   on, are assigned to or mentioned in, or whose repository you watch; with
   per-thread subscribe/unsubscribe, and optionally by email.
 - **Webhooks** for repositories and whole organizations: pushes, issues,
-  comments, pull requests and reviews, in GitHub's payload format and signed,
+  comments, pull requests, reviews, releases and wiki edits, in GitHub's payload format and signed,
   with retries and a delivery log.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
@@ -82,8 +86,8 @@ repositories), `lfs/` (Git LFS files), the generated SSH host key, and
 ```
 
 copies the data directory while the server keeps running: the database as a
-consistent snapshot, then every repository, LFS file, release file and the
-SSH host key. The
+consistent snapshot, then every repository and wiki, LFS file, release file
+and the SSH host key. The
 copy is a data directory itself, so restoring is `keel serve --data-dir
 /backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
 backup tool of choice.
@@ -161,6 +165,8 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private` |
+| `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
+| `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `created`, `watchers`, `name`) |
 | `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
 | `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
 | `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
@@ -205,7 +211,7 @@ crates/
               requests, reviews and suggestions, branch protection (and the
               pre-receive hook), commit statuses, notifications, webhook
               queue and payloads, push events, site administration, Git LFS
-              storage, backups
+              storage, wikis, topics, backups
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
@@ -350,10 +356,28 @@ a `release` event.
 **The activity feed** is a table of events recorded where notifications and
 webhooks already come from: pushes (with their newest commits), new and
 deleted branches and tags, issues and pull requests opened, closed and
-merged, comments and reviews, releases, new repositories and forks. Mirror
+merged, comments and reviews, releases, wiki edits, new repositories and
+forks. Mirror
 syncs aren't included. The home page shows the repositories you watch (and
 your own actions), profiles what someone did, and both only include
 repositories the viewer can read. Events are kept for a year.
+
+**Wikis** work like GitHub's: each is a second git repository
+(`data/repos/<id>.wiki.git`, cloned as `<repo>.wiki.git` over HTTP and SSH)
+with one Markdown file per page, so `Getting-Started.md` is the page "Getting
+Started" and existing GitHub wikis can be pushed as they are. It's created
+with the first page or push. Pages are found by name in any directory,
+ignoring case; `Home` is the front page and `_Sidebar` and `_Footer` are shown
+around every page. `[[Page]]` and `[[text|Page]]` link to pages, relative
+images come from the wiki. Anyone who can read the repository can read the
+wiki and people with write access can change it (branch protection doesn't
+apply). Web edits are commits by the editor; one based on an older version of
+the page is refused instead of overwriting someone's changes. Pushes and web
+edits show in the activity feed and send GitHub's `gollum` webhook.
+
+**Topics** are lowercase words with hyphens, at most 20 per repository. The
+Explore page lists the repositories the viewer can see, filtered by topic or
+words in the name or description, with the most used topics beside them.
 
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
@@ -488,7 +512,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~460 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
+cargo build && scripts/smoke-test.sh      # ~520 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -497,7 +521,7 @@ run automatically at startup.
 
 ## Ideas
 
-- A `CODEOWNERS` file that requests reviews from the right people
-  automatically (and branch protection that can require their approval).
-- Repository topics and an Explore page to find repositories by them.
-- Wikis.
+- Editing, adding and uploading files in the browser.
+- Issue and pull request templates (`.keel/` or `.github/ISSUE_TEMPLATE`).
+- Stars, and sorting Explore by them.
+- Reactions on issues, pull requests and comments.

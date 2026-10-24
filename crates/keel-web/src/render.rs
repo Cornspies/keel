@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag};
+use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 use syntect::html::{ClassStyle, ClassedHTMLGenerator, css_for_theme_with_class_style};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
@@ -165,18 +165,75 @@ pub fn markdown_with_refs(src: &str, base: &LinkBase<'_>, repo_url: &str) -> Str
     render_markdown(src, base, Some(repo_url))
 }
 
-fn render_markdown(src: &str, base: &LinkBase<'_>, repo_url: Option<&str>) -> String {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_HEADING_ATTRIBUTES;
-    let rewrite = |url: CowStr<'static>, prefix: &str| -> CowStr<'static> {
-        match resolve_relative(base.dir, &url) {
-            Some(path) => format!("{prefix}/{path}").into(),
-            None => url,
-        }
+/// Markdown for wiki pages: relative links and `[[Page]]` or
+/// `[[Text|Page]]` (as on GitHub) go to pages of the wiki at `wiki_url`,
+/// relative images to its files at `raw_url`.
+pub fn wiki_markdown(src: &str, wiki_url: &str, raw_url: &str) -> String {
+    let base = LinkBase { blob: wiki_url, raw: raw_url, dir: "" };
+    let options = MARKDOWN_OPTIONS | Options::ENABLE_WIKILINKS;
+    let events = wiki_links(Parser::new_ext(src, options), wiki_url);
+    finish_markdown(events.into_iter(), &base)
+}
+
+/// A wiki link's target: the page `name` (spaces as in titles), maybe
+/// with an `#anchor`.
+fn wiki_href(wiki_url: &str, target: &str) -> String {
+    let (name, anchor) = match target.split_once('#') {
+        Some((n, a)) => (n, format!("#{a}")),
+        None => (target, String::new()),
     };
+    let name = name.split_whitespace().collect::<Vec<_>>().join("-");
+    if name.is_empty() {
+        return anchor;
+    }
+    format!("{wiki_url}/{}{anchor}", crate::repo::encode_path(&name.replace('/', "-")))
+}
+
+/// Resolves wiki links. pulldown-cmark reads `[[a|b]]` the Obsidian way
+/// (page `a`, text `b`); wikis from GitHub mean the opposite.
+fn wiki_links<'a>(events: impl Iterator<Item = Event<'a>>, wiki_url: &str) -> Vec<Event<'a>> {
+    let mut out = Vec::new();
+    let mut events = events.into_iter();
+    while let Some(event) = events.next() {
+        let Event::Start(Tag::Link { link_type: LinkType::WikiLink { has_pothole }, dest_url, title, id }) = event else {
+            out.push(event);
+            continue;
+        };
+        let mut inner = Vec::new();
+        for e in events.by_ref() {
+            if matches!(e, Event::End(TagEnd::Link)) {
+                break;
+            }
+            inner.push(e);
+        }
+        let (target, text) = if has_pothole {
+            let target: String = inner
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Text(t) | Event::Code(t) => Some(t.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            (target, vec![Event::Text(dest_url)])
+        } else {
+            (dest_url.to_string(), inner)
+        };
+        let href = wiki_href(wiki_url, target.trim());
+        out.push(Event::Start(Tag::Link { link_type: LinkType::Inline, dest_url: href.into(), title, id }));
+        out.extend(text);
+        out.push(Event::End(TagEnd::Link));
+    }
+    out
+}
+
+const MARKDOWN_OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_FOOTNOTES)
+    .union(Options::ENABLE_HEADING_ATTRIBUTES);
+
+fn render_markdown(src: &str, base: &LinkBase<'_>, repo_url: Option<&str>) -> String {
+    let options = MARKDOWN_OPTIONS;
     // Inside code and links, `#1` and `@x` are left alone.
     let mut verbatim = 0usize;
     let events = Parser::new_ext(src, options).flat_map(move |event| {
@@ -192,6 +249,17 @@ fn render_markdown(src: &str, base: &LinkBase<'_>, repo_url: Option<&str>) -> St
             (e, _) => vec![e],
         }
     });
+    finish_markdown(events, base)
+}
+
+/// Rewrites relative links and images, renders and sanitizes.
+fn finish_markdown<'a>(events: impl Iterator<Item = Event<'a>>, base: &LinkBase<'_>) -> String {
+    let rewrite = |url: CowStr<'static>, prefix: &str| -> CowStr<'static> {
+        match resolve_relative(base.dir, &url) {
+            Some(path) => format!("{prefix}/{path}").into(),
+            None => url,
+        }
+    };
     let events = events.map(|event| match event {
         Event::Start(Tag::Link { link_type, dest_url, title, id }) => Event::Start(Tag::Link {
             link_type,
@@ -388,6 +456,21 @@ mod tests {
         assert!(html.contains(r#"src="/ada/engine/raw/main/docs/img/logo.png""#));
         assert!(!html.contains("<script"));
         assert_eq!(resolve_relative("", "../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn wiki_pages() {
+        let html = wiki_markdown(
+            "[[Getting Started]] [[the setup|Setup Guide#install]] [x](Other-Page) ![i](img/a.png) [[#top]]",
+            "/a/r/wiki",
+            "/a/r/wiki/_raw",
+        );
+        assert!(html.contains(r#"href="/a/r/wiki/Getting-Started" rel="noopener noreferrer">Getting Started</a>"#), "{html}");
+        assert!(html.contains(r#"href="/a/r/wiki/Setup-Guide#install" rel="noopener noreferrer">the setup</a>"#), "{html}");
+        assert!(html.contains(r#"href="/a/r/wiki/Other-Page""#));
+        assert!(html.contains(r#"src="/a/r/wiki/_raw/img/a.png""#));
+        assert!(html.contains(r##"href="#top""##), "{html}");
+        assert!(wiki_markdown("`[[x]]`", "/w", "/r").contains("<code>[[x]]</code>"));
     }
 
     #[test]

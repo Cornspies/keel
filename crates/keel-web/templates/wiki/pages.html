@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="wiki-layout">
+  <section class="wiki-main">
+    <div class="wiki-head">
+      <h1 class="wiki-title">Pages <span class="muted">{{ all.len() }}</span></h1>
+      {% if wiki.can_write %}<a class="btn btn-small btn-primary" href="{{ wiki.base }}/_new">New page</a>{% endif %}
+    </div>
+    {% if all.is_empty() %}
+    <p class="empty">No pages yet.</p>
+    {% else %}
+    <ul class="card-list">
+      {% for p in all %}<li class="card-row"><a href="{{ p.url }}">{{ p.title }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+  <aside class="wiki-side">
+    <section class="wiki-clone">
+      <h2>Clone this wiki</h2>
+      <div class="copy-field"><input readonly value="{{ wiki.http_url }}" aria-label="HTTPS clone URL of the wiki"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+      {% if let Some(ssh) = wiki.ssh_url %}
+      <div class="copy-field"><input readonly value="{{ ssh }}" aria-label="SSH clone URL of the wiki"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+      {% endif %}
+    </section>
+  </aside>
+</div>
+{% endblock %}

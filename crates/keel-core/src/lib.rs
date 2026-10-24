@@ -39,6 +39,7 @@ mod tokens;
 mod totp;
 mod users;
 mod webhooks;
+mod wiki;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,13 +66,14 @@ pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for
 pub use events::Event;
 pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
-pub use repos::Repo;
+pub use repos::{ExploreQuery, ExploreSort, MAX_TOPICS, Repo, parse_topics};
 pub use reviews::{InlineAnchor, Verdict, suggestion};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
 pub use tokens::{AccessToken, looks_like_token};
 pub use totp::{RECOVERY_CODES, SecondStep, totp_uri};
 pub use users::User;
+pub use wiki::{GitSession, GitTarget, SPECIAL as WIKI_SPECIAL, WikiAction, WikiContent, WikiEdit, WikiPage, page_name, page_title};
 pub use webhooks::{Attempt, Delivery, HookOwner, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
 
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard explore">
+  <section>
+    <h1>Explore</h1>
+    <form method="get" action="/explore" class="form form-inline explore-search" role="search">
+      <input type="search" name="q" value="{{ q }}" placeholder="Find a repository" aria-label="Find a repository">
+      {% if let Some(t) = topic %}<input type="hidden" name="topic" value="{{ t }}">{% endif %}
+      <select name="sort" aria-label="Sort">{% for (value, label) in sorts %}<option value="{{ value }}"{% if *value == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <button class="btn">Search</button>
+    </form>
+    <p class="muted explore-summary">
+      {{ total }} repositor{% if total == 1 %}y{% else %}ies{% endif %}{% if let Some(t) = topic %} with the topic <a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endif %}{% if !q.is_empty() %} matching “{{ q }}”{% endif %}
+      {% if topic.is_some() || !q.is_empty() %} · <a href="/explore">Show all</a>{% endif %}
+    </p>
+    {% if repos.is_empty() %}
+    <p class="empty">{% if topic.is_some() || !q.is_empty() %}No repositories match.{% else %}No repositories to show yet.{% endif %}</p>
+    {% else %}
+    <ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+    {% endif %}
+    {% if newer_url.is_some() || older_url.is_some() %}
+    <div class="pager">
+      {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Previous</a>{% endif %}
+      {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Next →</a>{% endif %}
+    </div>
+    {% endif %}
+  </section>
+  <aside class="dashboard-side">
+    <h2>Topics</h2>
+    {% if topics.is_empty() %}
+    <p class="empty">No topics yet. Add some to a repository in its settings.</p>
+    {% else %}
+    <p class="topics topic-cloud">{% for (t, n) in topics %}<a class="topic{% if let Some(cur) = topic %}{% if cur == t %} topic-current{% endif %}{% endif %}" href="/explore?topic={{ t }}" title="{{ n }} repositor{% if *n == 1 %}y{% else %}ies{% endif %}">{{ t }} <span class="topic-count">{{ n }}</span></a>{% endfor %}</p>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}

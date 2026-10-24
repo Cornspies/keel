@@ -6,6 +6,7 @@ mod api;
 mod archive;
 mod assets;
 mod error;
+mod explore;
 mod feed;
 mod forks;
 mod githttp;
@@ -29,6 +30,7 @@ mod session;
 mod settings;
 mod statuses;
 mod twofactor;
+mod wiki;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -196,6 +198,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/users/{id}/2fa", post(admin::disable_two_factor))
         .route("/admin/repos", get(admin::repos))
         .route("/search", get(search::global))
+        .route("/explore", get(explore::index))
         .route("/notifications", get(notifications::inbox))
         .route("/notifications/read", post(notifications::mark_all_read))
         .route("/notifications/{id}/read", post(notifications::mark_read))
@@ -275,6 +278,14 @@ pub fn router(state: AppState) -> Router {
             post(releases::upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/{owner}/{repo}/releases/{id}/assets/{asset}/delete", post(releases::delete_asset))
+        .route("/{owner}/{repo}/wiki", get(wiki::index).post(wiki::create))
+        .route("/{owner}/{repo}/wiki/_pages", get(wiki::pages))
+        .route("/{owner}/{repo}/wiki/_new", get(wiki::new_form))
+        .route("/{owner}/{repo}/wiki/_raw/{*path}", get(wiki::raw))
+        .route("/{owner}/{repo}/wiki/{page}", get(wiki::show))
+        .route("/{owner}/{repo}/wiki/{page}/edit", get(wiki::edit_form).post(wiki::update))
+        .route("/{owner}/{repo}/wiki/{page}/delete", post(wiki::delete))
+        .route("/{owner}/{repo}/wiki/{page}/history", get(wiki::history))
         .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
         .route("/{owner}/{repo}/forks", get(forks::list))
         .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))

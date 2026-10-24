@@ -31,8 +31,10 @@ pub fn validate_repo_name(name: &str) -> Result<()> {
             "Repository names are 1–100 characters: letters, digits, “-”, “_” and “.”.",
         );
     }
-    if name == "." || name == ".." || name.to_ascii_lowercase().ends_with(".git") {
-        return invalid("Repository names cannot be “.”, “..” or end in “.git”.");
+    let lower = name.to_ascii_lowercase();
+    // `<name>.wiki.git` is the wiki of `<name>`.
+    if name == "." || name == ".." || lower.ends_with(".git") || lower.ends_with(".wiki") {
+        return invalid("Repository names cannot be “.”, “..” or end in “.git” or “.wiki”.");
     }
     Ok(())
 }
@@ -55,7 +57,7 @@ mod tests {
         assert!(validate_repo_name("keel").is_ok());
         assert!(validate_repo_name(".github").is_ok());
         assert!(validate_repo_name("my_repo-1.0").is_ok());
-        for bad in ["", ".", "..", "x.git", "X.GIT", "a/b", "a b"] {
+        for bad in ["", ".", "..", "x.git", "X.GIT", "x.Wiki", "a/b", "a b"] {
             assert!(validate_repo_name(bad).is_err(), "{bad}");
         }
     }

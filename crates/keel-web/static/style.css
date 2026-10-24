@@ -686,10 +686,41 @@ a.ci-status:hover { text-decoration: none; }
 .feed-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-muted); }
 .feed-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .feed-icon { width: 10px; height: 10px; border-radius: 50%; margin-top: 7px; flex-shrink: 0; background: var(--text-muted); }
-.feed-push, .feed-create { background: var(--link); }
+.feed-push, .feed-create, .feed-wiki { background: var(--link); }
 .feed-open, .feed-approved { background: #1f883d; }
 .feed-merged, .feed-release { background: #8250df; }
 .feed-closed, .feed-delete, .feed-changes { background: var(--danger); }
 .feed-commits { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
 .feed-commits li { padding: 1px 0; }
 .feed-excerpt { margin: 6px 0 0; padding: 2px 10px; border-left: 3px solid var(--border); color: var(--text-muted); font-size: 13px; }
+
+/* Topics and Explore */
+.topics { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.topic {
+  display: inline-block; padding: 0 9px; font-size: 12px; font-weight: 500; line-height: 22px; border-radius: 2em;
+  background: color-mix(in srgb, var(--link) 12%, transparent); color: var(--link); white-space: nowrap;
+}
+a.topic:hover { text-decoration: none; background: color-mix(in srgb, var(--link) 22%, transparent); }
+.topic-current { background: var(--link); color: var(--accent-text); }
+a.topic-current:hover { background: var(--link); }
+.topic-count { opacity: 0.7; margin-left: 2px; }
+.repo-head .topics { margin: 0 0 12px; }
+.explore h1 { margin-top: 0; }
+.explore-search { margin-bottom: 8px; }
+.explore-search input[type=search] { flex: 1; min-width: 0; }
+.explore-summary { margin: 8px 0 12px; }
+
+/* Wikis */
+.wiki-layout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 24px; margin-top: 16px; }
+@media (max-width: 860px) { .wiki-layout { grid-template-columns: 1fr; } }
+.wiki-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.wiki-head p { margin: 4px 0 0; }
+.wiki-title { margin: 0; font-size: 26px; overflow-wrap: anywhere; }
+.wiki-subtitle { font-size: 16px; margin: 16px 0 8px; }
+.wiki-side h2 { font-size: 14px; margin: 0 0 6px; }
+.wiki-side section { margin-bottom: 20px; }
+.wiki-side .plain li { overflow-wrap: anywhere; }
+.wiki-side a.current { color: var(--text); font-weight: 600; }
+.wiki-side .copy-field { padding: 0; margin-bottom: 6px; }
+.wiki-side .copy-field input { min-width: 0; flex: 1; }
+.wiki-sidebar .markdown, .wiki-footer .markdown { padding: 12px 16px; font-size: 14px; }

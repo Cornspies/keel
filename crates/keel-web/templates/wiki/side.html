@@ -1,0 +1,18 @@
+<section class="wiki-pages">
+  <h2>Pages <span class="muted">{{ wiki.pages.len() + wiki.more }}</span></h2>
+  {% if wiki.pages.is_empty() %}
+  <p class="muted small">No pages yet.</p>
+  {% else %}
+  <ul class="plain">
+    {% for p in wiki.pages %}<li><a href="{{ p.url }}"{% if p.current %} class="current" aria-current="page"{% endif %}>{{ p.title }}</a></li>{% endfor %}
+  </ul>
+  {% endif %}
+  <p class="small"><a href="{{ wiki.base }}/_pages">{% if wiki.more > 0 %}All {{ wiki.pages.len() + wiki.more }} pages{% else %}All pages{% endif %}</a></p>
+</section>
+<section class="wiki-clone">
+  <h2>Clone this wiki</h2>
+  <div class="copy-field"><input readonly value="{{ wiki.http_url }}" aria-label="HTTPS clone URL of the wiki"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+  {% if let Some(ssh) = wiki.ssh_url %}
+  <div class="copy-field"><input readonly value="{{ ssh }}" aria-label="SSH clone URL of the wiki"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
+  {% endif %}
+</section>

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <p class="muted small"><a href="{{ wiki.base }}">Wiki</a> / {% match editing %}{% when Some(name) %}<a href="{{ wiki.base }}/{{ name }}">{{ title }}</a> / Edit{% when None %}New page{% endmatch %}</p>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <h2>{% if editing.is_some() %}Edit page{% else %}New page{% endif %}</h2>
+  <form method="post" action="{{ action }}" class="form">
+    <input type="hidden" name="base" value="{{ base }}">
+    <label>Title <input name="title" value="{{ title }}" maxlength="100" required{% if editing.is_none() %} autofocus{% endif %}></label>
+    <label>Content <span class="hint">Markdown; link to other pages with <span class="mono">[[Page title]]</span> or <span class="mono">[[text|Page title]]</span>.</span>
+      <textarea name="text" rows="20" class="mono"{% if editing.is_some() %} autofocus{% endif %}>{{ text }}</textarea></label>
+    <label>Edit message <span class="hint">(optional)</span> <input name="message" value="{{ message }}" maxlength="200" placeholder="{% if editing.is_some() %}Update {{ title }}{% else %}Create the page{% endif %}"></label>
+    <div class="row-actions">
+      <button class="btn btn-primary">{% if editing.is_some() %}Save page{% else %}Create page{% endif %}</button>
+      {% match editing %}{% when Some(name) %}<a class="btn" href="{{ wiki.base }}/{{ name }}">Cancel</a>{% when None %}<a class="btn" href="{{ wiki.base }}">Cancel</a>{% endmatch %}
+    </div>
+  </form>
+  {% if let Some(name) = editing %}
+  <h3 class="danger-title">Delete</h3>
+  <form method="post" action="{{ wiki.base }}/{{ name }}/delete" class="form">
+    <p class="hint">Removes the page; it stays in the wiki's history.</p>
+    <button class="btn btn-danger">Delete this page</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

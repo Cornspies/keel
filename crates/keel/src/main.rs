@@ -115,11 +115,12 @@ fn main() -> anyhow::Result<()> {
         Command::Backup { data_dir, out } => {
             let report = tokio::runtime::Runtime::new()?.block_on(keel_core::backup(&data_dir, &out))?;
             println!(
-                "Backed up {} to {}: the database, {} repositories{}, {} large files, {} release files; {:.1} MB in {:.1}s.",
+                "Backed up {} to {}: the database, {} repositories{}, {} wikis, {} large files, {} release files; {:.1} MB in {:.1}s.",
                 data_dir.display(),
                 out.display(),
                 report.repos,
                 if report.skipped > 0 { format!(" ({} deleted meanwhile, skipped)", report.skipped) } else { String::new() },
+                report.wikis,
                 report.lfs_objects,
                 report.release_files,
                 report.bytes as f64 / 1e6,

@@ -3,6 +3,7 @@
     <a class="repo-link" href="/{{ r.owner }}/{{ r.name }}">{{ r.owner }}/<strong>{{ r.name }}</strong></a>
     {% if r.is_private %}<span class="badge">Private</span>{% endif %}
     {% if !r.description.is_empty() %}<p class="muted small">{{ r.description }}</p>{% endif %}
+    {% if !r.topics.is_empty() %}<p class="topics">{% for t in r.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
   </div>
   <span class="muted small nowrap">Updated {{ r.updated }}</span>
 </li>

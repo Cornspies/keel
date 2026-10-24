@@ -199,14 +199,14 @@ impl Connection {
         handle: Handle,
     ) -> anyhow::Result<()> {
         let user = self.user.clone();
-        let repo = self.core.repo_or_redirect(&request.owner, &request.repo).await?;
+        let target = self.core.git_target(&request.owner, &request.repo).await?;
         let needed = if request.service.is_write() { Access::Write } else { Access::Read };
-        let access = match &repo {
-            Some(r) => self.core.access(r, user.as_ref()).await?,
+        let access = match &target {
+            Some(t) => self.core.access(&t.repo, user.as_ref()).await?,
             None => Access::None,
         };
-        let repo = match repo {
-            Some(r) if access >= needed => r,
+        let target = match target {
+            Some(t) if access >= needed => t,
             Some(_) if access == Access::Read => {
                 Self::fail(&handle, channel, "keel: you don't have permission to push to this repository").await;
                 return Ok(());
@@ -217,7 +217,7 @@ impl Connection {
             }
         };
 
-        if request.service == Service::ReceivePack && self.core.is_mirror(repo.id).await? {
+        if request.service == Service::ReceivePack && !target.wiki && self.core.is_mirror(target.repo.id).await? {
             Self::fail(&handle, channel, "keel: this repository is a mirror; push to the repository it mirrors").await;
             return Ok(());
         }
@@ -225,18 +225,15 @@ impl Connection {
         let kind = if request.service.is_write() { "receive-pack" } else { "upload-pack" };
         self.core.metrics().git_operation(kind, "ssh");
 
-        // What the refs were, to tell webhooks what the push changed.
-        let before = match request.service {
-            Service::ReceivePack => self.core.ref_snapshot(repo.id).await.ok(),
-            _ => None,
+        let Some(session) = self.core.git_session(&target, request.service.is_write()).await? else {
+            Self::fail(&handle, channel, "keel: this wiki has no pages yet; push to it or create one on the web").await;
+            return Ok(());
         };
-        let path = self.core.repo_path(&repo);
         let protocol = self.protocol.get(&channel).map(String::as_str);
-        let mut cmd = tokio::process::Command::from(git_command(request.service, &path, false, false, protocol));
-        if request.service == Service::ReceivePack {
-            // Branch protection, enforced by a pre-receive hook.
-            cmd.envs(self.core.receive_pack_env(repo.id).await?);
-        }
+        let mut cmd = tokio::process::Command::from(git_command(request.service, &session.path, false, false, protocol));
+        // Branch protection, enforced by a pre-receive hook.
+        cmd.envs(session.env);
+        let before = session.before;
         let mut child = cmd.kill_on_drop(true).spawn().context("spawning git")?;
         let (Some(mut stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -272,7 +269,7 @@ impl Connection {
             finish(&handle, channel, code).await;
             if code == 0
                 && service == Service::ReceivePack
-                && let Err(e) = core.after_push(repo.id, pusher, before).await
+                && let Err(e) = core.after_receive(&target, pusher, before).await
             {
                 tracing::warn!("after push: {e}");
             }

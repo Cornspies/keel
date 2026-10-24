@@ -4,8 +4,8 @@
 //!
 //! The database is copied first, with SQLite's `VACUUM INTO` (a consistent
 //! snapshot, even while the server writes). The repositories are copied
-//! after it, so every commit the database mentions is in them. Large files
-//! (Git LFS) are immutable and copied as they are.
+//! after it (with their wikis), so every commit the database mentions is in
+//! them. Large files (Git LFS) are immutable and copied as they are.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 #[derive(Debug)]
 pub struct BackupReport {
     pub repos: usize,
+    pub wikis: usize,
     /// Repositories deleted between the database snapshot and copying.
     pub skipped: usize,
     pub lfs_objects: usize,
@@ -55,7 +56,7 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     let mut copy = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&snapshot).read_only(true)).await?;
     let ids: Vec<(i64,)> = sqlx::query_as("SELECT id FROM repositories ORDER BY id").fetch_all(&mut copy).await?;
     copy.close().await?;
-    let (mut repos, mut skipped) = (0, 0);
+    let (mut repos, mut wikis, mut skipped) = (0, 0, 0);
     for (id,) in ids {
         let (src, dst) = (data_dir.join("repos").join(format!("{id}.git")), out.join("repos").join(format!("{id}.git")));
         if !src.exists() {
@@ -66,6 +67,14 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
             .await?
             .with_context(|| format!("copying repository {id}"))?;
         repos += 1;
+        let wiki = format!("{id}.wiki.git");
+        let (src, dst) = (data_dir.join("repos").join(&wiki), out.join("repos").join(&wiki));
+        if src.join("HEAD").is_file() {
+            tokio::task::spawn_blocking(move || keel_git::backup(&src, &dst))
+                .await?
+                .with_context(|| format!("copying the wiki of repository {id}"))?;
+            wikis += 1;
+        }
     }
 
     // 3. The SSH host key (so clients don't see a changed key after a
@@ -77,7 +86,7 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     let lfs_objects = copy_files(&data_dir.join("lfs"), &out.join("lfs"))?;
     let release_files = copy_files(&data_dir.join("releases"), &out.join("releases"))?;
 
-    Ok(BackupReport { repos, skipped, lfs_objects, release_files, bytes: dir_size(out)?, took: started.elapsed() })
+    Ok(BackupReport { repos, wikis, skipped, lfs_objects, release_files, bytes: dir_size(out)?, took: started.elapsed() })
 }
 
 /// Copies stored files (not uploads in progress, which are in `tmp` or
@@ -131,6 +140,8 @@ mod tests {
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         let gone = core.create_repo(&ada, "gone", "", false).await.unwrap();
         core.create_issue(repo.id, &ada, "Kept", "").await.unwrap();
+        let page = crate::WikiEdit { page: None, title: "Home", text: "Hi", message: "", base: None };
+        core.save_wiki_page(&repo, &ada, page).await.unwrap();
         // Simulate a repository deleted after the snapshot.
         std::fs::remove_dir_all(core.repo_path(&gone)).unwrap();
         std::fs::create_dir_all(dir.path().join("lfs/ab/cd")).unwrap();
@@ -141,7 +152,7 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let target = out.path().join("backup");
         let report = backup(dir.path(), &target).await.unwrap();
-        assert_eq!((report.repos, report.skipped, report.lfs_objects), (1, 1, 1));
+        assert_eq!((report.repos, report.wikis, report.skipped, report.lfs_objects), (1, 1, 1, 1));
         assert!(report.bytes > 0);
         assert!(backup(dir.path(), &target).await.is_err(), "won't overwrite");
         assert!(!target.join("lfs/tmp").exists());
@@ -152,5 +163,6 @@ mod tests {
         assert_eq!(restored.issue(r.id, 1).await.unwrap().unwrap().title, "Kept");
         assert!(keel_git::GitRepo::open(&restored.repo_path(&r)).is_ok());
         assert!(restored.authenticate("ada", "password1").await.unwrap().is_some());
+        assert_eq!(restored.wiki_page(r.id, "Home", None).await.unwrap().unwrap().text, "Hi");
     }
 }

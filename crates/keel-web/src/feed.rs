@@ -90,6 +90,23 @@ pub(crate) fn view(e: &Event) -> EventView {
             let parent = d["parent"].as_str().unwrap_or_default();
             ("create", format!("{who} forked {} to {repo_link}", link(&format!("/{parent}"), parent)))
         }
+        "wiki" => {
+            let pages = d["pages"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let html = match pages {
+                [p] => {
+                    let name = p["name"].as_str().unwrap_or_default();
+                    let title = keel_core::page_title(name);
+                    let page = match p["action"].as_str() {
+                        Some("deleted") => escape(&title),
+                        _ => link(&format!("{base}/wiki/{}", encode_path(name)), &title),
+                    };
+                    let action = p["action"].as_str().unwrap_or("edited");
+                    format!("{who} {} wiki page {page} in {repo_link}", escape(action))
+                }
+                _ => format!("{who} updated {} {} in {repo_link}", pages.len(), link(&format!("{base}/wiki"), "wiki pages")),
+            };
+            ("wiki", html)
+        }
         _ => ("create", format!("{who} created repository {repo_link}")),
     };
     let commits: Vec<(String, String, String)> = d["commits"]
@@ -146,5 +163,9 @@ mod tests {
         assert!(merged.html.contains("merged pull request <a href=\"/ada/engine/pull/3\">#3 Crash &lt;now&gt;</a>"), "{}", merged.html);
         assert!(view(&event("release", "{}")).html.contains(">v1.0</a>"));
         assert!(view(&event("comment", r#"{"kind": "approved"}"#)).html.contains("approved pull request"));
+        let wiki = view(&event("wiki", r#"{"pages": [{"name": "Getting-Started", "action": "created"}]}"#));
+        assert!(wiki.html.contains("created wiki page <a href=\"/ada/engine/wiki/Getting-Started\">Getting Started</a>"), "{}", wiki.html);
+        let wiki = view(&event("wiki", r#"{"pages": [{"name": "A", "action": "edited"}, {"name": "B", "action": "deleted"}]}"#));
+        assert!(wiki.html.contains("updated 2 <a href=\"/ada/engine/wiki\">wiki pages</a>"), "{}", wiki.html);
     }
 }

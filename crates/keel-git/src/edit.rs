@@ -76,6 +76,40 @@ impl GitRepo {
     }
 }
 
+impl GitRepo {
+    /// Commits `changes` (`Some(contents)` writes a file, `None` deletes
+    /// it) on top of `branch`, which must still point at `tip`, or not
+    /// exist yet if `tip` is `None`. Returns the new commit.
+    pub fn commit_files(
+        &self,
+        branch: &str,
+        tip: Option<Oid>,
+        changes: &[(&str, Option<&[u8]>)],
+        message: &str,
+        who: &Identity<'_>,
+    ) -> Result<Oid> {
+        let parent = tip.map(|t| self.repo.find_commit(t)).transpose()?;
+        let base = match &parent {
+            Some(p) => p.tree()?,
+            None => self.repo.find_tree(self.repo.treebuilder(None)?.write()?)?,
+        };
+        let mut update = git2::build::TreeUpdateBuilder::new();
+        for (path, content) in changes {
+            match content {
+                Some(data) => update.upsert(*path, self.repo.blob(data)?, git2::FileMode::Blob),
+                None => update.remove(*path),
+            };
+        }
+        let tree = self.repo.find_tree(update.create_updated(&self.repo, &base)?)?;
+        let sig = git2::Signature::now(who.name, who.email)?;
+        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+        let commit = self.repo.commit(None, &sig, &sig, message, &tree, &parents)?;
+        // Compare-and-swap; the zero id means "must not exist yet".
+        self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(tip.unwrap_or(Oid::ZERO_SHA1)))?;
+        Ok(commit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +124,24 @@ mod tests {
         assert_eq!(replace_line("a\nb", 2, "x\ny").as_deref(), Some("a\nx\ny"), "no final newline");
         assert_eq!(replace_line("a\n", 2, "x"), None);
         assert_eq!(replace_line("a\n", 0, "x"), None);
+    }
+
+    #[test]
+    fn committing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wiki.git");
+        crate::create_bare(&path, "main").unwrap();
+        let repo = GitRepo::open(&path).unwrap();
+        let who = Identity { name: "Ada", email: "ada@example.com" };
+        let first = repo.commit_files("main", None, &[("Home.md", Some(b"# Hi"))], "Create Home", &who).unwrap();
+        assert!(repo.commit_files("main", None, &[("x.md", Some(b""))], "Again", &who).is_err(), "exists now");
+        let second = repo
+            .commit_files("main", Some(first), &[("Home.md", None), ("Start.md", Some(b"go"))], "Rename", &who)
+            .unwrap();
+        assert_eq!(repo.branch_tip("main"), Some(second));
+        assert!(repo.blob(second, "Home.md").unwrap().is_none());
+        assert_eq!(repo.blob(second, "Start.md").unwrap().unwrap().data, b"go");
+        assert!(repo.commit_files("main", Some(first), &[("y.md", Some(b""))], "Stale", &who).is_err());
     }
 
     #[test]

@@ -103,9 +103,18 @@ pub fn backup(src: &Path, dst: &Path) -> Result<()> {
         return Err(Error::Other(format!("git clone: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
     let finish = || -> Result<()> {
-        let repo = git2::Repository::open_bare(dst)?;
-        repo.remote_delete("origin")?;
-        drop(repo);
+        // Only the remote's configuration: deleting the remote (libgit2's
+        // `remote_delete`) would delete every ref its `refs/*` refspec
+        // covers, which for a mirror is all of them.
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(dst)
+            .args(["config", "--remove-section", "remote.origin"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()?;
+        if !out.status.success() {
+            return Err(Error::Other(format!("git config: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        }
         apply_config(dst)?;
         let _ = std::fs::remove_dir_all(dst.join("hooks"));
         Ok(())
@@ -173,6 +182,19 @@ fn git(path: &Path, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backups_keep_refs() {
+        let s = crate::read::tests::Scratch::new();
+        s.write("a.txt", "a");
+        let tip = s.commit("first");
+        let out = tempfile::tempdir().unwrap();
+        let dst = out.path().join("copy.git");
+        super::backup(s.open().repo.path(), &dst).unwrap();
+        let copy = crate::GitRepo::open(&dst).unwrap();
+        assert_eq!(copy.branch_tip("main"), Some(tip));
+        assert_eq!(copy.default_branch().unwrap().as_deref(), Some("main"));
+        assert!(git2::Repository::open_bare(&dst).unwrap().find_remote("origin").is_err());
+    }
     use super::*;
     use crate::read::tests::Scratch;
 

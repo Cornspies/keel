@@ -360,6 +360,7 @@ impl Core {
             "private": r.is_private,
             "fork": r.forked_from.is_some(),
             "description": r.description,
+            "topics": r.topics().collect::<Vec<_>>(),
             "html_url": url,
             "clone_url": self.config.http_clone_url(&r.owner, &r.name),
             "ssh_url": self.config.ssh_clone_url(&r.owner, &r.name),
@@ -377,7 +378,7 @@ impl Core {
         })
     }
 
-    async fn sender_json(&self, user_id: Option<i64>) -> Result<Value> {
+    pub(crate) async fn sender_json(&self, user_id: Option<i64>) -> Result<Value> {
         Ok(match user_id {
             Some(id) => self.user_by_id(id).await?.map_or(Value::Null, |u| self.user_json(&u)),
             None => Value::Null,

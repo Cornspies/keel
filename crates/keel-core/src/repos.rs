@@ -16,13 +16,23 @@ pub struct Repo {
     pub updated_at: i64,
     /// The repository this one was forked from, if it still exists.
     pub forked_from: Option<i64>,
+    /// Topics, separated by spaces; see [`topics`](Self::topics).
+    pub topic_names: String,
+}
+
+impl Repo {
+    pub fn topics(&self) -> impl Iterator<Item = &str> {
+        self.topic_names.split_whitespace()
+    }
 }
 
 // A macro rather than a const so queries stay `&'static str` via `concat!`.
 macro_rules! repo_select {
     () => {
         "SELECT r.id, r.owner_id, u.username AS owner, r.name, r.description,
-            r.is_private, r.created_at, r.updated_at, r.forked_from
+            r.is_private, r.created_at, r.updated_at, r.forked_from,
+            COALESCE((SELECT group_concat(t.topic, ' ' ORDER BY t.topic) FROM repo_topics t WHERE t.repo_id = r.id), '')
+              AS topic_names
          FROM repositories r JOIN users u ON u.id = r.owner_id "
     };
 }
@@ -36,6 +46,9 @@ macro_rules! visible_to {
           OR EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = r.owner_id AND m.user_id = ?2))"
     };
 }
+
+mod topics;
+pub use topics::{ExploreQuery, ExploreSort, MAX_TOPICS, parse_topics};
 
 impl Core {
     pub fn repo_path(&self, repo: &Repo) -> PathBuf {
@@ -144,6 +157,7 @@ impl Core {
             created_at: now,
             updated_at: now,
             forked_from: fork_of.map(|r| r.id),
+            topic_names: String::new(),
         })
     }
 
@@ -419,6 +433,7 @@ impl Core {
             .await
             .map_err(anyhow::Error::from)?
             .map_err(anyhow::Error::from)?;
+        self.delete_wiki(repo.id).await;
         // Large files and release files only it used can go.
         let core = self.clone();
         tokio::spawn(async move {

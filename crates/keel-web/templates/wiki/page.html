@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="wiki-layout">
+  <article class="wiki-main">
+    <div class="wiki-head">
+      <div>
+        <h1 class="wiki-title">{{ title }}</h1>
+        <p class="muted small">{% if !edited_by.is_empty() %}{{ edited_by }} edited this page <time title="{{ edited_full }}">{{ edited }}</time> · {% endif %}<a href="{{ url }}/history">History</a></p>
+      </div>
+      {% if wiki.can_write %}
+      <div class="row-actions">
+        <a class="btn btn-small" href="{{ url }}/edit">Edit</a>
+        <a class="btn btn-small btn-primary" href="{{ wiki.base }}/_new">New page</a>
+      </div>
+      {% endif %}
+    </div>
+    {% if let Some(r) = old_rev %}<p class="flash small">This is the page as of <span class="mono">{{ r }}</span>. <a href="{{ url }}">See the current version</a>.</p>{% endif %}
+    <div class="box"><div class="markdown wiki-body">{% if html.is_empty() %}<p class="muted">This page is empty.</p>{% else %}{{ html|safe }}{% endif %}</div></div>
+    {% if !footer.is_empty() %}<div class="box wiki-footer"><div class="markdown">{{ footer|safe }}</div></div>{% endif %}
+  </article>
+  <aside class="wiki-side">
+    {% if !sidebar.is_empty() %}<div class="box wiki-sidebar"><div class="markdown">{{ sidebar|safe }}</div></div>{% endif %}
+    {% include "wiki/side.html" %}
+    {% if wiki.can_write %}<p class="small muted">Shown with every page: <a href="{{ wiki.base }}/_Sidebar">sidebar</a> · <a href="{{ wiki.base }}/_Footer">footer</a></p>{% endif %}
+  </aside>
+</div>
+{% endblock %}

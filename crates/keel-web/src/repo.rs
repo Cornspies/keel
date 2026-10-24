@@ -118,6 +118,9 @@ pub(crate) struct RepoView {
     pub mirror: Option<MirrorView>,
     /// Published releases.
     pub releases: i64,
+    pub topics: Vec<String>,
+    /// Show the wiki tab (there is a wiki, or the viewer can start one).
+    pub wiki_tab: bool,
 }
 
 /// What the header says about a mirror.
@@ -157,6 +160,8 @@ impl RepoView {
         });
         Ok(Self {
             releases: state.core.release_count(repo.id).await?,
+            topics: repo.topics().map(str::to_owned).collect(),
+            wiki_tab: access >= Access::Write || state.core.has_wiki(repo.id),
             mirror,
             parent,
             fork_count: state.core.fork_count(repo.id).await?,
@@ -719,29 +724,36 @@ pub async fn raw(
     {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        let content_type = match extension(&r.path).as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "avif" => "image/avif",
-            "bmp" => "image/bmp",
-            "ico" => "image/x-icon",
-            "svg" => "image/svg+xml",
-            "pdf" => "application/pdf",
-            // Never text/html: user content must not run on our origin.
-            _ if !blob.binary => "text/plain; charset=utf-8",
-            _ => "application/octet-stream",
-        };
-        ([(header::CONTENT_TYPE, content_type)], blob.data).into_response()
+        ([(header::CONTENT_TYPE, raw_content_type(&r.path, blob.binary))], blob.data).into_response()
     };
     let h = res.headers_mut();
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-    // Sandboxing stops scripts in e.g. SVG files from running as our origin.
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(RAW_CSP));
     Ok(res)
 }
+
+/// The content type to serve a raw file as.
+pub(crate) fn raw_content_type(path: &str, binary: bool) -> &'static str {
+    match extension(path).as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        // Never text/html: user content must not run on our origin.
+        _ if !binary => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// For raw files. Sandboxing stops scripts in e.g. SVG files from running
+/// as our origin.
+pub(crate) const RAW_CSP: &str = "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'";
 
 // ---------------------------------------------------------------------------
 // History
@@ -1191,6 +1203,8 @@ pub async fn settings(
 pub struct SettingsForm {
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    topics: String,
     private: Option<String>,
 }
 
@@ -1201,7 +1215,12 @@ pub async fn update_settings(
     Form(f): Form<SettingsForm>,
 ) -> AppResult {
     let repo = writable(&state, &user, &owner, &name).await?;
-    match state.core.update_repo(repo.id, &f.description, f.private.is_some()).await {
+    let updated = async {
+        let topics = keel_core::parse_topics(&f.topics)?;
+        state.core.update_repo(repo.id, &f.description, f.private.is_some()).await?;
+        state.core.set_topics(repo.id, &topics).await
+    };
+    match updated.await {
         Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings", repo.owner, repo.name)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => {
             settings_page(&state, user, &repo, SettingsErrors { general: Some(msg), ..Default::default() }).await

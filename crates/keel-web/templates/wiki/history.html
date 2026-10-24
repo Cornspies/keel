@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="wiki-layout">
+  <section class="wiki-main">
+    <div class="wiki-head">
+      <div>
+        <h1 class="wiki-title">{{ title }}</h1>
+        <p class="muted small"><a href="{{ url }}">← Back to the page</a></p>
+      </div>
+    </div>
+    <h2 class="wiki-subtitle">History</h2>
+    <ul class="card-list commit-list">
+      {% for r in revisions %}
+      <li class="card-row">
+        <div class="commit-main">
+          <a class="commit-summary" href="{{ r.url }}">{{ r.summary }}</a>
+          <div class="muted small"><strong>{{ r.author }}</strong> <time title="{{ r.when_full }}">{{ r.when }}</time></div>
+        </div>
+        <a class="btn btn-small mono" href="{{ r.url }}">{{ r.short }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="pager">
+      {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+      {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+    </div>
+  </section>
+  <aside class="wiki-side">{% include "wiki/side.html" %}</aside>
+</div>
+{% endblock %}

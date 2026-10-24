@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
-use keel_core::{Access, Repo, User, looks_like_token};
+use keel_core::{Access, GitSession, GitTarget, User, looks_like_token};
 use keel_git::{Service, git_command};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -65,9 +65,10 @@ pub(crate) async fn basic_credentials(state: &AppState, headers: &HeaderMap) -> 
     }
 }
 
-/// Finds the repository and checks the client may run `service` on it.
-/// Anonymous clients get 401 for anything they can't access, existing or
-/// not, so private repository names don't leak.
+/// Finds the repository (or wiki) and checks the client may run `service`
+/// on it, then prepares running git. Anonymous clients get 401 for anything
+/// they can't access, existing or not, so private repository names don't
+/// leak.
 #[allow(clippy::result_large_err)] // the error is the response to send
 async fn authorize(
     state: &AppState,
@@ -75,7 +76,7 @@ async fn authorize(
     owner: &str,
     name: &str,
     service: Service,
-) -> Result<(Repo, Option<User>), Response> {
+) -> Result<(GitTarget, GitSession, Option<User>), Response> {
     let internal = |e: keel_core::Error| {
         tracing::error!("git http: {e}");
         text(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
@@ -87,22 +88,24 @@ async fn authorize(
         Err(CredentialError::TwoFactor) => return Err(text(StatusCode::FORBIDDEN, TWO_FACTOR)),
         Err(CredentialError::Internal(e)) => return Err(internal(e)),
     };
-    let name = name.strip_suffix(".git").unwrap_or(name);
-    let repo = state.core.repo_or_redirect(owner, name).await.map_err(internal)?;
+    let target = state.core.git_target(owner, name).await.map_err(internal)?;
     let needed = if service.is_write() { Access::Write } else { Access::Read };
-    let access = match &repo {
-        Some(repo) => {
-            let a = state.core.access(repo, user.as_ref()).await.map_err(internal)?;
+    let access = match &target {
+        Some(t) => {
+            let a = state.core.access(&t.repo, user.as_ref()).await.map_err(internal)?;
             if can_write { a } else { a.min(Access::Read) }
         }
         None => Access::None,
     };
-    match (repo, &user) {
-        (Some(repo), _) if access >= needed => {
-            if service.is_write() && state.core.is_mirror(repo.id).await.map_err(internal)? {
+    match (target, &user) {
+        (Some(target), _) if access >= needed => {
+            if service.is_write() && !target.wiki && state.core.is_mirror(target.repo.id).await.map_err(internal)? {
                 return Err(text(StatusCode::FORBIDDEN, "This repository is a mirror; push to the repository it mirrors"));
             }
-            Ok((repo, user))
+            match state.core.git_session(&target, service.is_write()).await.map_err(internal)? {
+                Some(session) => Ok((target, session, user)),
+                None => Err(text(StatusCode::NOT_FOUND, "This wiki has no pages yet; push to it or create one on the web")),
+            }
         }
         (_, None) => Err(unauthorized()),
         (Some(_), Some(_)) if access == Access::Read => Err(text(
@@ -139,13 +142,12 @@ pub async fn info_refs(
     let Some(service) = q.service.as_deref().and_then(Service::parse) else {
         return text(StatusCode::FORBIDDEN, "Only the smart HTTP protocol is supported; please update git");
     };
-    let (repo, _) = match authorize(&state, &headers, &owner, &name, service).await {
+    let (_, session, _) = match authorize(&state, &headers, &owner, &name, service).await {
         Ok(r) => r,
         Err(res) => return res,
     };
     let protocol = git_protocol(&headers);
-    let path = state.core.repo_path(&repo);
-    let mut cmd = tokio::process::Command::from(git_command(service, &path, true, true, protocol));
+    let mut cmd = tokio::process::Command::from(git_command(service, &session.path, true, true, protocol));
     let out = match cmd.output().await {
         Ok(out) if out.status.success() => out,
         Ok(out) => {
@@ -203,18 +205,13 @@ async fn rpc(
     body: Body,
     service: Service,
 ) -> Response {
-    let (repo, user) = match authorize(&state, &headers, &owner, &name, service).await {
+    let (target, session, user) = match authorize(&state, &headers, &owner, &name, service).await {
         Ok(r) => r,
         Err(res) => return res,
     };
     let pusher = user.map(|u| u.id);
     state.core.metrics().git_operation(if service.is_write() { "receive-pack" } else { "upload-pack" }, "http");
-    // What the refs were, to tell webhooks what the push changed.
-    let before = match service {
-        Service::ReceivePack => state.core.ref_snapshot(repo.id).await.ok(),
-        _ => None,
-    };
-    let path = state.core.repo_path(&repo);
+    let GitSession { path, env, before } = session;
     let mut cmd = tokio::process::Command::from(git_command(
         service,
         &path,
@@ -222,18 +219,8 @@ async fn rpc(
         false,
         git_protocol(&headers),
     ));
-    if service == Service::ReceivePack {
-        // Branch protection, enforced by a pre-receive hook.
-        match state.core.receive_pack_env(repo.id).await {
-            Ok(env) => {
-                cmd.envs(env);
-            }
-            Err(e) => {
-                tracing::error!("branch rules: {e}");
-                return text(StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
-            }
-        }
-    }
+    // Branch protection, enforced by a pre-receive hook.
+    cmd.envs(env);
     let mut child = match cmd.kill_on_drop(true).spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -285,13 +272,13 @@ async fn rpc(
         match child.wait().await {
             Ok(status) if status.success() => {
                 if service == Service::ReceivePack
-                    && let Err(e) = core.after_push(repo.id, pusher, before).await
+                    && let Err(e) = core.after_receive(&target, pusher, before).await
                 {
                     tracing::warn!("after push: {e}");
                 }
             }
             Ok(status) => {
-                tracing::warn!(repo = repo.id, "{} exited with {status}: {}", service.name(), err.trim());
+                tracing::warn!(repo = target.repo.id, "{} exited with {status}: {}", service.name(), err.trim());
             }
             Err(e) => tracing::error!("waiting for git: {e}"),
         }

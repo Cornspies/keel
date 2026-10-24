@@ -367,6 +367,8 @@ check "org owners add organization webhooks" is "$(post "$T/ada" /org/acme/setti
 check "members can't" is "$(status -b "$T/eve" "$B/org/acme/settings/hooks")" 403
 git -C "$W" push -q -f "http://ada:password-ada@127.0.0.1:$HTTP_PORT/acme/tool.git" main
 check "pushes to its repositories reach it" received push '"full_name":"acme/tool"'
+check "wiki edits are delivered" is "$(post "$T/ada" /ada/engine/wiki title=Home "text=Welcome to the [[Getting Started]] guide.")" 303
+check "as gollum events" received gollum '"page_name":"Home"'
 kill "$HOOK_PID" 2>/dev/null
 
 echo "== notifications"
@@ -718,8 +720,10 @@ echo "== backups and health"
 check "health" is "$(curl -s "$B/healthz" | field '["status"]')" ok
 check "backup a running server" bash -c "'$BIN' backup --data-dir '$T/data' '$T/backup' | grep -q 'Backed up'"
 check "the copy has the repositories" git clone -q "$T/backup/repos/1.git" "$T/restored"
+check "with their branches" is "$(git -C "$T/restored" rev-parse HEAD 2>/dev/null)" "$(git --git-dir "$T/data/repos/1.git" rev-parse HEAD)"
 check "and the database" is "$(sqlite3 "$T/backup/keel.db" "SELECT COUNT(*) FROM users WHERE username = 'ada'")" 1
 check "and the large files" bash -c "[ -f '$T/backup/lfs/${OID:0:2}/${OID:2:2}/$OID' ]"
+check "and the wikis" is "$(git --git-dir "$T/backup/repos/1.wiki.git" show HEAD:Home.md 2>/dev/null)" "Welcome to the [[Getting Started]] guide."
 check "metrics need the token" is "$(status "$B/metrics")" 401
 METRICS=$(curl -s -H "Authorization: Bearer smoke-metrics" "$B/metrics")
 check "metrics count requests by route" contains "$METRICS" 'keel_http_requests_total{method="GET",route="/{owner}/{repo}",status="200"}'
@@ -778,6 +782,68 @@ check "profiles show recent activity" contains "$(curl -s "$B/ada")" "Recent act
 check "private activity stays private" bash -c "! curl -s -b '$T/eve2' '$B/ada' | grep -q 'ada/secret'"
 check "older activity pages" contains "$(curl -s -b "$T/ada" "$B/?before=999999")" "Activity"
 
+echo "== topics and explore"
+check "set topics" is "$(post "$T/ada" /ada/engine/settings "description=A small engine" "topics=Rust, git cli")" 303
+check "the header shows them" contains "$(curl -s "$B/ada/engine")" 'href="/explore?topic=rust"'
+check "bad topics are refused" contains "$(curl -s -b "$T/ada" -H "$O" -d "topics=-bad" "$B/ada/engine/settings")" "valid topic"
+check "explore by topic" contains "$(curl -s "$B/explore?topic=git")" 'href="/ada/engine"'
+check "only those with it" bash -c "! curl -s '$B/explore?topic=git' | grep -q 'href=\"/bob/engine\"'"
+check "explore everything" contains "$(curl -s "$B/explore?q=bob/engine")" 'href="/bob/engine"'
+check "but not private repositories" bash -c "! curl -s '$B/explore' | grep -q 'href=\"/ada/secret\"'"
+check "unless you can see them" contains "$(curl -s -b "$T/ada" "$B/explore")" 'href="/ada/secret"'
+check "search" contains "$(curl -s "$B/explore?q=small+eng")" 'href="/ada/engine"'
+check "popular topics" contains "$(curl -s "$B/explore")" 'topic-count'
+check "topics in the API" is "$(curl -s "$API/repos/ada/engine/topics" | field '["names"]')" "['cli', 'git', 'rust']"
+check "set them with the API" is "$(api "$RW" PUT /repos/ada/engine/topics -d '{"names":["rust","engine"]}' | field '["names"]')" "['engine', 'rust']"
+check "search repositories with the API" is "$(curl -s "$API/search/repositories?q=topic:engine" | field '["items"][0]["full_name"]')" ada/engine
+
+echo "== wikis"
+check "empty wikis explain themselves" contains "$(curl -s -b "$T/ada" "$B/ada/engine-backup/wiki")" "Create the first page"
+check "readers only see wikis that exist" bash -c "! curl -s -b '$T/eve2' '$B/ada/engine-backup' | grep -q 'engine-backup/wiki\"'"
+check "the wiki tab" contains "$(curl -s -b "$T/eve2" "$B/ada/engine")" '/ada/engine/wiki"'
+WIKI=$(curl -s "$B/ada/engine/wiki")
+check "the front page" contains "$WIKI" "Welcome to the"
+check "wiki links" contains "$WIKI" 'href="/ada/engine/wiki/Getting-Started"'
+check "writers are offered to create missing pages" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" "$B/ada/engine/wiki/Getting-Started")" "$B/ada/engine/wiki/_new?title=Getting+Started"
+check "others get a 404" is "$(status "$B/ada/engine/wiki/Getting-Started")" 404
+check "readers can't edit" is "$(post "$T/eve2" /ada/engine/wiki title=Nope text=x)" 403
+check "create a page" is "$(post "$T/ada" /ada/engine/wiki "title=Getting Started" "text=Run **cargo build**. See [[Home]].")" 303
+check "it renders" contains "$(curl -s "$B/ada/engine/wiki/Getting-Started")" "<strong>cargo build</strong>"
+check "names ignore case" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/wiki/getting-started")" "$B/ada/engine/wiki/Getting-Started"
+check "titles are unique" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "title=getting started" -d text=x "$B/ada/engine/wiki")" "already is a page"
+check "and checked" contains "$(curl -s -b "$T/ada" -H "$O" -d "title=_pages&text=x" "$B/ada/engine/wiki")" "Only _Sidebar"
+WBASE=$(curl -s -b "$T/ada" "$B/ada/engine/wiki/Getting-Started/edit" | grep -o 'name="base" value="[0-9a-f]*"' | cut -d'"' -f4)
+check "edit it" is "$(post "$T/ada" /ada/engine/wiki/Getting-Started/edit "title=Getting Started" "text=Run **cargo test** too." "base=$WBASE")" 303
+check "edits based on an old version are caught" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "title=Getting Started" -d "text=Mine&base=$WBASE" "$B/ada/engine/wiki/Getting-Started/edit")" "Someone else changed this page"
+WHIST=$(curl -s "$B/ada/engine/wiki/Getting-Started/history")
+check "history" contains "$WHIST" "Update Getting Started"
+WOLD=$(grep -o 'rev=[0-9a-f]*' <<<"$WHIST" | tail -1 | cut -d= -f2)
+check "old versions" contains "$(curl -s "$B/ada/engine/wiki/Getting-Started?rev=$WOLD")" "cargo build"
+check "rename it" is "$(post "$T/ada" /ada/engine/wiki/Getting-Started/edit "title=Setup" "text=Run **cargo test** too.")" 303
+check "the old name is gone" is "$(status "$B/ada/engine/wiki/Getting-Started")" 404
+check "add a sidebar" is "$(post "$T/ada" /ada/engine/wiki title=_Sidebar "text=[[Setup]]")" 303
+check "it's shown with pages" contains "$(curl -s "$B/ada/engine/wiki")" 'wiki-sidebar'
+check "list pages" contains "$(curl -s "$B/ada/engine/wiki/_pages")" '>Setup</a>'
+check "clone the wiki" git clone -q "http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/engine.wiki.git" "$T/wiki"
+check "pages are Markdown files" is "$(cat "$T/wiki/Setup.md" 2>/dev/null)" "Run **cargo test** too."
+mkdir -p "$T/wiki/guides" "$T/wiki/images"
+printf '# Deploying\n\n![diagram](images/d.svg)\n' >"$T/wiki/guides/Deploying.md"
+echo '<svg xmlns="http://www.w3.org/2000/svg"/>' >"$T/wiki/images/d.svg"
+git -C "$T/wiki" add -A && git -C "$T/wiki" commit -qm "Add a deploying guide"
+check "push to it" git -C "$T/wiki" push -q origin HEAD
+WDEPLOY=$(curl -s "$B/ada/engine/wiki/Deploying")
+check "pushed pages appear" contains "$WDEPLOY" "<h1"
+check "with their images" contains "$WDEPLOY" 'src="/ada/engine/wiki/_raw/images/d.svg"'
+check "which are sandboxed" contains "$(curl -s -D - -o /dev/null "$B/ada/engine/wiki/_raw/images/d.svg")" "sandbox"
+check "pushes show in the feed" feed_has 'wiki/Deploying">Deploying'
+check "clone over SSH" git clone -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.wiki.git" "$T/wiki-ssh"
+check "readers can't push" bash -c "! git -C '$T/wiki' push -q 'http://eve:password-reset@127.0.0.1:$HTTP_PORT/ada/engine.wiki.git' HEAD:refs/heads/x 2>/dev/null"
+check "missing wikis can't be cloned" bash -c "! git clone -q '$B/ada/engine-backup.wiki.git' '$T/nowiki' 2>/dev/null"
+check "private wikis stay private" is "$(status -b "$T/eve2" "$B/ada/secret/wiki")" 404
+check "delete a page" is "$(post "$T/ada" /ada/engine/wiki/Setup/delete x=1)" 303
+check "it's gone" is "$(status "$B/ada/engine/wiki/Setup")" 404
+check "from clones too" bash -c "git -C '$T/wiki' pull -q && [ ! -e '$T/wiki/Setup.md' ]"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -785,7 +851,8 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
-    /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens; do
+    /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens \
+    /explore "/explore?sort=name&page=2" /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done
 
@@ -804,6 +871,8 @@ check "transfers need confirming" contains "$(curl -s -b "$T/ada" -H "$O" -d "ne
 check "not to other people" contains "$(curl -s -b "$T/ada" -H "$O" -d "new_owner=bob&confirm=ada/motor" "$B/ada/motor/transfer")" "move repositories to bob"
 check "transfer to acme" is "$(post "$T/ada" /ada/motor/transfer new_owner=acme confirm=ada/motor)" 303
 check "it's there" contains "$(curl -s "$B/acme/motor")" "acme"
+check "with its wiki" contains "$(curl -s "$B/acme/motor/wiki")" "Welcome to the"
+check "old wiki clone URLs work" git ls-remote -q "$B/ada/engine.wiki.git"
 check "the oldest name still leads to it" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/pulls")" "$B/acme/motor/pulls"
 check "and keeps its pull requests" contains "$(curl -s "$B/acme/motor/pulls?state=closed")" "Checked"
 check "move it back with the API" is "$(api_status "$RW" POST /repos/acme/motor/transfer -d '{"new_owner":"ada"}')" 202
