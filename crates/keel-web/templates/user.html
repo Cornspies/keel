@@ -16,4 +16,8 @@
 {% else %}
 <ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
 {% endif %}
+{% if !activity.is_empty() %}
+<h2>Recent activity</h2>
+{% let events = activity %}{% include "feed.html" %}
+{% endif %}
 {% endblock %}

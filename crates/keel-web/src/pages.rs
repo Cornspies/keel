@@ -44,12 +44,32 @@ struct HomePage {
     first_run: bool,
     mine: Vec<RepoCard>,
     recent: Vec<RepoCard>,
+    feed: Vec<crate::feed::EventView>,
+    older_url: Option<String>,
 }
 
-pub async fn home(State(state): State<AppState>, Viewer(viewer): Viewer) -> AppResult {
+const FEED_PAGE: i64 = 30;
+
+#[derive(Deserialize)]
+pub struct FeedQuery {
+    /// Show events older than this one.
+    before: Option<i64>,
+}
+
+pub async fn home(State(state): State<AppState>, Viewer(viewer): Viewer, Query(q): Query<FeedQuery>) -> AppResult {
     let mine = match &viewer {
         Some(u) => cards(&state.core.repos_for(u).await?),
         None => Vec::new(),
+    };
+    let (feed, older_url) = match &viewer {
+        Some(u) => {
+            let mut events = state.core.feed(u, q.before, FEED_PAGE + 1).await?;
+            let more = events.len() as i64 > FEED_PAGE;
+            events.truncate(FEED_PAGE as usize);
+            let older = more.then(|| format!("/?before={}", events.last().map_or(0, |e| e.id)));
+            (events.iter().map(crate::feed::view).collect(), older)
+        }
+        None => (Vec::new(), None),
     };
     let recent = cards(&state.core.recent_public_repos(30).await?);
     let first_run = !state.core.has_users().await?;
@@ -59,6 +79,8 @@ pub async fn home(State(state): State<AppState>, Viewer(viewer): Viewer) -> AppR
         first_run,
         mine,
         recent,
+        feed,
+        older_url,
     })
 }
 
@@ -273,6 +295,7 @@ pub async fn new_repo(
         Ok(repo) => {
             // People watch repositories they create (also in organizations).
             state.core.set_watching(user.id, repo.id, true).await?;
+            state.core.repo_created_event(repo.id, &user, None).await?;
             Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
         }
         Err(keel_core::Error::Invalid(msg)) => html(NewRepoPage {
@@ -299,6 +322,7 @@ struct UserPage {
     is_self: bool,
     repos: Vec<RepoCard>,
     orgs: Vec<String>,
+    activity: Vec<crate::feed::EventView>,
 }
 
 #[derive(Template)]
@@ -338,7 +362,9 @@ pub async fn user(
         });
     }
     let orgs = state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username).collect();
+    let activity = state.core.user_events(user.id, viewer.as_ref(), None, 20).await?.iter().map(crate::feed::view).collect();
     html(UserPage {
+        activity,
         is_self: viewer.as_ref().is_some_and(|v| v.id == user.id),
         page: Page::new(&state, viewer, user.username.clone()),
         joined: date(user.created_at),

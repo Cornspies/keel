@@ -17,6 +17,7 @@ mod auth;
 mod backup;
 mod cache;
 mod config;
+mod events;
 mod issues;
 mod labels;
 mod lfs;
@@ -29,6 +30,7 @@ mod mirrors;
 mod permissions;
 mod protection;
 mod pulls;
+mod releases;
 mod repos;
 mod reviews;
 mod ssh_keys;
@@ -60,6 +62,8 @@ pub use milestones::{Milestone, parse_due_date};
 pub use mirrors::{MIRROR_INTERVALS, Mirror, MirrorRemote, PushMirror};
 pub use permissions::{Access, OrgRole};
 pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for};
+pub use events::Event;
+pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::Repo;
 pub use reviews::{InlineAnchor, Verdict, suggestion};
@@ -169,6 +173,8 @@ impl Core {
         core.prune_notifications(180).await?;
         core.prune_mail().await?;
         core.prune_lfs().await?;
+        core.prune_release_assets().await?;
+        core.prune_events().await?;
         Ok(core)
     }
 

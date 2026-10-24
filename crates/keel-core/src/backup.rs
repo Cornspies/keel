@@ -21,6 +21,7 @@ pub struct BackupReport {
     /// Repositories deleted between the database snapshot and copying.
     pub skipped: usize,
     pub lfs_objects: usize,
+    pub release_files: usize,
     pub bytes: u64,
     pub took: Duration,
 }
@@ -73,13 +74,15 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     if key.is_file() {
         std::fs::copy(&key, out.join("ssh_host_ed25519_key"))?;
     }
-    let lfs_objects = copy_lfs(&data_dir.join("lfs"), &out.join("lfs"))?;
+    let lfs_objects = copy_files(&data_dir.join("lfs"), &out.join("lfs"))?;
+    let release_files = copy_files(&data_dir.join("releases"), &out.join("releases"))?;
 
-    Ok(BackupReport { repos, skipped, lfs_objects, bytes: dir_size(out)?, took: started.elapsed() })
+    Ok(BackupReport { repos, skipped, lfs_objects, release_files, bytes: dir_size(out)?, took: started.elapsed() })
 }
 
-/// Copies stored LFS objects (not uploads in progress). Returns how many.
-fn copy_lfs(src: &Path, dst: &Path) -> anyhow::Result<usize> {
+/// Copies stored files (not uploads in progress, which are in `tmp` or
+/// named `upload-…`). Returns how many.
+fn copy_files(src: &Path, dst: &Path) -> anyhow::Result<usize> {
     if !src.is_dir() {
         return Ok(0);
     }
@@ -90,13 +93,14 @@ fn copy_lfs(src: &Path, dst: &Path) -> anyhow::Result<usize> {
             let entry = entry?;
             let path = entry.path();
             let rel = path.strip_prefix(src)?;
-            if rel.starts_with("tmp") {
+            if rel.starts_with("tmp") || entry.file_name().to_string_lossy().starts_with("upload-") {
                 continue;
             }
             if entry.file_type()?.is_dir() {
                 std::fs::create_dir_all(dst.join(rel))?;
                 stack.push(path);
             } else {
+                std::fs::create_dir_all(dst.join(rel).parent().expect("has a parent"))?;
                 std::fs::copy(&path, dst.join(rel))?;
                 n += 1;
             }

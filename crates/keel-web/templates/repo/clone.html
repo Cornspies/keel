@@ -7,5 +7,10 @@
     <div class="menu-title">SSH</div>
     <div class="copy-field"><input readonly value="{{ ssh }}" aria-label="SSH clone URL"><button type="button" class="btn btn-small" data-copy>Copy</button></div>
     {% endif %}
+    <div class="menu-title">Download {{ rev }}</div>
+    <div class="download-links">
+      <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/archive/{{ rev_url }}.zip" rel="nofollow">ZIP</a>
+      <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/archive/{{ rev_url }}.tar.gz" rel="nofollow">tar.gz</a>
+    </div>
   </div>
 </details>

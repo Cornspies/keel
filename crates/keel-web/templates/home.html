@@ -9,18 +9,31 @@
 {% endif %}
 
 {% if page.viewer.is_some() %}
-<div class="section-head">
-  <h2>Your repositories</h2>
-  <a class="btn btn-small" href="/new">New</a>
+<div class="dashboard">
+  <section class="dashboard-feed">
+    <h2>Activity</h2>
+    {% if feed.is_empty() %}
+    <p class="empty">Nothing yet. Activity in repositories you watch shows up here.</p>
+    {% else %}
+    {% let events = feed %}{% include "feed.html" %}
+    {% endif %}
+    {% if let Some(u) = older_url %}<div class="pager"><a class="btn" href="{{ u }}">Older →</a></div>{% endif %}
+  </section>
+  <aside class="dashboard-side">
+    <div class="section-head">
+      <h2>Your repositories</h2>
+      <a class="btn btn-small" href="/new">New</a>
+    </div>
+    {% if mine.is_empty() %}
+    <p class="empty">You don’t have any repositories yet. <a href="/new">Create one</a>.</p>
+    {% else %}
+    <ul class="plain repo-names">{% for r in mine %}<li><a href="/{{ r.owner }}/{{ r.name }}">{{ r.owner }}/<strong>{{ r.name }}</strong></a>{% if r.is_private %} <span class="badge">Private</span>{% endif %}</li>{% endfor %}</ul>
+    {% endif %}
+  </aside>
 </div>
-{% if mine.is_empty() %}
-<p class="empty">You don’t have any repositories yet. <a href="/new">Create one</a>.</p>
-{% else %}
-<ul class="card-list">{% for r in mine %}{% include "repo_card.html" %}{% endfor %}</ul>
-{% endif %}
 {% endif %}
 
-{% if !first_run %}
+{% if !first_run && page.viewer.is_none() %}
 <div class="section-head"><h2>Recently updated</h2></div>
 {% if recent.is_empty() %}
 <p class="empty">No public repositories yet.</p>

@@ -116,6 +116,8 @@ pub(crate) struct RepoView {
     /// Whether the viewer watches it (`None` when signed out).
     pub watching: Option<bool>,
     pub mirror: Option<MirrorView>,
+    /// Published releases.
+    pub releases: i64,
 }
 
 /// What the header says about a mirror.
@@ -154,6 +156,7 @@ impl RepoView {
             url: m.url,
         });
         Ok(Self {
+            releases: state.core.release_count(repo.id).await?,
             mirror,
             parent,
             fork_count: state.core.fork_count(repo.id).await?,
@@ -987,6 +990,8 @@ pub async fn commit(
 
 pub(crate) struct RefView {
     pub name: String,
+    /// The name, URL-encoded.
+    pub name_url: String,
     pub url: String,
     pub commit: CommitView,
     pub is_default: bool,
@@ -1017,6 +1022,7 @@ pub async fn refs(
     let rules = state.core.branch_rules(repo.id).await?;
     let view = |r: &keel_git::RefInfo, branch: bool| RefView {
         url: format!("{base}/tree/{}", encode_path(&r.name)),
+        name_url: encode_path(&r.name),
         commit: CommitView::new(&base, &r.commit),
         is_default: r.name == default_branch,
         protected: branch && keel_core::rule_for(&rules, &r.name).is_some(),

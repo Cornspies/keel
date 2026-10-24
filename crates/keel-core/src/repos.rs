@@ -419,11 +419,14 @@ impl Core {
             .await
             .map_err(anyhow::Error::from)?
             .map_err(anyhow::Error::from)?;
-        // Large files only it used can go.
+        // Large files and release files only it used can go.
         let core = self.clone();
         tokio::spawn(async move {
             if let Err(e) = core.prune_lfs().await {
                 tracing::warn!("pruning LFS objects: {e}");
+            }
+            if let Err(e) = core.prune_release_assets().await {
+                tracing::warn!("pruning release files: {e}");
             }
         });
         Ok(())

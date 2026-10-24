@@ -21,6 +21,7 @@ pub const WEBHOOK_EVENTS: &[(&str, &str)] = &[
     ("pull_request_review", "Pull request approvals and change requests"),
     ("pull_request_review_comment", "Comments on lines of a pull request's diff"),
     ("status", "Commit statuses set by CI and other services"),
+    ("release", "Releases published, edited or deleted"),
 ];
 
 /// Retry delays after each failed attempt; after the last one the delivery

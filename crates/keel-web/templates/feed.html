@@ -1,0 +1,17 @@
+<ul class="feed">
+  {% for e in events %}
+  <li class="feed-item" id="event-{{ e.id }}">
+    <span class="feed-icon feed-{{ e.kind }}" aria-hidden="true"></span>
+    <div class="feed-main">
+      <div>{{ e.html|safe }} <time class="muted small" title="{{ e.when_full }}">{{ e.when }}</time></div>
+      {% if !e.commits.is_empty() %}
+      <ul class="feed-commits">
+        {% for (short, summary, url) in e.commits %}<li><a class="mono" href="{{ url }}">{{ short }}</a> {{ summary }}</li>{% endfor %}
+        {% if e.more_commits > 0 %}<li class="muted">and {{ e.more_commits }} more</li>{% endif %}
+      </ul>
+      {% endif %}
+      {% if !e.excerpt.is_empty() %}<blockquote class="feed-excerpt">{{ e.excerpt }}</blockquote>{% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>

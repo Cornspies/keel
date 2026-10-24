@@ -75,6 +75,7 @@ pub async fn create(
     match state.core.fork_repo(&repo, &target, &f.name).await {
         Ok(fork) => {
             state.core.set_watching(user.id, fork.id, true).await?;
+            state.core.repo_created_event(fork.id, &user, Some(&format!("{}/{}", repo.owner, repo.name))).await?;
             Ok(Redirect::to(&format!("/{}/{}", fork.owner, fork.name)).into_response())
         }
         Err(keel_core::Error::Invalid(msg)) => html(ForkPage {

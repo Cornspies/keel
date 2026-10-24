@@ -47,6 +47,15 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/commits/{sha}/status", get(combined_status))
         .route("/api/v1/repos/{owner}/{repo}/statuses/{sha}", get(statuses).post(create_status))
         .route("/api/v1/repos/{owner}/{repo}/transfer", post(transfer))
+        .route("/api/v1/repos/{owner}/{repo}/releases", get(list_releases).post(create_release))
+        .route("/api/v1/repos/{owner}/{repo}/releases/latest", get(latest_release))
+        .route("/api/v1/repos/{owner}/{repo}/releases/tags/{*tag}", get(release_by_tag))
+        .route("/api/v1/repos/{owner}/{repo}/releases/{id}", get(get_release).patch(update_release).delete(delete_release))
+        .route(
+            "/api/v1/repos/{owner}/{repo}/releases/{id}/assets",
+            get(list_assets).post(upload_asset).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/api/v1/repos/{owner}/{repo}/releases/assets/{asset}", axum::routing::delete(delete_asset))
         .route("/api/v1/repos/{owner}/{repo}/contents", get(contents_root))
         .route("/api/v1/repos/{owner}/{repo}/contents/{*path}", get(contents))
         .route("/api/v1/repos/{owner}/{repo}/labels", get(labels))
@@ -417,6 +426,7 @@ async fn create_repo_in(state: &AppState, user: &User, owner: &User, body: NewRe
         }
         None => state.core.create_repo(owner, &body.name, &body.description, body.private).await?,
     };
+    state.core.repo_created_event(r.id, user, None).await?;
     Ok((StatusCode::CREATED, Json(repo_value(state, &r).await?)).into_response())
 }
 
@@ -1210,4 +1220,210 @@ async fn merge(
         Err(keel_core::Error::Invalid(msg)) => Err(error(StatusCode::METHOD_NOT_ALLOWED, msg)),
         Err(e) => Err(e.into()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Releases
+// ---------------------------------------------------------------------------
+
+/// A release the caller may see (drafts need write access).
+async fn find_release(state: &AppState, r: &Repo, access: Access, id: i64) -> ApiResult<keel_core::Release> {
+    state
+        .core
+        .release(r.id, id)
+        .await?
+        .filter(|rel| !rel.draft || access >= Access::Write)
+        .ok_or_else(not_found_error)
+}
+
+async fn list_releases(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Q(paging): Q<Paging>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    let mut list = state.core.releases(r.id, access >= Access::Write, paging.offset(), paging.per_page() + 1).await?;
+    let more = list.len() as i64 > paging.per_page();
+    list.truncate(paging.per_page() as usize);
+    let mut items = Vec::new();
+    for rel in &list {
+        items.push(state.core.release_json(&r, rel).await?);
+    }
+    Ok(paged(&state, &uri, &paging, items, more))
+}
+
+async fn latest_release(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let rel = state.core.latest_release(r.id).await?.ok_or_else(not_found_error)?;
+    Ok(Json(state.core.release_json(&r, &rel).await?))
+}
+
+async fn release_by_tag(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, tag)): Path<(String, String, String)>,
+) -> ApiResult<Json<Value>> {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    let rel = state
+        .core
+        .release_by_tag(r.id, &tag)
+        .await?
+        .filter(|rel| !rel.draft || access >= Access::Write)
+        .ok_or_else(not_found_error)?;
+    Ok(Json(state.core.release_json(&r, &rel).await?))
+}
+
+async fn get_release(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> ApiResult<Json<Value>> {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    let rel = find_release(&state, &r, access, id).await?;
+    Ok(Json(state.core.release_json(&r, &rel).await?))
+}
+
+#[derive(Deserialize)]
+pub struct NewRelease {
+    tag_name: String,
+    /// Where to create the tag if it doesn't exist: a branch or commit
+    /// (default: the default branch).
+    target_commitish: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+async fn create_release(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Body(body): Body<NewRelease>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let target = match body.target_commitish {
+        Some(t) => t,
+        None => crate::repo::with_git(&state, &r, |g| Ok(g.default_branch()?.unwrap_or_default())).await?,
+    };
+    let rel = state
+        .core
+        .create_release(&r, user, &body.tag_name, &target, &body.name, &body.body, body.draft, body.prerelease)
+        .await?;
+    Ok((StatusCode::CREATED, Json(state.core.release_json(&r, &rel).await?)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseUpdate {
+    name: Option<String>,
+    body: Option<String>,
+    prerelease: Option<bool>,
+    /// `false` publishes a draft.
+    draft: Option<bool>,
+}
+
+async fn update_release(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+    Body(body): Body<ReleaseUpdate>,
+) -> ApiResult<Json<Value>> {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let rel = find_release(&state, &r, access, id).await?;
+    let title = body.name.unwrap_or_else(|| rel.title.clone());
+    let notes = body.body.unwrap_or_else(|| rel.notes.clone());
+    let mut rel = state.core.edit_release(&rel, user, &title, &notes, body.prerelease.unwrap_or(rel.prerelease)).await?;
+    if body.draft == Some(false) {
+        rel = state.core.publish_release(&r, &rel, user).await?;
+    } else if body.draft == Some(true) && !rel.draft {
+        return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Published releases can't become drafts again"));
+    }
+    Ok(Json(state.core.release_json(&r, &rel).await?))
+}
+
+async fn delete_release(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let rel = find_release(&state, &r, access, id).await?;
+    state.core.delete_release(&rel, user).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn list_assets(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> ApiResult<Json<Value>> {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    let rel = find_release(&state, &r, access, id).await?;
+    Ok(Json(state.core.release_json(&r, &rel).await?["assets"].clone()))
+}
+
+#[derive(Deserialize)]
+pub struct AssetQuery {
+    name: String,
+}
+
+/// `POST …/releases/<id>/assets?name=<file>` with the file as the body.
+async fn upload_asset(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+    Q(q): Q<AssetQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let rel = find_release(&state, &r, access, id).await?;
+    let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
+    let stream = futures_util::StreamExt::map(body.into_data_stream(), |c| c.map_err(|e| e.to_string()));
+    let (tmp, size) = crate::releases::receive_upload(&state, Box::pin(stream))
+        .await?
+        .map_err(|msg| error(StatusCode::PAYLOAD_TOO_LARGE, msg))?;
+    match state.core.add_release_asset(&rel, user, &q.name, content_type, &tmp, size).await {
+        Ok(_) => {
+            let rel_json = state.core.release_json(&r, &rel).await?;
+            let asset = rel_json["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == q.name.trim()).cloned());
+            Ok((StatusCode::CREATED, Json(asset.unwrap_or(Value::Null))).into_response())
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(e.into())
+        }
+    }
+}
+
+async fn delete_asset(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, asset)): Path<(String, String, i64)>,
+) -> ApiResult {
+    caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let release_id = state.core.release_of_asset(asset).await?.ok_or_else(not_found_error)?;
+    let rel = find_release(&state, &r, access, release_id).await?;
+    state.core.delete_release_asset(&rel, asset).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

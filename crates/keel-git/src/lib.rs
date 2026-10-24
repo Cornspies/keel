@@ -5,6 +5,7 @@
 //! is battle-tested and implements every protocol detail and optimisation
 //! (bitmaps, commit-graph, partial clone, protocol v2).
 
+mod archive;
 mod diff;
 mod edit;
 mod files;
@@ -15,6 +16,7 @@ mod read;
 mod store;
 mod transport;
 
+pub use archive::{ArchiveFormat, archive_command};
 pub use diff::{CommitDiff, DiffLine, DiffLineKind, DiffStatus, FileDiff, Hunk};
 pub use read::{
     Blob, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, Resolved, Signature,
@@ -29,6 +31,11 @@ pub use store::{backup, create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 
 pub use git2::Oid;
+
+/// Whether `name` is a valid full ref name, like `refs/tags/v1.0`.
+pub fn valid_ref_name(name: &str) -> bool {
+    git2::Reference::is_valid_name(name)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

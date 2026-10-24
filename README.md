@@ -8,7 +8,11 @@ One binary, one data directory, no external services.
 - **Git hosting:** clone, fetch and push over HTTP (password or access token)
   and over a built-in SSH server.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
-  with diffs, branches and tags.
+  with diffs, branches and tags, and downloading any of them as `.zip` or
+  `.tar.gz`.
+- **Releases:** notes and files for a tag, with drafts and pre-releases.
+- **Activity feed** on the home page (repositories you watch) and on
+  profiles.
 - **Code search** across all repositories you can see, or within one on any
   branch; substrings or regular expressions.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
@@ -78,7 +82,8 @@ repositories), `lfs/` (Git LFS files), the generated SSH host key, and
 ```
 
 copies the data directory while the server keeps running: the database as a
-consistent snapshot, then every repository, LFS file and the SSH host key. The
+consistent snapshot, then every repository, LFS file, release file and the
+SSH host key. The
 copy is a data directory itself, so restoring is `keel serve --data-dir
 /backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
 backup tool of choice.
@@ -114,7 +119,7 @@ Every flag can also be set as an environment variable.
 | `--closed-registration` | `KEEL_CLOSED_REGISTRATION` | open (can also be closed on the admin page) |
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
 | `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks and mirrors can't reach loopback/private addresses |
-| `--lfs-max-file-size` | `KEEL_LFS_MAX_FILE_SIZE` | `2048` (MiB) |
+| `--lfs-max-file-size` | `KEEL_LFS_MAX_FILE_SIZE` | `2048` (MiB); also limits release files |
 | `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
 | `--smtp-url` | `KEEL_SMTP_URL` | no email |
 | `--mail-from` | `KEEL_MAIL_FROM` | `<site name> <noreply@<host of --base-url>>` |
@@ -170,6 +175,11 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /repos/{owner}/{repo}/pulls/{n}` | adds `approvals`, `required_approvals`, `merge_blocked_by` |
 | `POST /repos/{owner}/{repo}/pulls/{n}/reviews` | `event`: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` |
 | `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge` or `squash`; `delete_branch` |
+| `GET`, `POST /repos/{owner}/{repo}/releases` | `tag_name`, `target_commitish`, `name`, `body`, `draft`, `prerelease` |
+| `GET /repos/{owner}/{repo}/releases/latest`, `/releases/tags/{tag}` | |
+| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}/releases/{id}` | `"draft": false` publishes |
+| `GET`, `POST /repos/{owner}/{repo}/releases/{id}/assets` | `?name=<file>`, with the file as the body |
+| `DELETE /repos/{owner}/{repo}/releases/assets/{id}` | |
 
 Issue lists don't include pull requests (unlike GitHub's); use `/pulls`.
 Bodies are JSON with or without a `Content-Type` header. Old names of
@@ -325,6 +335,26 @@ unlock their files, repository admins can break anyone's lock (`--force`, or
 in the settings). The web UI shows LFS files with their real size and who
 locked them, and "Raw" serves their content.
 
+**Downloads** (`/<owner>/<repo>/archive/<branch, tag or commit>.zip` or
+`.tar.gz`) are streamed straight from `git archive`, with every file under
+`<repo>-<name>/`. At most four are built at once, so a burst of downloads
+can't take over the CPU. LFS files are included as pointers.
+
+**Releases** belong to a tag. A draft is only visible to people with write
+access; publishing it creates its tag (at the chosen branch) if the tag
+doesn't exist yet. Files are streamed to `data/releases` and are always
+served as downloads (`application/octet-stream`, attachment), never shown
+inline. Deleting a release deletes its files but keeps the tag. Webhooks get
+a `release` event.
+
+**The activity feed** is a table of events recorded where notifications and
+webhooks already come from: pushes (with their newest commits), new and
+deleted branches and tags, issues and pull requests opened, closed and
+merged, comments and reviews, releases, new repositories and forks. Mirror
+syncs aren't included. The home page shows the repositories you watch (and
+your own actions), profiles what someone did, and both only include
+repositories the viewer can read. Events are kept for a year.
+
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
 matching one applies. Merging checks the rule's required approvals: only
@@ -458,7 +488,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~420 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
+cargo build && scripts/smoke-test.sh      # ~460 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -467,6 +497,7 @@ run automatically at startup.
 
 ## Ideas
 
-- Downloading a branch or tag as `.tar.gz` or `.zip`.
-- Releases: notes and files attached to tags.
-- An activity feed on the home page.
+- A `CODEOWNERS` file that requests reviews from the right people
+  automatically (and branch protection that can require their approval).
+- Repository topics and an Explore page to find repositories by them.
+- Wikis.

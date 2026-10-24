@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 use keel_git::{GitRepo, Oid, RefChange, Refs};
 
+use crate::events::EventTarget;
+use crate::releases::{Release, ReleaseAction};
 use crate::{Comment, CommitStatus, Core, Issue, Label, Milestone, PullRequest, Repo, Result, User, pull_ref};
 
 /// Commits listed in a push payload.
@@ -22,6 +24,7 @@ pub enum Activity {
     Comment { issue_id: i64, comment_id: i64 },
     /// A commit status was set.
     Status { repo_id: i64, status: CommitStatus, actor: i64 },
+    Release { release: Release, actor: i64, action: ReleaseAction },
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +69,7 @@ impl Core {
             Activity::Issue { issue_id, actor, action } => self.record_issue(issue_id, actor, action).await,
             Activity::Comment { issue_id, comment_id } => self.record_comment(issue_id, comment_id).await,
             Activity::Status { repo_id, status, actor } => self.record_status(repo_id, status, actor).await,
+            Activity::Release { release, actor, action } => self.record_release(release, actor, action).await,
         }
     }
 
@@ -96,6 +100,17 @@ impl Core {
         };
         if let Some((activity, text, only)) = notification {
             self.notify(&issue, actor, activity, text, only).await?;
+        }
+        let feed_action = match &action {
+            IssueAction::Opened => Some("opened"),
+            IssueAction::Closed => Some("closed"),
+            IssueAction::Reopened => Some("reopened"),
+            IssueAction::Merged => Some("merged"),
+            _ => None,
+        };
+        if let Some(a) = feed_action {
+            let target = EventTarget { issue_id: Some(issue.id), ..EventTarget::default() };
+            self.add_event(repo.id, actor, "issue", target, json!({ "action": a })).await?;
         }
 
         let event = if issue.is_pull { "pull_request" } else { "issues" };
@@ -143,6 +158,12 @@ impl Core {
             _ => "commented",
         };
         self.notify(&issue, comment.author_id, activity, &comment.body, None).await?;
+        if comment.kind != "inline" {
+            let excerpt: String = comment.body.chars().take(200).collect();
+            let target = EventTarget { issue_id: Some(issue.id), ..EventTarget::default() };
+            let data = json!({ "kind": comment.kind, "comment_id": comment.id, "excerpt": excerpt });
+            self.add_event(repo.id, comment.author_id, "comment", target, data).await?;
+        }
 
         let sender = self.sender_json(comment.author_id).await?;
         let comment_json = self.comment_json(&repo, &issue, &comment);
@@ -206,10 +227,32 @@ impl Core {
         self.enqueue_webhooks(repo_id, "status", "", &payload).await
     }
 
+    async fn record_release(&self, release: Release, actor: i64, action: ReleaseAction) -> Result<()> {
+        let Some(repo) = self.repo_by_id(release.repo_id).await? else { return Ok(()) };
+        if action == ReleaseAction::Published {
+            let target = EventTarget { release_id: Some(release.id), ..EventTarget::default() };
+            self.add_event(repo.id, Some(actor), "release", target, json!({})).await?;
+        }
+        let name = match action {
+            ReleaseAction::Published => "published",
+            ReleaseAction::Edited => "edited",
+            ReleaseAction::Deleted => "deleted",
+        };
+        let payload = json!({
+            "action": name,
+            "release": self.release_json(&repo, &release).await?,
+            "repository": self.repo_json(&repo),
+            "sender": self.sender_json(Some(actor)).await?,
+        });
+        self.enqueue_webhooks(repo.id, "release", name, &payload).await
+    }
+
     async fn record_push(&self, repo_id: i64, pusher: Option<i64>, before: Refs, changes: Vec<RefChange>) -> Result<()> {
         let Some(repo) = self.repo_by_id(repo_id).await? else { return Ok(()) };
         let wanted = self.hooks_for_repo(repo_id).await?.iter().any(|h| h.active && h.wants("push"));
-        if !wanted || changes.is_empty() {
+        // Pushes by people go in the activity feed (not mirror syncs).
+        let feed = pusher.is_some();
+        if !(wanted || feed) || changes.is_empty() {
             return Ok(());
         }
         let sender = self.sender_json(pusher).await?;
@@ -232,6 +275,35 @@ impl Core {
         })
         .await
         .map_err(anyhow::Error::from)??;
+
+        if feed {
+            for (change, commits, total, _, _) in &details {
+                let kind = match (change.old, change.new) {
+                    (_, None) => "delete_ref",
+                    (None, _) => "create_ref",
+                    _ => "push",
+                };
+                // Publishing a release creates its tag; the release says it.
+                if kind == "create_ref"
+                    && let Some(tag) = change.name.strip_prefix("refs/tags/")
+                    && self.release_by_tag(repo_id, tag).await?.is_some()
+                {
+                    continue;
+                }
+                // The newest few commits.
+                let shown: Vec<Value> = commits
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .map(|c| json!({ "sha": c.commit.id.to_string(), "summary": c.commit.summary }))
+                    .collect();
+                let target = EventTarget { ref_name: Some(change.name.clone()), ..EventTarget::default() };
+                self.add_event(repo_id, pusher, kind, target, json!({ "count": total, "commits": shown })).await?;
+            }
+        }
+        if !wanted {
+            return Ok(());
+        }
 
         let zero = Oid::ZERO_SHA1.to_string();
         let commit_json = |c: &keel_git::CommitDetail| {
@@ -346,6 +418,43 @@ impl Core {
             "created_at": time(s.created_at),
             "updated_at": time(s.updated_at),
         })
+    }
+
+    pub async fn release_json(&self, repo: &Repo, r: &Release) -> Result<Value> {
+        let base = format!("{}/{}/{}", self.config.base_url, repo.owner, repo.name);
+        let tag_url = form_urlencoded::byte_serialize(r.tag.as_bytes()).collect::<String>().replace("%2F", "/");
+        let assets: Vec<Value> = self
+            .release_assets(r.id)
+            .await?
+            .iter()
+            .map(|a| {
+                let name = form_urlencoded::byte_serialize(a.name.as_bytes()).collect::<String>();
+                json!({
+                    "id": a.id,
+                    "name": a.name,
+                    "size": a.size,
+                    "content_type": a.content_type,
+                    "download_count": a.downloads,
+                    "created_at": time(a.created_at),
+                    "browser_download_url": format!("{base}/releases/download/{tag_url}/{name}"),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "id": r.id,
+            "tag_name": r.tag,
+            "name": r.title,
+            "body": r.notes,
+            "draft": r.draft,
+            "prerelease": r.prerelease,
+            "author": self.login_json(r.author.as_deref()),
+            "created_at": time(r.created_at),
+            "published_at": r.published_at.map_or(Value::Null, time),
+            "html_url": format!("{base}/releases/tag/{tag_url}"),
+            "tarball_url": format!("{base}/archive/{tag_url}.tar.gz"),
+            "zipball_url": format!("{base}/archive/{tag_url}.zip"),
+            "assets": assets,
+        }))
     }
 
     pub fn milestone_json(&self, m: &Milestone) -> Value {

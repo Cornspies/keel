@@ -26,7 +26,7 @@
       <a class="mono" href="{{ t.url }}"><strong>{{ t.name }}</strong></a>
       <div class="muted small"><a class="muted" href="{{ t.commit.url }}">{{ t.commit.summary }}</a> · <time title="{{ t.commit.when_full }}">{{ t.commit.when }}</time></div>
     </div>
-    <a class="btn btn-small mono" href="{{ t.commit.url }}">{{ t.commit.short }}</a>
+    <span class="nowrap"><a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/archive/{{ t.name_url }}.zip" rel="nofollow">ZIP</a> <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/archive/{{ t.name_url }}.tar.gz" rel="nofollow">tar.gz</a> <a class="btn btn-small mono" href="{{ t.commit.url }}">{{ t.commit.short }}</a></span>
   </li>
   {% endfor %}
 </ul>

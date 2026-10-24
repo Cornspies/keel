@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/releases">Releases</a> / {% if release.is_some() %}Edit{% else %}New{% endif %}</p>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  {% match release %}
+  {% when None %}
+  <h2>New release</h2>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases" class="form">
+    <div class="form-row">
+      <label>Tag <span class="hint">An existing tag, or a new one</span>
+        <input name="tag" value="{{ tag }}" list="tags" placeholder="v1.0.0" required class="mono">
+        <datalist id="tags">{% for t in tags %}<option value="{{ t }}">{% endfor %}</datalist>
+      </label>
+      <label>New tags are created at
+        <select name="target">{% for b in branches %}<option{% if *b == target %} selected{% endif %}>{{ b }}</option>{% endfor %}</select>
+      </label>
+    </div>
+    <label>Title <span class="hint">(optional; the tag otherwise)</span> <input name="title" value="{{ title }}" maxlength="200"></label>
+    <label>Notes <span class="hint">Markdown is supported.</span> <textarea name="notes" rows="10">{{ notes }}</textarea></label>
+    <label class="check"><input type="checkbox" name="prerelease"{% if prerelease %} checked{% endif %}> Pre-release <span class="hint">Not ready for everyone; never shown as the latest release.</span></label>
+    <div class="row-actions">
+      <button class="btn" name="action" value="draft">Save draft</button>
+      <button class="btn btn-primary" name="action" value="publish">Publish release</button>
+    </div>
+    <p class="hint">Files can be attached after saving (as a draft, or to a published release).</p>
+  </form>
+  {% when Some(r) %}
+  <h2>Edit {{ r.name }} <span class="branch">{{ r.tag }}</span>{% if is_draft %} <span class="badge badge-danger">Draft</span>{% endif %}</h2>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases/{{ r.id }}/edit" class="form">
+    <label>Title <input name="title" value="{{ title }}" maxlength="200"></label>
+    <label>Notes <span class="hint">Markdown is supported.</span> <textarea name="notes" rows="10">{{ notes }}</textarea></label>
+    <label class="check"><input type="checkbox" name="prerelease"{% if prerelease %} checked{% endif %}> Pre-release</label>
+    <div class="row-actions">
+      <button class="btn{% if !is_draft %} btn-primary{% endif %}" name="action" value="save">Save</button>
+      {% if is_draft %}<button class="btn btn-primary" name="action" value="publish">Publish release</button>{% endif %}
+    </div>
+  </form>
+
+  <h3>Files</h3>
+  {% if !r.assets.is_empty() %}
+  <ul class="card-list">
+    {% for a in r.assets %}
+    <li class="card-row">
+      <div><a class="mono" href="{{ a.url }}">{{ a.name }}</a> <span class="muted small">{{ a.size }} · {{ a.downloads }} download{% if a.downloads != 1 %}s{% endif %}</span></div>
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases/{{ r.id }}/assets/{{ a.id }}/delete"><button class="btn btn-small btn-danger">Delete</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases/{{ r.id }}/assets" enctype="multipart/form-data" class="form form-inline upload-form">
+    <input type="file" name="file" multiple required aria-label="Files">
+    <button class="btn">Upload</button>
+  </form>
+  <p class="hint">Up to {{ max_size }} per file.</p>
+
+  <h3 class="danger-title">Delete</h3>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases/{{ r.id }}/delete" class="form">
+    <p class="hint">Deletes the release and its files. The tag stays.</p>
+    <button class="btn btn-danger">Delete this release</button>
+  </form>
+  {% endmatch %}
+</div>
+{% endblock %}

@@ -3,8 +3,10 @@
 
 mod admin;
 mod api;
+mod archive;
 mod assets;
 mod error;
+mod feed;
 mod forks;
 mod githttp;
 mod issues;
@@ -19,6 +21,7 @@ mod password;
 mod protection;
 mod milestones;
 mod pulls;
+mod releases;
 mod render;
 mod repo;
 mod search;
@@ -72,6 +75,8 @@ pub struct Inner {
     /// request so that page headers can show it.
     unread: Cache<i64, i64>,
     started: std::time::Instant,
+    /// Limits how many archives are built at once.
+    archives: Arc<tokio::sync::Semaphore>,
 }
 
 impl Deref for AppState {
@@ -115,6 +120,7 @@ impl AppState {
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
             started: std::time::Instant::now(),
+            archives: Arc::new(tokio::sync::Semaphore::new(archive::CONCURRENT_ARCHIVES)),
         }))
     }
 
@@ -212,6 +218,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/tree/{*rest}", get(repo::tree))
         .route("/{owner}/{repo}/blob/{*rest}", get(repo::blob))
         .route("/{owner}/{repo}/raw/{*rest}", get(repo::raw))
+        .route("/{owner}/{repo}/archive/{*rest}", get(archive::download))
         .route("/{owner}/{repo}/last-commits/{*rest}", get(repo::last_commits_json))
         .route("/{owner}/{repo}/commits", get(repo::commits_default))
         .route("/{owner}/{repo}/commits/{*rest}", get(repo::commits))
@@ -257,6 +264,17 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/issues/{number}/milestone", post(milestones::set_issue_milestone))
         .route("/{owner}/{repo}/issues/{number}/reviewers", post(labels::set_reviewers))
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/apply", post(pulls::apply_suggestion))
+        .route("/{owner}/{repo}/releases", get(releases::list).post(releases::create))
+        .route("/{owner}/{repo}/releases/new", get(releases::new_form))
+        .route("/{owner}/{repo}/releases/tag/{*tag}", get(releases::show))
+        .route("/{owner}/{repo}/releases/download/{*rest}", get(releases::download))
+        .route("/{owner}/{repo}/releases/{id}/edit", get(releases::edit_form).post(releases::update))
+        .route("/{owner}/{repo}/releases/{id}/delete", post(releases::delete))
+        .route(
+            "/{owner}/{repo}/releases/{id}/assets",
+            post(releases::upload).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/{owner}/{repo}/releases/{id}/assets/{asset}/delete", post(releases::delete_asset))
         .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
         .route("/{owner}/{repo}/forks", get(forks::list))
         .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))

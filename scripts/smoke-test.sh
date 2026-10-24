@@ -728,6 +728,56 @@ check "and mirror runs" contains "$METRICS" 'keel_mirror_runs_total{kind="push",
 check "and stored LFS files" contains "$METRICS" "keel_lfs_files "
 check "it won't overwrite" bash -c "! '$BIN' backup --data-dir '$T/data' '$T/backup' 2>/dev/null"
 
+echo "== downloads, releases and activity"
+zipped() { python3 -c 'import io,sys,zipfile; print("\n".join(zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())).namelist()))'; }
+check "download a branch as .zip" contains "$(curl -s "$B/ada/engine/archive/main.zip" | zipped)" "engine-main/README.md"
+check "and as .tar.gz" contains "$(curl -s "$B/ada/engine/archive/main.tar.gz" | tar -tz)" "engine-main/README.md"
+check "named after repository and branch" contains "$(curl -s -D - -o /dev/null "$B/ada/engine/archive/main.zip")" 'filename="engine-main.zip"'
+check "private repositories need access" is "$(status "$B/ada/secret/archive/main.zip")" 404
+check "unknown revisions are 404" is "$(status "$B/ada/engine/archive/nope.zip")" 404
+check "the clone menu offers downloads" contains "$(curl -s "$B/ada/engine")" "archive/main.zip"
+check "readers can't create releases" is "$(post "$T/eve2" /ada/engine/releases tag=v9 target=main action=publish)" 403
+REL_URL=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" --data-urlencode tag=v1.0 --data-urlencode target=main --data-urlencode "title=First release" --data-urlencode "notes=**Hello**" -d action=draft "$B/ada/engine/releases")
+REL=$(grep -o 'releases/[0-9]*/edit' <<<"$REL_URL" | grep -o '[0-9]*')
+check "draft a release" bash -c "[ -n '$REL' ]"
+check "drafts are hidden" bash -c "! curl -s '$B/ada/engine/releases' | grep -q 'First release'"
+check "the tag waits for publishing" is "$(git ls-remote "$B/ada/engine.git" refs/tags/v1.0 | wc -l)" 0
+check "attach a file" is "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/ada" -H "$O" -F "file=@$T/large.txt;filename=engine-linux.bin" "$B/ada/engine/releases/$REL/assets")" 303
+check "the same name twice is refused" contains "$(curl -s -b "$T/ada" -H "$O" -F "file=@$T/large.txt;filename=engine-linux.bin" "$B/ada/engine/releases/$REL/assets")" "already has a file"
+check "publish it" is "$(post "$T/ada" "/ada/engine/releases/$REL/edit" "title=First release" "notes=**Hello**" action=publish)" 303
+check "which creates the tag" is "$(git ls-remote "$B/ada/engine.git" refs/tags/v1.0 | wc -l)" 1
+RELPAGE=$(curl -s "$B/ada/engine/releases/tag/v1.0")
+check "the release page" contains "$RELPAGE" "<strong>Hello</strong>"
+check "lists the file" contains "$RELPAGE" "engine-linux.bin"
+check "download the file" is "$(curl -s "$B/ada/engine/releases/download/v1.0/engine-linux.bin")" large
+check "downloads are counted" contains "$(curl -s -b "$T/ada" "$B/ada/engine/releases/$REL/edit")" "1 download"
+check "source code of the tag" contains "$(curl -s "$B/ada/engine/archive/v1.0.tar.gz" | tar -tz)" "engine-v1.0/README.md"
+check "releases through the API" is "$(api_status "$RW" POST /repos/ada/engine/releases -d '{"tag_name":"v1.1","name":"Next","body":"Fixes"}')" 201
+API_REL=$(api "$RW" GET /repos/ada/engine/releases/latest | field '["id"]')
+check "the latest release" is "$(api "$RW" GET /repos/ada/engine/releases/latest | field '["tag_name"]')" v1.1
+check "upload a file through the API" is "$(api "$RW" POST "/repos/ada/engine/releases/$API_REL/assets?name=notes.txt" --data-binary "release notes" | field '["size"]')" 13
+check "it downloads" is "$(curl -s "$B/ada/engine/releases/download/v1.1/notes.txt")" "release notes"
+check "the tab counts releases" contains "$(curl -s "$B/ada/engine")" 'Releases <span class="count">2</span>'
+HOME_FEED=$(curl -s -b "$T/ada" "$B/")
+check "the home page shows activity" contains "$HOME_FEED" "released"
+check "including pushes" contains "$HOME_FEED" "pushed"
+feed_has() { # feed_has <text>: in ada's feed, following "Older" links
+    local url="/"
+    for _ in $(seq 1 20); do
+        local page
+        page=$(curl -s -b "$T/ada" "$B$url")
+        grep -q -- "$1" <<<"$page" && return 0
+        url=$(grep -o 'href="/?before=[0-9]*"' <<<"$page" | head -1 | cut -d'"' -f2)
+        [ -z "$url" ] && break
+    done
+    echo "no '$1' in the feed"; return 1
+}
+check "and issues" feed_has "opened issue"
+check "and merged pull requests" feed_has "merged pull request"
+check "profiles show recent activity" contains "$(curl -s "$B/ada")" "Recent activity"
+check "private activity stays private" bash -c "! curl -s -b '$T/eve2' '$B/ada' | grep -q 'ada/secret'"
+check "older activity pages" contains "$(curl -s -b "$T/ada" "$B/?before=999999")" "Activity"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -735,7 +785,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
-    /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens; do
+    /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done
 

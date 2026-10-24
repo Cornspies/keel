@@ -38,6 +38,7 @@
     <a href="/{{ repo.owner }}/{{ repo.name }}/pulls"{% if repo.tab == "pulls" %} class="active"{% endif %}>Pull requests{% if repo.open_pulls > 0 %} <span class="count">{{ repo.open_pulls }}</span>{% endif %}</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/commits{% if !repo.default_rev.is_empty() %}/{{ repo.default_rev }}{% endif %}"{% if repo.tab == "commits" %} class="active"{% endif %}>Commits</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/branches"{% if repo.tab == "branches" %} class="active"{% endif %}>Branches</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/releases"{% if repo.tab == "releases" %} class="active"{% endif %}>Releases{% if repo.releases > 0 %} <span class="count">{{ repo.releases }}</span>{% endif %}</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/search" class="tab-search">Search</a>
     {% if repo.can_admin %}<a href="/{{ repo.owner }}/{{ repo.name }}/settings"{% if repo.tab == "settings" %} class="active"{% endif %}>Settings</a>{% endif %}
   </nav>

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  {% if single %}<a href="/{{ repo.owner }}/{{ repo.name }}/releases">← All releases</a>{% else %}<h2 class="toolbar-title">Releases</h2>{% endif %}
+  <div class="spacer"></div>
+  {% if can_edit %}<a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/releases/new">New release</a>{% endif %}
+</div>
+{% if releases.is_empty() %}
+<p class="empty">No releases yet. Releases bundle notes and files for a version, attached to a tag{% if can_edit %} — <a href="/{{ repo.owner }}/{{ repo.name }}/releases/new">create the first one</a>{% endif %}.</p>
+{% endif %}
+{% for r in releases %}
+<article class="box release" id="release-{{ r.id }}">
+  <div class="release-head">
+    <div>
+      <h2 class="release-title"><a href="{{ r.url }}">{{ r.name }}</a></h2>
+      <div class="release-meta">
+        <span class="branch">{{ r.tag }}</span>
+        {% if r.draft %}<span class="badge badge-danger">Draft</span>{% endif %}
+        {% if r.prerelease %}<span class="badge">Pre-release</span>{% endif %}
+        {% if r.latest %}<span class="badge badge-latest">Latest</span>{% endif %}
+        <span class="muted small">{{ r.author }} {% if r.draft %}drafted{% else %}released{% endif %} this <time title="{{ r.when_full }}">{{ r.when }}</time></span>
+      </div>
+    </div>
+    {% if can_edit %}<a class="btn btn-small" href="{{ r.edit_url }}">Edit</a>{% endif %}
+  </div>
+  {% if !r.notes_html.is_empty() %}<div class="markdown release-notes">{{ r.notes_html|safe }}</div>{% endif %}
+  <div class="release-assets">
+    <h3>Files</h3>
+    <ul class="plain">
+      {% for a in r.assets %}
+      <li><a href="{{ a.url }}" class="mono">{{ a.name }}</a> <span class="muted small">{{ a.size }}{% if a.downloads > 0 %} · {{ a.downloads }} download{% if a.downloads != 1 %}s{% endif %}{% endif %}</span></li>
+      {% endfor %}
+      {% if !r.draft %}
+      <li><a href="{{ r.zip_url }}" rel="nofollow">Source code (zip)</a></li>
+      <li><a href="{{ r.tgz_url }}" rel="nofollow">Source code (tar.gz)</a></li>
+      {% endif %}
+    </ul>
+  </div>
+</article>
+{% endfor %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>
+{% endblock %}
