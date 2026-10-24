@@ -5,19 +5,24 @@
 // (sqlx refuses dynamically built SQL).
 macro_rules! user_columns {
     () => {
-        "id, username, COALESCE(email, '') AS email, password_hash, is_admin, kind, created_at"
+        "id, username, COALESCE(email, '') AS email, password_hash, is_admin, kind, created_at,
+         email_verified_at IS NOT NULL AS email_verified, email_notifications, disabled_at IS NOT NULL AS disabled"
     };
 }
 
 mod activity;
+mod admin;
 mod auth;
 mod cache;
 mod config;
 mod issues;
 mod labels;
+mod mail;
 mod names;
 mod notifications;
+mod milestones;
 mod permissions;
+mod protection;
 mod pulls;
 mod repos;
 mod reviews;
@@ -32,21 +37,25 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-pub use activity::{Activity, IssueAction};
+pub use activity::{Activity, IssueAction, label_json, time as json_time};
+pub use admin::{AdminUser, SiteSettings, SiteStats};
 pub use cache::EntryCommits;
-pub use config::{Config, SshConfig};
+pub use config::{Config, MailConfig, SshConfig};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
+pub use mail::Mail;
 pub use names::{validate_repo_name, validate_username};
 pub use notifications::{Notification, Subscription, mentions};
+pub use milestones::{Milestone, parse_due_date};
 pub use permissions::{Access, OrgRole};
+pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::Repo;
-pub use reviews::{InlineAnchor, Verdict};
+pub use reviews::{InlineAnchor, Verdict, suggestion};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use tokens::{AccessToken, looks_like_token};
 pub use users::User;
-pub use webhooks::{Attempt, Delivery, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
+pub use webhooks::{Attempt, Delivery, HookOwner, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -101,6 +110,10 @@ pub struct Core {
     events: tokio::sync::broadcast::Sender<RepoEvent>,
     /// Signalled when a webhook delivery is queued.
     hook_wakeup: Arc<tokio::sync::Notify>,
+    /// Signalled when mail is queued.
+    mail_wakeup: Arc<tokio::sync::Notify>,
+    /// Instance settings from the admin page, read on every page view.
+    settings: Arc<std::sync::RwLock<SiteSettings>>,
 }
 
 impl Core {
@@ -108,6 +121,7 @@ impl Core {
     /// migrations.
     pub async fn open(config: Config) -> anyhow::Result<Self> {
         std::fs::create_dir_all(config.repos_dir())?;
+        protection::install_hooks(&config.hooks_dir())?;
         let options = SqliteConnectOptions::new()
             .filename(config.db_path())
             .create_if_missing(true)
@@ -125,9 +139,13 @@ impl Core {
             config: Arc::new(config),
             events: tokio::sync::broadcast::channel(256).0,
             hook_wakeup: Arc::default(),
+            mail_wakeup: Arc::default(),
+            settings: Arc::default(),
         };
+        core.load_settings().await?;
         core.delete_expired_sessions().await?;
         core.prune_notifications(180).await?;
+        core.prune_mail().await?;
         Ok(core)
     }
 

@@ -30,10 +30,19 @@ const KEEP_DELIVERIES: i64 = 100;
 /// How long a claimed delivery is reserved for its attempt.
 const LEASE_SECS: i64 = 120;
 
+/// What a hook belongs to: a repository, or an organization (whose hooks
+/// get the events of all its repositories).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookOwner {
+    Repo(i64),
+    Org(i64),
+}
+
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct Webhook {
     pub id: i64,
-    pub repo_id: i64,
+    pub repo_id: Option<i64>,
+    pub org_id: Option<i64>,
     pub url: String,
     pub secret: String,
     /// Comma-separated event names, or `*`.
@@ -43,6 +52,13 @@ pub struct Webhook {
 }
 
 impl Webhook {
+    pub fn owner(&self) -> HookOwner {
+        match (self.repo_id, self.org_id) {
+            (Some(repo), _) => HookOwner::Repo(repo),
+            (None, org) => HookOwner::Org(org.unwrap_or_default()),
+        }
+    }
+
     pub fn wants(&self, event: &str) -> bool {
         event == "ping" || self.events == "*" || self.events.split(',').any(|e| e == event)
     }
@@ -195,38 +211,65 @@ macro_rules! delivery_columns {
 }
 
 impl Core {
-    pub async fn webhooks(&self, repo_id: i64) -> Result<Vec<Webhook>> {
-        Ok(sqlx::query_as("SELECT * FROM webhooks WHERE repo_id = ?1 ORDER BY id")
-            .bind(repo_id)
+    /// The hooks of a repository or an organization.
+    pub async fn webhooks(&self, owner: HookOwner) -> Result<Vec<Webhook>> {
+        let (repo, org) = match owner {
+            HookOwner::Repo(id) => (Some(id), None),
+            HookOwner::Org(id) => (None, Some(id)),
+        };
+        Ok(sqlx::query_as("SELECT * FROM webhooks WHERE repo_id IS ?1 AND org_id IS ?2 ORDER BY id")
+            .bind(repo)
+            .bind(org)
             .fetch_all(&self.db)
             .await?)
     }
 
-    pub async fn webhook(&self, repo_id: i64, id: i64) -> Result<Option<Webhook>> {
-        Ok(sqlx::query_as("SELECT * FROM webhooks WHERE repo_id = ?1 AND id = ?2")
-            .bind(repo_id)
-            .bind(id)
-            .fetch_optional(&self.db)
-            .await?)
+    /// Hooks that get a repository's events: its own and its
+    /// organization's.
+    pub(crate) async fn hooks_for_repo(&self, repo_id: i64) -> Result<Vec<Webhook>> {
+        Ok(sqlx::query_as(
+            "SELECT * FROM webhooks WHERE repo_id = ?1
+                OR org_id = (SELECT owner_id FROM repositories WHERE id = ?1)
+             ORDER BY id",
+        )
+        .bind(repo_id)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn webhook(&self, owner: HookOwner, id: i64) -> Result<Option<Webhook>> {
+        Ok(self.webhooks(owner).await?.into_iter().find(|h| h.id == id))
     }
 
     /// Creates a hook and queues a `ping` delivery to it.
-    pub async fn create_webhook(&self, repo_id: i64, url: &str, secret: &str, events: &[String], active: bool) -> Result<Webhook> {
+    pub async fn create_webhook(
+        &self,
+        owner: HookOwner,
+        url: &str,
+        secret: &str,
+        events: &[String],
+        active: bool,
+    ) -> Result<Webhook> {
         validate_url(url, self.config.webhook_allow_private)?;
         let events = validate_events(events)?;
+        let (repo, org) = match owner {
+            HookOwner::Repo(id) => (Some(id), None),
+            HookOwner::Org(id) => (None, Some(id)),
+        };
         let (id,): (i64,) = sqlx::query_as(
-            "INSERT INTO webhooks (repo_id, url, secret, events, active, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            "INSERT INTO webhooks (repo_id, org_id, url, secret, events, active, created_at)
+             VALUES (?1, ?7, ?2, ?3, ?4, ?5, ?6) RETURNING id",
         )
-        .bind(repo_id)
+        .bind(repo)
         .bind(url.trim())
         .bind(secret.trim())
         .bind(events)
         .bind(active)
         .bind(now())
+        .bind(org)
         .fetch_one(&self.db)
         .await?;
-        let hook = self.webhook(repo_id, id).await?.ok_or(Error::NotFound)?;
+        let hook = self.webhook(owner, id).await?.ok_or(Error::NotFound)?;
         self.ping_webhook(&hook).await?;
         Ok(hook)
     }
@@ -262,20 +305,27 @@ impl Core {
 
     /// Queues a `ping` to check that a hook is reachable.
     pub async fn ping_webhook(&self, hook: &Webhook) -> Result<()> {
-        let payload = serde_json::json!({
+        let kind = match hook.owner() {
+            HookOwner::Repo(_) => "Repository",
+            HookOwner::Org(_) => "Organization",
+        };
+        let mut payload = serde_json::json!({
             "zen": "Keep it simple.",
             "hook_id": hook.id,
-            "hook": { "id": hook.id, "type": "Repository", "active": hook.active, "events": hook.event_list(),
+            "hook": { "id": hook.id, "type": kind, "active": hook.active, "events": hook.event_list(),
                       "config": { "url": hook.url, "content_type": "json" } },
-            "repository": self.repo_by_id(hook.repo_id).await?.map(|r| self.repo_json(&r)),
         });
+        match hook.owner() {
+            HookOwner::Repo(id) => payload["repository"] = serde_json::json!(self.repo_by_id(id).await?.map(|r| self.repo_json(&r))),
+            HookOwner::Org(id) => payload["organization"] = serde_json::json!(self.user_by_id(id).await?.map(|o| self.user_json(&o))),
+        }
         self.insert_delivery(hook.id, "ping", "", &payload.to_string()).await
     }
 
-    /// Queues `payload` for every active hook of the repository that wants
-    /// `event`.
+    /// Queues `payload` for every active hook of the repository (or its
+    /// organization) that wants `event`.
     pub(crate) async fn enqueue_webhooks(&self, repo_id: i64, event: &str, action: &str, payload: &serde_json::Value) -> Result<()> {
-        let hooks = self.webhooks(repo_id).await?;
+        let hooks = self.hooks_for_repo(repo_id).await?;
         let hooks: Vec<_> = hooks.iter().filter(|h| h.active && h.wants(event)).collect();
         if hooks.is_empty() {
             return Ok(());
@@ -458,9 +508,9 @@ mod tests {
         let (core, _dir) = Core::for_tests().await;
         let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
-        assert!(core.create_webhook(repo.id, "https://ci.example.com", "", &[], true).await.is_err());
+        assert!(core.create_webhook(HookOwner::Repo(repo.id), "https://ci.example.com", "", &[], true).await.is_err());
         let hook = core
-            .create_webhook(repo.id, "https://ci.example.com/hook", "s3cret", &["push".into()], true)
+            .create_webhook(HookOwner::Repo(repo.id), "https://ci.example.com/hook", "s3cret", &["push".into()], true)
             .await
             .unwrap();
         assert!(hook.wants("push") && !hook.wants("issues"));
@@ -500,5 +550,30 @@ mod tests {
             core.finish_delivery(d, &ok).await.unwrap();
         }
         assert_eq!(core.next_delivery_due().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn organization_hooks() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let org = core.create_org(&ada, "acme").await.unwrap();
+        let tool = core.create_repo(&org, "tool", "", false).await.unwrap();
+        let own = core.create_repo(&ada, "own", "", false).await.unwrap();
+        let hook = core
+            .create_webhook(HookOwner::Org(org.id), "https://ci.example.com/acme", "", &["issues".into()], true)
+            .await
+            .unwrap();
+        assert_eq!(hook.owner(), HookOwner::Org(org.id));
+        assert!(core.webhooks(HookOwner::Repo(tool.id)).await.unwrap().is_empty());
+        assert!(core.webhook(HookOwner::Repo(tool.id), hook.id).await.unwrap().is_none());
+        let ping: serde_json::Value = serde_json::from_str(&core.deliveries(hook.id, 1).await.unwrap()[0].payload).unwrap();
+        assert_eq!(ping["organization"]["login"], "acme");
+
+        // Issues in the organization's repositories reach it; others don't.
+        core.create_issue(tool.id, &ada, "In acme", "").await.unwrap();
+        core.create_issue(own.id, &ada, "Elsewhere", "").await.unwrap();
+        let events: Vec<String> = core.deliveries(hook.id, 10).await.unwrap().into_iter().map(|d| d.payload).collect();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("In acme"));
     }
 }

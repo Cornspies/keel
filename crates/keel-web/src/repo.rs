@@ -906,6 +906,8 @@ pub(crate) struct RefView {
     pub url: String,
     pub commit: CommitView,
     pub is_default: bool,
+    /// A branch protection rule applies.
+    pub protected: bool,
 }
 
 #[derive(Template)]
@@ -928,17 +930,19 @@ pub async fn refs(
         Ok((g.branches()?, g.tags()?, g.default_branch()?.unwrap_or_default()))
     })
     .await?;
-    let view = |r: &keel_git::RefInfo| RefView {
+    let rules = state.core.branch_rules(repo.id).await?;
+    let view = |r: &keel_git::RefInfo, branch: bool| RefView {
         url: format!("{base}/tree/{}", encode_path(&r.name)),
         commit: CommitView::new(&base, &r.commit),
         is_default: r.name == default_branch,
+        protected: branch && keel_core::rule_for(&rules, &r.name).is_some(),
         name: r.name.clone(),
     };
     html(RefsPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "branches", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Branches · {}/{}", repo.owner, repo.name)),
-        branches: branches.iter().map(view).collect(),
-        tags: tags.iter().map(view).collect(),
+        branches: branches.iter().map(|b| view(b, true)).collect(),
+        tags: tags.iter().map(|t| view(t, false)).collect(),
     })
 }
 

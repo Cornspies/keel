@@ -3,6 +3,7 @@
 <h1>Search code</h1>
 <form method="get" action="/search" class="form form-inline search-form">
   <input name="q" value="{{ q }}" placeholder="Search all repositories" aria-label="Search" autofocus>
+  <label class="check search-option" title="Or write the query /like this/"><input type="checkbox" name="regex" value="1"{% if regex %} checked{% endif %}> Regular expression</label>
   <button class="btn btn-primary">Search</button>
 </form>
 {% include "search_results.html" %}

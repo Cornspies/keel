@@ -107,7 +107,7 @@ impl Core {
         let Some((user_id, can_write)) = row else {
             return Ok(None);
         };
-        Ok(self.user_by_id(user_id).await?.map(|u| (u, can_write)))
+        Ok(self.user_by_id(user_id).await?.filter(|u| !u.disabled).map(|u| (u, can_write)))
     }
 }
 

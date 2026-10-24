@@ -1,11 +1,33 @@
 //! Code review on pull requests: comments on lines of the diff (with reply
-//! threads) and review verdicts.
+//! threads), suggested changes, review requests and review verdicts.
 
-use keel_git::Oid;
+use keel_git::{Identity, Oid, replace_line};
 
-use crate::activity::Activity;
+use crate::activity::{Activity, IssueAction};
 use crate::issues::{insert_comment, touch, validate_comment};
-use crate::{Comment, Core, Error, Issue, Result, User, invalid, now};
+use crate::protection::pinned_head;
+use crate::{Access, Comment, Core, Error, Issue, Repo, Result, User, invalid, now};
+
+const MAX_REVIEWERS: usize = 10;
+
+/// The first suggested change in a comment: the lines of a ```` ```suggestion ````
+/// block, which replace the commented line (empty: delete it).
+pub fn suggestion(body: &str) -> Option<String> {
+    let mut lines = body.lines();
+    let fence = lines.by_ref().find_map(|l| {
+        let t = l.trim_start();
+        let ticks = t.len() - t.trim_start_matches('`').len();
+        (ticks >= 3 && t[ticks..].trim() == "suggestion").then(|| &t[..ticks])
+    })?;
+    let mut out = Vec::new();
+    for l in lines {
+        if l.trim_start().starts_with(fence) && l.trim().trim_start_matches('`').is_empty() {
+            return Some(out.join("\n"));
+        }
+        out.push(l);
+    }
+    None
+}
 
 /// Where an inline comment is made.
 #[derive(Clone, Debug)]
@@ -127,8 +149,27 @@ impl Core {
         if !body.trim().is_empty() {
             validate_comment(body)?;
         }
+        // The commit reviewed (the branch's current tip, as shown to the
+        // reviewer), so branch rules can disregard stale reviews.
+        let head = match self.pull(issue.id).await? {
+            Some(pull) => match self.pull_tips(issue, &pull).await?.1 {
+                Some(head) => Some(head.to_string()),
+                None => pinned_head(self, issue.repo_id, issue.number).await?,
+            },
+            None => None,
+        };
         let mut tx = self.db.begin().await?;
         let id = insert_comment(&mut tx, issue.id, Some(author.id), verdict.as_str(), body).await?;
+        sqlx::query("UPDATE comments SET commit_id = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(head)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM review_requests WHERE issue_id = ?1 AND user_id = ?2")
+            .bind(issue.id)
+            .bind(author.id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
         Ok(id)
@@ -150,6 +191,153 @@ impl Core {
             .into_iter()
             .filter_map(|(user, kind)| Some((user, Verdict::parse(&kind)?)))
             .collect())
+    }
+}
+
+impl Core {
+    // -- Review requests ----------------------------------------------------
+
+    /// People asked to review a pull request who haven't yet: (id, name).
+    pub async fn review_requests(&self, issue_id: i64) -> Result<Vec<(i64, String)>> {
+        Ok(sqlx::query_as(
+            "SELECT u.id, u.username FROM review_requests r JOIN users u ON u.id = r.user_id
+             WHERE r.issue_id = ?1 ORDER BY u.username",
+        )
+        .bind(issue_id)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    /// Who can be asked to review: people with write access other than
+    /// the author.
+    pub async fn reviewer_candidates(&self, repo: &Repo, issue: &Issue) -> Result<Vec<User>> {
+        let mut users = self.assignable_users(repo).await?;
+        users.retain(|u| !issue.is_author(u));
+        Ok(users)
+    }
+
+    /// Sets who is asked to review (ignoring people who can't be) and
+    /// records what changed.
+    pub async fn set_review_requests(&self, repo: &Repo, issue: &Issue, actor: &User, user_ids: &[i64]) -> Result<()> {
+        if !issue.is_pull {
+            return Err(Error::NotFound);
+        }
+        if user_ids.len() > MAX_REVIEWERS {
+            return invalid(format!("At most {MAX_REVIEWERS} people can be asked to review."));
+        }
+        let candidates = self.reviewer_candidates(repo, issue).await?;
+        let current: Vec<i64> = self.review_requests(issue.id).await?.into_iter().map(|(id, _)| id).collect();
+        let mut tx = self.db.begin().await?;
+        let mut changed = Vec::new();
+        for user in candidates {
+            let (was, is) = (current.contains(&user.id), user_ids.contains(&user.id));
+            if was == is {
+                continue;
+            }
+            if is {
+                sqlx::query(
+                    "INSERT INTO review_requests (issue_id, user_id, requested_by, created_at) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .bind(issue.id)
+                .bind(user.id)
+                .bind(actor.id)
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query("DELETE FROM review_requests WHERE issue_id = ?1 AND user_id = ?2")
+                    .bind(issue.id)
+                    .bind(user.id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let kind = if is { "review_requested" } else { "review_request_removed" };
+            insert_comment(&mut tx, issue.id, Some(actor.id), kind, &user.username).await?;
+            changed.push(if is { IssueAction::ReviewRequested(user) } else { IssueAction::ReviewRequestRemoved(user) });
+        }
+        tx.commit().await?;
+        for action in changed {
+            self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
+        }
+        Ok(())
+    }
+
+    // -- Suggested changes --------------------------------------------------
+
+    /// Commits the change suggested in inline comment `comment` to the pull
+    /// request's head branch, as `user` (who needs write access to the
+    /// repository that branch is in). Returns the new commit.
+    pub async fn apply_suggestion(&self, issue: &Issue, comment: &Comment, user: &User) -> Result<Oid> {
+        if comment.kind != "inline" || comment.issue_id != issue.id {
+            return Err(Error::NotFound);
+        }
+        let Some(replacement) = suggestion(&comment.body) else {
+            return invalid("That comment doesn't suggest a change.");
+        };
+        if !issue.is_open() {
+            return invalid("This pull request is not open.");
+        }
+        if comment.side.as_deref() != Some("new") {
+            return invalid("Only suggestions on added or unchanged lines can be applied.");
+        }
+        let pull = self.pull(issue.id).await?.ok_or(Error::NotFound)?;
+        let head_repo = match pull.head_repo_id {
+            Some(id) => self.repo_by_id(id).await?,
+            None => None,
+        };
+        let Some(head_repo) = head_repo else {
+            return invalid("The branch of this pull request no longer exists.");
+        };
+        if self.access(&head_repo, Some(user)).await? < Access::Write {
+            return invalid("Only people who can push to the branch can apply suggestions.");
+        }
+        if !self.may_update_branch(head_repo.id, &pull.head_ref, false, false).await? {
+            return invalid(format!("{} is protected; change it through a pull request.", pull.head_ref));
+        }
+        let (Some(path), Some(line), Some(blob)) = (comment.path.clone(), comment.line, comment.blob_id.clone()) else {
+            return Err(Error::NotFound);
+        };
+        let suggester = comment.author.clone().unwrap_or_else(|| "ghost".into());
+        let message = format!("Apply suggestion from code review\n\nSuggested by @{suggester} in #{}.", issue.number);
+        let (name, email) = (user.username.clone(), user.email.clone());
+        let branch = pull.head_ref.clone();
+        let before = self.ref_snapshot(head_repo.id).await?;
+        let edited = self
+            .git(head_repo.id, move |g| {
+                let Some(tip) = g.branch_tip(&branch) else {
+                    return Ok(Err("The branch of this pull request no longer exists."));
+                };
+                let mut outdated = false;
+                let who = Identity { name: &name, email: &email };
+                let result = g.commit_file_edit(&branch, tip, &path, &message, &who, |text, id| {
+                    let text = std::str::from_utf8(text).ok().filter(|_| id.to_string() == blob);
+                    match text.and_then(|t| replace_line(t, line as usize, &replacement)) {
+                        Some(t) => Ok(t.into_bytes()),
+                        None => {
+                            outdated = true;
+                            Err(keel_git::Error::Other("outdated".into()))
+                        }
+                    }
+                });
+                match result {
+                    Ok(commit) => Ok(Ok(commit)),
+                    Err(_) if outdated => Ok(Err("The file changed since this was suggested.")),
+                    Err(e) => Err(e),
+                }
+            })
+            .await;
+        let commit = match edited {
+            Ok(Ok(commit)) => commit,
+            Ok(Err(msg)) => return invalid(msg),
+            // E.g. the file is gone, or someone pushed meanwhile.
+            Err(Error::Internal(e)) => {
+                tracing::info!("applying suggestion {}: {e:#}", comment.id);
+                return invalid("The branch changed since this was suggested. Reload and try again.");
+            }
+            Err(e) => return Err(e),
+        };
+        self.after_push(head_repo.id, Some(user.id), Some(before)).await?;
+        Ok(commit)
     }
 }
 
@@ -202,5 +390,28 @@ mod tests {
         core.add_review(&pull, &bob, Verdict::Approved, "").await.unwrap();
         assert_eq!(core.review_states(pull.id).await.unwrap(), [("bob".into(), Verdict::Approved)]);
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().comment_count, 1, "only reviews with text");
+
+        // Review requests: only people with write access, not the author;
+        // reviewing clears the request.
+        let eve = core.register("eve", "eve@example.com", "password1").await.unwrap();
+        core.set_collaborator(&repo, "bob", Access::Write).await.unwrap();
+        core.set_review_requests(&repo, &pull, &ada, &[ada.id, bob.id, eve.id]).await.unwrap();
+        assert_eq!(core.review_requests(pull.id).await.unwrap(), [(bob.id, "bob".to_owned())]);
+        core.add_review(&pull, &bob, Verdict::Approved, "").await.unwrap();
+        assert!(core.review_requests(pull.id).await.unwrap().is_empty());
+        core.set_review_requests(&repo, &pull, &ada, &[bob.id]).await.unwrap();
+        core.set_review_requests(&repo, &pull, &ada, &[]).await.unwrap();
+        let kinds: Vec<String> = core.comments(pull.id).await.unwrap().into_iter().map(|c| c.kind).collect();
+        assert!(kinds.ends_with(&["review_requested".into(), "approved".into(), "review_requested".into(), "review_request_removed".into()]));
+    }
+
+    #[test]
+    fn suggestions() {
+        assert_eq!(suggestion("Try:\n```suggestion\nlet x = 1;\n```\nok").as_deref(), Some("let x = 1;"));
+        assert_eq!(suggestion("```suggestion\na\nb\n```").as_deref(), Some("a\nb"));
+        assert_eq!(suggestion("```suggestion\n```").as_deref(), Some(""), "deletes the line");
+        assert_eq!(suggestion("````suggestion\n```\n````").as_deref(), Some("```"));
+        assert_eq!(suggestion("```rust\nx\n```"), None);
+        assert_eq!(suggestion("```suggestion\nunclosed"), None);
     }
 }

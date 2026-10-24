@@ -19,6 +19,9 @@
       {% if let Some(d) = c.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}
     </div>
     <article class="markdown comment-body">{{ c.body_html|safe }}</article>
+    {% if let Some(u) = c.apply_url %}{% if !t.outdated %}
+    <form method="post" action="{{ u }}" class="suggestion-apply"><button class="btn btn-small btn-primary" title="Commit this change to the pull request's branch">Apply suggestion</button></form>
+    {% endif %}{% endif %}
   </div>
   {% endfor %}
   {% if t.can_reply %}

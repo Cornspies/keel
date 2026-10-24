@@ -47,7 +47,9 @@ pub struct Comment {
     /// `comment`, `inline` (on a line of a pull request's diff), a review
     /// verdict (`approved`, `changes_requested`) or an event: `closed`,
     /// `reopened`, `merged`, `labeled`, `unlabeled`, `assigned`,
-    /// `unassigned` (the body is the label or user name).
+    /// `unassigned`, `review_requested`, `review_request_removed`,
+    /// `milestoned`, `demilestoned` (the body is the label, user or
+    /// milestone name).
     pub kind: String,
     pub body: String,
     pub created_at: i64,
@@ -75,6 +77,9 @@ impl Comment {
 pub struct IssueFilter {
     pub label: Option<i64>,
     pub assignee: Option<i64>,
+    pub milestone: Option<i64>,
+    /// Pull requests waiting for this user's review.
+    pub review_requested: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,11 +99,13 @@ macro_rules! issue_select {
     };
 }
 
-/// SQL condition for an [`IssueFilter`] in parameters `?6` and `?7`.
+/// SQL condition for an [`IssueFilter`] in parameters `?6` to `?9`.
 macro_rules! filtered {
     () => {
         "(?6 IS NULL OR EXISTS (SELECT 1 FROM issue_labels l WHERE l.issue_id = i.id AND l.label_id = ?6))
-         AND (?7 IS NULL OR EXISTS (SELECT 1 FROM issue_assignees a WHERE a.issue_id = i.id AND a.user_id = ?7))"
+         AND (?7 IS NULL OR EXISTS (SELECT 1 FROM issue_assignees a WHERE a.issue_id = i.id AND a.user_id = ?7))
+         AND (?8 IS NULL OR i.milestone_id = ?8)
+         AND (?9 IS NULL OR EXISTS (SELECT 1 FROM review_requests r WHERE r.issue_id = i.id AND r.user_id = ?9))"
     };
 }
 
@@ -215,19 +222,19 @@ impl Core {
     }
 
     /// Issues or pull requests, newest first. `open` selects open ones,
-    /// otherwise closed (and merged) ones.
+    /// or closed (and merged) ones; `None` both.
     pub async fn issues(
         &self,
         repo_id: i64,
         pulls: bool,
-        open: bool,
+        open: Option<bool>,
         filter: IssueFilter,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<Issue>> {
         Ok(sqlx::query_as(concat!(
             issue_select!(),
-            "WHERE i.repo_id = ?1 AND i.is_pull = ?2 AND ((i.state = 'open') = ?3) AND ",
+            "WHERE i.repo_id = ?1 AND i.is_pull = ?2 AND (?3 IS NULL OR (i.state = 'open') = ?3) AND ",
             filtered!(),
             " ORDER BY i.number DESC LIMIT ?4 OFFSET ?5"
         ))
@@ -238,6 +245,8 @@ impl Core {
         .bind(offset)
         .bind(filter.label)
         .bind(filter.assignee)
+        .bind(filter.milestone)
+        .bind(filter.review_requested)
         .fetch_all(&self.db)
         .await?)
     }
@@ -256,6 +265,8 @@ impl Core {
         .bind(0)
         .bind(filter.label)
         .bind(filter.assignee)
+        .bind(filter.milestone)
+        .bind(filter.review_requested)
         .fetch_one(&self.db)
         .await?)
     }
@@ -391,15 +402,15 @@ mod tests {
         let counts = core.issue_counts(repo.id).await.unwrap();
         assert_eq!((counts.open_issues, counts.closed_issues), (1, 1));
         let all = IssueFilter::default();
-        assert_eq!(core.issues(repo.id, false, true, all, 0, 10).await.unwrap()[0].number, 2);
-        assert_eq!(core.issues(repo.id, false, false, all, 0, 10).await.unwrap()[0].number, 1);
+        assert_eq!(core.issues(repo.id, false, Some(true), all, 0, 10).await.unwrap()[0].number, 2);
+        assert_eq!(core.issues(repo.id, false, Some(false), all, 0, 10).await.unwrap()[0].number, 1);
         assert_eq!(core.filtered_counts(repo.id, false, all).await.unwrap(), (1, 1));
         let bug = core.label_by_name(repo.id, "bug").await.unwrap().unwrap();
         core.set_issue_labels(&first, &ada, &[bug.id]).await.unwrap();
         let bugs = IssueFilter { label: Some(bug.id), ..all };
         assert_eq!(core.filtered_counts(repo.id, false, bugs).await.unwrap(), (0, 1));
-        assert_eq!(core.issues(repo.id, false, false, bugs, 0, 10).await.unwrap()[0].number, 1);
-        assert!(core.issues(repo.id, false, true, bugs, 0, 10).await.unwrap().is_empty());
+        assert_eq!(core.issues(repo.id, false, Some(false), bugs, 0, 10).await.unwrap()[0].number, 1);
+        assert!(core.issues(repo.id, false, Some(true), bugs, 0, 10).await.unwrap().is_empty());
         core.set_assignees(&repo, &second, &ada, &[ada.id]).await.unwrap();
         let mine = IssueFilter { assignee: Some(ada.id), ..all };
         assert_eq!(core.filtered_counts(repo.id, false, mine).await.unwrap(), (1, 0));

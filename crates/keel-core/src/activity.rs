@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use keel_git::{GitRepo, Oid, RefChange, Refs};
 
-use crate::{Comment, Core, Issue, Label, PullRequest, Repo, Result, User, pull_ref};
+use crate::{Comment, Core, Issue, Label, Milestone, PullRequest, Repo, Result, User, pull_ref};
 
 /// Commits listed in a push payload.
 const PUSH_COMMITS: usize = 20;
@@ -33,11 +33,16 @@ pub enum IssueAction {
     Unlabeled(Label),
     Assigned(User),
     Unassigned(User),
+    ReviewRequested(User),
+    ReviewRequestRemoved(User),
+    Milestoned(Milestone),
+    Demilestoned(Milestone),
     /// A pull request's head moved.
     Synchronized,
 }
 
-fn time(t: i64) -> Value {
+/// A Unix time as an RFC 3339 string.
+pub fn time(t: i64) -> Value {
     time::OffsetDateTime::from_unix_timestamp(t)
         .ok()
         .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
@@ -81,6 +86,9 @@ impl Core {
             IssueAction::Reopened => Some(("reopened", "", None)),
             IssueAction::Merged => Some(("merged", "", None)),
             IssueAction::Assigned(user) => Some(("assigned you", "", Some((user.id, "assigned")))),
+            IssueAction::ReviewRequested(user) => {
+                Some(("requested your review", "", Some((user.id, "review_requested"))))
+            }
             _ => None,
         };
         if let Some((activity, text, only)) = notification {
@@ -97,6 +105,12 @@ impl Core {
             IssueAction::Unlabeled(l) => ("unlabeled", Some(("label", label_json(l)))),
             IssueAction::Assigned(u) => ("assigned", Some(("assignee", self.user_json(u)))),
             IssueAction::Unassigned(u) => ("unassigned", Some(("assignee", self.user_json(u)))),
+            IssueAction::ReviewRequested(u) => ("review_requested", Some(("requested_reviewer", self.user_json(u)))),
+            IssueAction::ReviewRequestRemoved(u) => {
+                ("review_request_removed", Some(("requested_reviewer", self.user_json(u))))
+            }
+            IssueAction::Milestoned(m) => ("milestoned", Some(("milestone", self.milestone_json(m)))),
+            IssueAction::Demilestoned(m) => ("demilestoned", Some(("milestone", self.milestone_json(m)))),
             IssueAction::Synchronized => ("synchronize", None),
         };
         let mut payload = json!({
@@ -165,7 +179,7 @@ impl Core {
 
     async fn record_push(&self, repo_id: i64, pusher: Option<i64>, before: Refs, changes: Vec<RefChange>) -> Result<()> {
         let Some(repo) = self.repo_by_id(repo_id).await? else { return Ok(()) };
-        let wanted = self.webhooks(repo_id).await?.iter().any(|h| h.active && h.wants("push"));
+        let wanted = self.hooks_for_repo(repo_id).await?.iter().any(|h| h.active && h.wants("push"));
         if !wanted || changes.is_empty() {
             return Ok(());
         }
@@ -233,8 +247,9 @@ impl Core {
     }
 
     // -- Payload pieces -----------------------------------------------------
+    // GitHub-style JSON, shared by webhook payloads and the API.
 
-    pub(crate) fn repo_json(&self, r: &Repo) -> Value {
+    pub fn repo_json(&self, r: &Repo) -> Value {
         let url = format!("{}/{}/{}", self.config.base_url, r.owner, r.name);
         json!({
             "id": r.id,
@@ -252,7 +267,7 @@ impl Core {
         })
     }
 
-    fn user_json(&self, u: &User) -> Value {
+    pub fn user_json(&self, u: &User) -> Value {
         json!({
             "id": u.id,
             "login": u.username,
@@ -289,8 +304,24 @@ impl Core {
         ))
     }
 
-    async fn issue_json(&self, repo: &Repo, issue: &Issue) -> Result<Value> {
+    pub fn milestone_json(&self, m: &Milestone) -> Value {
+        json!({
+            "id": m.id,
+            "number": m.id,
+            "title": m.title,
+            "description": m.description,
+            "state": m.state,
+            "open_issues": m.open_items,
+            "closed_issues": m.closed_items,
+            "due_on": m.due_on.map_or(Value::Null, time),
+            "created_at": time(m.created_at),
+            "closed_at": m.closed_at.map_or(Value::Null, time),
+        })
+    }
+
+    pub async fn issue_json(&self, repo: &Repo, issue: &Issue) -> Result<Value> {
         let (labels, assignees) = self.labels_and_assignees(issue).await?;
+        let milestone = self.issue_milestone(issue).await?;
         let mut v = json!({
             "id": issue.id,
             "number": issue.number,
@@ -301,6 +332,7 @@ impl Core {
             "user": self.login_json(issue.author.as_deref()),
             "labels": labels,
             "assignees": assignees,
+            "milestone": milestone.as_ref().map_or(Value::Null, |m| self.milestone_json(m)),
             "comments": issue.comment_count,
             "created_at": time(issue.created_at),
             "updated_at": time(issue.updated_at),
@@ -312,7 +344,7 @@ impl Core {
         Ok(v)
     }
 
-    async fn pull_json(&self, repo: &Repo, issue: &Issue) -> Result<Value> {
+    pub async fn pull_json(&self, repo: &Repo, issue: &Issue) -> Result<Value> {
         let Some(pull) = self.pull(issue.id).await? else {
             return self.issue_json(repo, issue).await;
         };
@@ -340,12 +372,14 @@ impl Core {
         v["merged_by"] = merged_by.as_deref().map_or(Value::Null, |m| self.login_json(Some(m)));
         v["merge_commit_sha"] = json!(merge_commit);
         v["head"] = side(head_repo.as_ref(), &pull.head_ref, head_sha, pull.head_label(issue));
+        let reviewers = self.review_requests(issue.id).await?;
+        v["requested_reviewers"] = reviewers.iter().map(|(_, name)| self.login_json(Some(name))).collect();
         v["base"] = side(Some(repo), &pull.base_ref, base_sha, format!("{}:{}", repo.owner, pull.base_ref));
         v.as_object_mut().map(|o| o.remove("pull_request"));
         Ok(v)
     }
 
-    fn comment_json(&self, repo: &Repo, issue: &Issue, c: &Comment) -> Value {
+    pub fn comment_json(&self, repo: &Repo, issue: &Issue, c: &Comment) -> Value {
         let url = if c.kind == "inline" {
             format!("{}/files#comment-{}", self.issue_url(repo, issue), c.id)
         } else {
@@ -371,7 +405,7 @@ impl Core {
     }
 }
 
-fn label_json(l: &Label) -> Value {
+pub fn label_json(l: &Label) -> Value {
     json!({ "id": l.id, "name": l.name, "color": l.color, "description": l.description })
 }
 
@@ -396,7 +430,7 @@ mod tests {
         let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         let all: Vec<String> = crate::WEBHOOK_EVENTS.iter().map(|(e, _)| (*e).to_owned()).collect();
-        let hook = core.create_webhook(repo.id, "https://ci.example.com/x", "", &all, true).await.unwrap();
+        let hook = core.create_webhook(crate::HookOwner::Repo(repo.id), "https://ci.example.com/x", "", &all, true).await.unwrap();
         assert_eq!(hook.events, "*");
 
         let issue = core.create_issue(repo.id, &bob, "Crash", "Steps").await.unwrap();

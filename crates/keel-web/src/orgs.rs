@@ -45,7 +45,7 @@ pub async fn create(State(state): State<AppState>, SignedIn(user): SignedIn, For
 }
 
 /// The organization, if `user` owns it (or is a site admin).
-async fn owned_org(state: &AppState, user: &User, name: &str) -> AppResult<User> {
+pub(crate) async fn owned_org(state: &AppState, user: &User, name: &str) -> AppResult<User> {
     let org = state
         .core
         .user_by_name(name)

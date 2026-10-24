@@ -170,6 +170,10 @@ impl Connection {
         let path = self.core.repo_path(&repo);
         let protocol = self.protocol.get(&channel).map(String::as_str);
         let mut cmd = tokio::process::Command::from(git_command(request.service, &path, false, false, protocol));
+        if request.service == Service::ReceivePack {
+            // Branch protection, enforced by a pre-receive hook.
+            cmd.envs(self.core.receive_pack_env(repo.id).await?);
+        }
         let mut child = cmd.kill_on_drop(true).spawn().context("spawning git")?;
         let (Some(mut stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())

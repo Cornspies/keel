@@ -3,6 +3,13 @@
 {% include "repo/header.html" %}
 <form method="get" action="/{{ repo.owner }}/{{ repo.name }}/search" class="form form-inline search-form">
   <input name="q" value="{{ q }}" placeholder="Search this repository" aria-label="Search this repository" autofocus>
+  {% if branches.len() > 1 %}
+  <select name="ref" aria-label="Branch">
+    {% for b in branches %}<option value="{{ b }}"{% if *b == rev %} selected{% endif %}>{{ b }}</option>{% endfor %}
+    {% if !branches.contains(rev) %}<option value="{{ rev }}" selected>{{ rev }}</option>{% endif %}
+  </select>
+  {% endif %}
+  <label class="check search-option" title="Or write the query /like this/"><input type="checkbox" name="regex" value="1"{% if regex %} checked{% endif %}> Regular expression</label>
   <button class="btn btn-primary">Search</button>
 </form>
 {% include "search_results.html" %}

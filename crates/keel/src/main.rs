@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use keel_core::{Config, Core, SshConfig};
+use keel_core::{Config, Core, MailConfig, SshConfig};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -17,6 +17,12 @@ struct Cli {
 enum Command {
     /// Run the web UI, git over HTTP and the SSH server.
     Serve(ServeArgs),
+    /// Git hooks; run by git during pushes, not by people.
+    #[command(hide = true)]
+    Hook {
+        /// The hook, e.g. `pre-receive`.
+        name: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -64,17 +70,32 @@ struct ServeArgs {
     /// admins can't use webhooks to probe the server's network.
     #[arg(long, env = "KEEL_WEBHOOK_ALLOW_PRIVATE")]
     webhook_allow_private: bool,
+
+    /// SMTP server for email (notifications, address verification,
+    /// password resets), e.g. smtps://user:password@smtp.example.com or
+    /// smtp://user:password@smtp.example.com:587?tls=required. Prefer the
+    /// environment variable, so the password doesn't show up in `ps`.
+    #[arg(long, env = "KEEL_SMTP_URL", hide_env_values = true)]
+    smtp_url: Option<String>,
+
+    /// The From address of emails [default: "<site name> <noreply@<host of
+    /// --base-url>>"].
+    #[arg(long, env = "KEEL_MAIL_FROM")]
+    mail_from: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn")),
-        )
-        .init();
+fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn")),
+                )
+                .init();
+            tokio::runtime::Runtime::new()?.block_on(serve(args))
+        }
+        Command::Hook { name } if name == "pre-receive" => std::process::exit(keel_core::pre_receive()),
+        Command::Hook { name } => bail!("unknown hook {name}"),
     }
 }
 
@@ -115,6 +136,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| "localhost".into()),
         public_port: args.ssh_port.unwrap_or(args.ssh_addr.port()),
     });
+    let mail = args.smtp_url.map(|smtp_url| MailConfig {
+        from: args.mail_from.unwrap_or_else(|| {
+            let host = host_of(&base_url).unwrap_or_else(|| "localhost".into());
+            format!("{} <noreply@{}>", args.site_name, host.trim_matches(['[', ']']))
+        }),
+        smtp_url,
+    });
     let config = Config {
         data_dir: args.data_dir,
         base_url,
@@ -122,12 +150,14 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         open_registration: !args.closed_registration,
         site_name: args.site_name,
         webhook_allow_private: args.webhook_allow_private,
+        mail,
     };
     let core = Core::open(config)
         .await
         .context("opening the data directory")?;
 
     keel_hooks::start(core.clone());
+    keel_mail::start(core.clone()).context("setting up email")?;
     let app = keel_web::router(keel_web::AppState::new(core.clone()));
     let listener = tokio::net::TcpListener::bind(args.http_addr)
         .await

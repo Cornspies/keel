@@ -68,6 +68,13 @@ document.addEventListener("click", (event) => {
     const form = inlineTemplate.content.firstElementChild.cloneNode(true);
     form.dataset.for = key;
     for (const key of ["path", "side", "line"]) form.elements[key].value = add.dataset[key];
+    if (add.dataset.side === "new") {
+      // The line's text, without the "+" button.
+      const code = add.closest("td").cloneNode(true);
+      code.querySelector(".add-comment").remove();
+      form.querySelector("[data-suggest]").dataset.text = code.textContent;
+    }
+    revealSuggest(form);
     const cell = Object.assign(document.createElement("td"), { colSpan: 3 });
     const tr = Object.assign(document.createElement("tr"), { className: "thread-row" });
     cell.append(form);
@@ -77,8 +84,25 @@ document.addEventListener("click", (event) => {
     return;
   }
   const cancel = event.target.closest(".inline-form [data-cancel]");
-  if (cancel) cancel.closest("tr").remove();
+  if (cancel) return cancel.closest("tr").remove();
+  // "Suggest a change": start a suggestion block with the line's text.
+  const suggest = event.target.closest("[data-suggest]");
+  if (suggest) {
+    const body = suggest.closest("form").elements.body;
+    const block = "```suggestion\n" + suggest.dataset.text + "\n```\n";
+    body.value = body.value ? `${body.value.trimEnd()}\n\n${block}` : block;
+    body.focus();
+    // Select the suggested line so it can be typed over.
+    const start = body.value.lastIndexOf(block) + "```suggestion\n".length;
+    body.setSelectionRange(start, start + suggest.dataset.text.length);
+  }
 });
+
+// Suggestions need JavaScript, so their buttons start hidden.
+function revealSuggest(root) {
+  for (const b of root.querySelectorAll("[data-suggest]")) b.hidden = b.dataset.text === undefined;
+}
+revealSuggest(document);
 
 // Forms that update as soon as a choice changes (the compare page).
 for (const form of document.querySelectorAll("form[data-autosubmit]")) {

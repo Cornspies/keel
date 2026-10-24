@@ -1,4 +1,25 @@
 <aside class="issue-sidebar">
+  {% if conv.is_pull %}
+  <section>
+    <div class="sidebar-head">
+      <h3>Reviewers</h3>
+      {% if conv.can_request_review %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Request reviews">Edit</summary>
+        <form method="post" action="{{ conv.base_url }}/reviewers" class="dropdown-menu dropdown-wide checklist">
+          {% for (id, name, on) in conv.reviewer_choices %}
+          <label class="check"><input type="checkbox" name="user" value="{{ id }}"{% if *on %} checked{% endif %}> {{ name }}</label>
+          {% endfor %}
+          {% if conv.reviewer_choices.is_empty() %}<p class="muted small">Nobody else has write access yet.</p>{% endif %}
+          <button class="btn btn-small btn-primary">Request</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% if conv.reviewers.is_empty() %}<p class="muted small">No reviews yet</p>
+    {% else %}<ul class="plain review-states">{% for r in conv.reviewers %}<li class="review-{{ r.state }}"><a href="/{{ r.name }}">{{ r.name }}</a>{% if r.state == "requested" %} <span class="muted small">awaiting review</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+  </section>
+  {% endif %}
   <section>
     <div class="sidebar-head">
       <h3>Assignees</h3>
@@ -36,6 +57,24 @@
     {% if conv.labels.is_empty() %}<p class="muted small">None yet</p>
     {% else %}<div class="labels">{% for l in conv.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}</div>{% endif %}
   </section>
+  <section>
+    <div class="sidebar-head">
+      <h3>Milestone</h3>
+      {% if conv.can_triage %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Set milestone">Edit</summary>
+        <form method="post" action="{{ conv.base_url }}/milestone" class="dropdown-menu dropdown-wide checklist">
+          <label class="check"><input type="radio" name="milestone" value=""{% if conv.milestone.is_none() %} checked{% endif %}> <span class="muted">None</span></label>
+          {% for (id, title, on) in conv.milestone_choices %}
+          <label class="check"><input type="radio" name="milestone" value="{{ id }}"{% if *on %} checked{% endif %}> {{ title }}</label>
+          {% endfor %}
+          <button class="btn btn-small btn-primary">Apply</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% if let Some((title, url)) = conv.milestone %}<p><a href="{{ url }}">{{ title }}</a></p>{% else %}<p class="muted small">No milestone</p>{% endif %}
+  </section>
   {% if let Some(sub) = conv.subscription %}
   <section>
     <div class="sidebar-head"><h3>Notifications</h3></div>
@@ -44,6 +83,7 @@
       <button class="btn btn-small">{% if sub.subscribed %}Unsubscribe{% else %}Subscribe{% endif %}</button>
       <p class="muted small">{% match sub.reason %}
         {% when "assigned" %}You're getting notifications because you're assigned.
+        {% when "review_requested" %}You're getting notifications because your review was requested.
         {% when "author" %}You're getting notifications because you opened this.
         {% when "participating" %}You're getting notifications because you commented.
         {% when "watching" %}You're getting notifications because you watch this repository.
@@ -52,14 +92,6 @@
         {% else %}You're not getting notifications about this.
       {% endmatch %}</p>
     </form>
-  </section>
-  {% endif %}
-  {% if conv.is_pull && !conv.reviews.is_empty() %}
-  <section>
-    <div class="sidebar-head"><h3>Reviews</h3></div>
-    <ul class="plain review-states">
-      {% for (who, verdict) in conv.reviews %}<li class="review-{{ verdict }}"><a href="/{{ who }}">{{ who }}</a></li>{% endfor %}
-    </ul>
   </section>
   {% endif %}
 </aside>

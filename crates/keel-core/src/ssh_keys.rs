@@ -129,7 +129,7 @@ impl Core {
         let Some((user_id,)) = row else {
             return Ok(None);
         };
-        self.user_by_id(user_id).await
+        Ok(self.user_by_id(user_id).await?.filter(|u| !u.disabled))
     }
 }
 

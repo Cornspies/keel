@@ -21,8 +21,8 @@ pub struct Notification {
     pub is_pull: bool,
     /// The issue's state: open, closed or merged.
     pub state: String,
-    /// Why the user is notified: assigned, mentioned, author,
-    /// participating, subscribed or watching.
+    /// Why the user is notified: assigned, review_requested, mentioned,
+    /// author, participating, subscribed or watching.
     pub reason: String,
     /// What happened last, e.g. `commented`.
     pub activity: String,
@@ -35,7 +35,8 @@ pub struct Notification {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Subscription {
     pub subscribed: bool,
-    /// `assigned`, `author`, `participating`, `watching`, `subscribed`
+    /// `assigned`, `review_requested`, `author`, `participating`,
+    /// `watching`, `subscribed`
     /// (explicitly), `unsubscribed` (explicitly) or `none`.
     pub reason: &'static str,
 }
@@ -123,9 +124,10 @@ impl Core {
     }
 
     pub async fn subscription(&self, user: &User, issue: &Issue) -> Result<Subscription> {
-        let (explicit, assigned, commented, watching): (Option<bool>, bool, bool, bool) = sqlx::query_as(
+        let (explicit, assigned, requested, commented, watching): (Option<bool>, bool, bool, bool, bool) = sqlx::query_as(
             "SELECT (SELECT subscribed FROM issue_subscriptions WHERE user_id = ?1 AND issue_id = ?2),
                     EXISTS (SELECT 1 FROM issue_assignees WHERE user_id = ?1 AND issue_id = ?2),
+                    EXISTS (SELECT 1 FROM review_requests WHERE user_id = ?1 AND issue_id = ?2),
                     EXISTS (SELECT 1 FROM comments WHERE author_id = ?1 AND issue_id = ?2
                             AND kind IN ('comment', 'inline', 'approved', 'changes_requested')),
                     EXISTS (SELECT 1 FROM watches WHERE user_id = ?1 AND repo_id = ?3)",
@@ -139,6 +141,7 @@ impl Core {
             Some(true) => (true, "subscribed"),
             Some(false) => (false, "unsubscribed"),
             None if assigned => (true, "assigned"),
+            None if requested => (true, "review_requested"),
             None if issue.is_author(user) => (true, "author"),
             None if commented => (true, "participating"),
             None if watching => (true, "watching"),
@@ -178,6 +181,9 @@ impl Core {
             for id in ids("SELECT user_id FROM issue_assignees WHERE issue_id = ?1 AND ?2 = ?2").await? {
                 recipients.entry(id).or_insert("assigned");
             }
+            for id in ids("SELECT user_id FROM review_requests WHERE issue_id = ?1 AND ?2 = ?2").await? {
+                recipients.entry(id).or_insert("review_requested");
+            }
             for name in mentions(text) {
                 if let Some(user) = self.user_by_name(&name).await? {
                     recipients.entry(user.id).or_insert("mentioned");
@@ -209,8 +215,12 @@ impl Core {
         }
 
         let now = now();
+        let actor_name = match actor {
+            Some(id) => self.user_by_id(id).await?.map(|u| u.username),
+            None => None,
+        };
         for (user_id, reason) in recipients {
-            let Some(user) = self.user_by_id(user_id).await?.filter(|u| !u.is_org()) else {
+            let Some(user) = self.user_by_id(user_id).await?.filter(|u| !u.is_org() && !u.disabled) else {
                 continue;
             };
             if self.access(&repo, Some(&user)).await? == crate::Access::None {
@@ -231,6 +241,8 @@ impl Core {
             .bind(now)
             .execute(&self.db)
             .await?;
+            self.email_notification(&user, &repo, issue, reason, actor_name.as_deref(), activity, text)
+                .await?;
         }
         Ok(())
     }

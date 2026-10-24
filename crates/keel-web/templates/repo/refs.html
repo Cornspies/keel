@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<h2>Branches</h2>
+<div class="section-head"><h2>Branches</h2>{% if repo.can_admin %}<a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/settings/branches">Branch protection</a>{% endif %}</div>
 {% if branches.is_empty() %}
 <p class="empty">No branches yet.</p>
 {% else %}
@@ -9,7 +9,7 @@
   {% for b in branches %}
   <li class="card-row">
     <div>
-      <a class="mono" href="{{ b.url }}"><strong>{{ b.name }}</strong></a>{% if b.is_default %} <span class="badge">default</span>{% endif %}
+      <a class="mono" href="{{ b.url }}"><strong>{{ b.name }}</strong></a>{% if b.is_default %} <span class="badge">default</span>{% endif %}{% if b.protected %} <span class="badge badge-protected" title="A branch protection rule applies">protected</span>{% endif %}
       <div class="muted small"><a class="muted" href="{{ b.commit.url }}">{{ b.commit.summary }}</a> · {{ b.commit.author }} · <time title="{{ b.commit.when_full }}">{{ b.commit.when }}</time></div>
     </div>
     <a class="btn btn-small mono" href="{{ b.commit.url }}">{{ b.commit.short }}</a>

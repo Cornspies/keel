@@ -5,6 +5,7 @@
   <nav class="state-tabs">
     <a href="/{{ repo.owner }}/{{ repo.name }}/issues">Issues</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/labels" class="active">Labels</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/milestones">Milestones</a>
   </nav>
 </div>
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}

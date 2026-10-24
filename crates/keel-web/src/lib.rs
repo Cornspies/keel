@@ -1,6 +1,8 @@
 //! The web frontend: server-rendered HTML pages and the git smart HTTP
 //! protocol, in one axum router.
 
+mod admin;
+mod api;
 mod assets;
 mod error;
 mod forks;
@@ -12,6 +14,9 @@ mod notifications;
 mod orgs;
 mod hooks;
 mod pages;
+mod password;
+mod protection;
+mod milestones;
 mod pulls;
 mod render;
 mod repo;
@@ -126,16 +131,22 @@ pub(crate) struct Page {
     pub js_url: &'static str,
     /// The viewer's unread notifications.
     pub unread: i64,
+    /// Whether the server sends email (password resets).
+    pub mail_enabled: bool,
+    /// The administrators' notice for every page.
+    pub banner: String,
 }
 
 impl Page {
     pub fn new(state: &AppState, viewer: Option<User>, title: impl Into<String>) -> Self {
         Self {
             unread: viewer.as_ref().and_then(|v| state.unread.get(&v.id)).unwrap_or(0),
+            mail_enabled: state.core.mail_enabled(),
+            banner: state.core.site_settings().banner,
             title: title.into(),
             site_name: state.core.config.site_name.clone(),
             viewer,
-            registration_open: state.core.config.open_registration,
+            registration_open: state.core.registration_open(),
             css_url: state.assets.css_url,
             js_url: state.assets.js_url,
         }
@@ -154,6 +165,18 @@ pub fn router(state: AppState) -> Router {
         .route("/org/{org}/members", post(orgs::set_member))
         .route("/org/{org}/members/{user}/remove", post(orgs::remove_member))
         .route("/org/{org}/delete", post(orgs::delete))
+        .route("/org/{org}/settings/hooks", get(hooks::org_index).post(hooks::org_create))
+        .route("/org/{org}/settings/hooks/{id}", get(hooks::org_show).post(hooks::org_update))
+        .route("/org/{org}/settings/hooks/{id}/delete", post(hooks::org_delete))
+        .route("/org/{org}/settings/hooks/{id}/test", post(hooks::org_test))
+        .route("/org/{org}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::org_redeliver))
+        .route("/admin", get(admin::overview))
+        .route("/admin/settings", post(admin::save_settings))
+        .route("/admin/users", get(admin::users).post(admin::create_user))
+        .route("/admin/users/{id}/admin", post(admin::set_admin))
+        .route("/admin/users/{id}/disable", post(admin::set_disabled))
+        .route("/admin/users/{id}/delete", post(admin::delete_user))
+        .route("/admin/repos", get(admin::repos))
         .route("/search", get(search::global))
         .route("/notifications", get(notifications::inbox))
         .route("/notifications/read", post(notifications::mark_all_read))
@@ -162,6 +185,11 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/account", get(settings::account))
         .route("/settings/account/email", post(settings::change_email))
         .route("/settings/account/password", post(settings::change_password))
+        .route("/settings/account/verify", post(settings::send_verification))
+        .route("/settings/notifications", get(settings::notifications).post(settings::save_notifications))
+        .route("/password/forgot", get(password::forgot_form).post(password::forgot))
+        .route("/password/reset", get(password::reset_form).post(password::reset))
+        .route("/email/verify", get(password::verify))
         .route("/settings/keys", get(settings::keys).post(settings::add_key))
         .route("/settings/keys/{id}/delete", post(settings::delete_key))
         .route("/settings/tokens", get(settings::tokens).post(settings::create_token))
@@ -192,11 +220,22 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/pull/{number}/review", post(pulls::review))
         .route("/{owner}/{repo}/watch", post(notifications::watch))
         .route("/{owner}/{repo}/issues/{number}/subscription", post(notifications::subscribe))
-        .route("/{owner}/{repo}/settings/hooks", get(hooks::index).post(hooks::create))
-        .route("/{owner}/{repo}/settings/hooks/{id}", get(hooks::show).post(hooks::update))
-        .route("/{owner}/{repo}/settings/hooks/{id}/delete", post(hooks::delete))
-        .route("/{owner}/{repo}/settings/hooks/{id}/test", post(hooks::test))
-        .route("/{owner}/{repo}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::redeliver))
+        .route("/{owner}/{repo}/settings/hooks", get(hooks::repo_index).post(hooks::repo_create))
+        .route("/{owner}/{repo}/settings/hooks/{id}", get(hooks::repo_show).post(hooks::repo_update))
+        .route("/{owner}/{repo}/settings/hooks/{id}/delete", post(hooks::repo_delete))
+        .route("/{owner}/{repo}/settings/hooks/{id}/test", post(hooks::repo_test))
+        .route("/{owner}/{repo}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::repo_redeliver))
+        .route("/{owner}/{repo}/settings/branches", get(protection::index).post(protection::create))
+        .route("/{owner}/{repo}/settings/branches/{id}", post(protection::update))
+        .route("/{owner}/{repo}/settings/branches/{id}/delete", post(protection::delete))
+        .route("/{owner}/{repo}/milestones", get(milestones::index).post(milestones::create))
+        .route("/{owner}/{repo}/milestones/new", get(milestones::new_form))
+        .route("/{owner}/{repo}/milestones/{id}/edit", get(milestones::edit_form).post(milestones::update))
+        .route("/{owner}/{repo}/milestones/{id}/state", post(milestones::set_state))
+        .route("/{owner}/{repo}/milestones/{id}/delete", post(milestones::delete))
+        .route("/{owner}/{repo}/issues/{number}/milestone", post(milestones::set_issue_milestone))
+        .route("/{owner}/{repo}/issues/{number}/reviewers", post(labels::set_reviewers))
+        .route("/{owner}/{repo}/pull/{number}/comments/{id}/apply", post(pulls::apply_suggestion))
         .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
         .route("/{owner}/{repo}/forks", get(forks::list))
         .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))
@@ -226,7 +265,11 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/git-upload-pack", post(githttp::upload_pack))
         .route("/{owner}/{repo}/git-receive-pack", post(githttp::receive_pack));
 
+    // The API authenticates with tokens only, so needs no CSRF check.
+    let api = api::routes().layer(CompressionLayer::new());
+
     web.merge(git)
+        .merge(api)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

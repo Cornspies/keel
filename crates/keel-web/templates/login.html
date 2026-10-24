@@ -9,6 +9,7 @@
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn btn-primary">Sign in</button>
   </form>
+  {% if page.mail_enabled %}<p class="muted"><a href="/password/forgot">Forgot your password?</a></p>{% endif %}
   {% if page.registration_open %}<p class="muted">New here? <a href="/register">Create an account</a>.</p>{% endif %}
 </div>
 {% endblock %}

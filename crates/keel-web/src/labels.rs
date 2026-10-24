@@ -192,3 +192,22 @@ pub async fn set_assignees(
         Err(e) => Err(e.into()),
     }
 }
+
+/// Asks people to review a pull request (writers and its author may).
+pub async fn set_reviewers(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    RawForm(body): RawForm,
+) -> AppResult {
+    let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    if access < Access::Write && !issue.is_author(&user) {
+        return Err(AppError::Forbidden);
+    }
+    match state.core.set_review_requests(&repo, &issue, &user, &form_ids(&body, "user")).await {
+        Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => Err(AppError::BadRequest(msg)),
+        Err(e) => Err(e.into()),
+    }
+}

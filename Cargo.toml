@@ -9,12 +9,15 @@ edition = "2024"
 rust-version = "1.91"
 
 [workspace.dependencies]
+regex = "1.11"
+regex-syntax = "0.8"
 keel-core = { path = "crates/keel-core" }
 keel-git = { path = "crates/keel-git" }
 keel-web = { path = "crates/keel-web" }
 keel-ssh = { path = "crates/keel-ssh" }
 keel-search = { path = "crates/keel-search" }
 keel-hooks = { path = "crates/keel-hooks" }
+keel-mail = { path = "crates/keel-mail" }
 
 anyhow = "1"
 thiserror = "2"
@@ -43,9 +46,10 @@ sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"
 form_urlencoded = "1"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "hostname", "builder", "tokio1-rustls", "aws-lc-rs", "rustls-platform-verifier"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 flate2 = "1"
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 russh = "0.64"
 tempfile = "3"
 tantivy = { version = "0.27", default-features = false, features = ["mmap", "lz4-compression"] }

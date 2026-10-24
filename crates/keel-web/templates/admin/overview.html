@@ -1,0 +1,32 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<h1>Overview</h1>
+{% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
+<div class="stat-grid">
+  <a class="stat" href="/admin/users"><strong>{{ stats.users }}</strong> accounts<span class="muted small">{{ stats.admins }} admin{% if stats.admins != 1 %}s{% endif %}{% if stats.disabled > 0 %} · {{ stats.disabled }} disabled{% endif %}</span></a>
+  <div class="stat"><strong>{{ stats.orgs }}</strong> organization{% if stats.orgs != 1 %}s{% endif %}</div>
+  <a class="stat" href="/admin/repos"><strong>{{ stats.repos }}</strong> repositories<span class="muted small">{{ stats.private_repos }} private</span></a>
+  <div class="stat"><strong>{{ stats.issues }}</strong> issues<span class="muted small">{{ stats.pulls }} pull requests</span></div>
+  <div class="stat"><strong>{{ stats.pending_webhooks }}</strong> webhooks queued<span class="muted small{% if stats.failed_webhooks > 0 %} overdue{% endif %}">{{ stats.failed_webhooks }} given up</span></div>
+  <div class="stat"><strong>{% if mail_enabled %}{{ stats.pending_mail }}{% else %}–{% endif %}</strong> emails queued<span class="muted small{% if stats.failed_mail > 0 %} overdue{% endif %}">{% if mail_enabled %}{{ stats.failed_mail }} given up{% else %}email is off{% endif %}</span></div>
+</div>
+
+<h2>Settings</h2>
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<form method="post" action="/admin/settings" class="form">
+  <label class="check"><input type="checkbox" name="registration_closed"{% if settings.registration_closed || registration_forced_closed %} checked{% endif %}{% if registration_forced_closed %} disabled{% endif %}> Close sign-ups
+    <span class="hint">{% if registration_forced_closed %}Closed by <span class="mono">--closed-registration</span>.{% else %}Only administrators can create accounts (on the accounts page).{% endif %}</span></label>
+  <label>Notice on every page <span class="hint">(optional) e.g. planned maintenance. Plain text.</span>
+    <input name="banner" value="{{ settings.banner }}" maxlength="500"></label>
+  <button class="btn btn-primary">Save</button>
+</form>
+
+<h2>Server</h2>
+<dl class="facts">
+  <dt>Version</dt><dd>keel {{ version }}</dd>
+  <dt>Data directory</dt><dd class="mono">{{ data_dir }}</dd>
+  <dt>Email</dt><dd>{% if mail_enabled %}on{% else %}off (<span class="mono">--smtp-url</span>){% endif %}</dd>
+  <dt>SSH</dt><dd>{% if ssh_enabled %}on{% else %}off{% endif %}</dd>
+  <dt>API</dt><dd><span class="mono">/api/v1</span> — see the README; authenticate with an access token.</dd>
+</dl>
+{% endblock %}

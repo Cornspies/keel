@@ -17,6 +17,12 @@ pub struct User {
     pub is_admin: bool,
     pub kind: String,
     pub created_at: i64,
+    /// Whether the user proved they receive mail at `email`.
+    pub email_verified: bool,
+    /// Which notifications are emailed: `all`, `participating` or `off`.
+    pub email_notifications: String,
+    /// Disabled by an administrator: can't sign in or use git.
+    pub disabled: bool,
 }
 
 impl User {
@@ -41,6 +47,11 @@ impl Core {
     /// Creates an account. The very first account becomes the administrator
     /// and is allowed even when registration is closed.
     pub async fn register(&self, username: &str, email: &str, password: &str) -> Result<User> {
+        self.insert_user(username, email, password, false).await
+    }
+
+    /// Creates an account; `by_admin` even when registration is closed.
+    pub(crate) async fn insert_user(&self, username: &str, email: &str, password: &str, by_admin: bool) -> Result<User> {
         validate_username(username)?;
         let email = email.trim();
         if !email.contains('@') || email.len() > 254 {
@@ -55,7 +66,7 @@ impl Core {
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE kind = 'user'")
             .fetch_one(&mut *tx)
             .await?;
-        if count > 0 && !self.config.open_registration {
+        if count > 0 && !by_admin && !self.registration_open() {
             return invalid("Registration is closed.");
         }
         let taken: Option<(String,)> =
@@ -92,7 +103,7 @@ impl Core {
         let user = sqlx::query_as::<_, User>(concat!(
             "SELECT ",
             user_columns!(),
-            " FROM users WHERE kind = 'user' AND (username = ?1 OR email = ?1)"
+            " FROM users WHERE kind = 'user' AND disabled_at IS NULL AND (username = ?1 OR email = ?1)"
         ))
         .bind(login.trim())
         .fetch_optional(&self.db)
@@ -131,30 +142,40 @@ impl Core {
         if !verify_password(current.to_owned(), user.password_hash.clone()).await? {
             return invalid("Your current password is incorrect.");
         }
+        self.set_password(user.id, new).await
+    }
+
+    /// Sets a password and signs out all sessions.
+    pub(crate) async fn set_password(&self, user_id: i64, new: &str) -> Result<()> {
         if new.chars().count() < 8 {
             return invalid("Passwords must be at least 8 characters long.");
         }
         let hash = hash_password(new.to_owned()).await?;
         let mut tx = self.db.begin().await?;
         sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
-            .bind(user.id)
+            .bind(user_id)
             .bind(hash)
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
-            .bind(user.id)
+            .bind(user_id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
     }
 
+    /// Changes the email address, which then needs verifying again.
     pub async fn change_email(&self, user_id: i64, email: &str) -> Result<()> {
         let email = email.trim();
         if !email.contains('@') || email.len() > 254 {
             return invalid("Please enter a valid email address.");
         }
-        let result = sqlx::query("UPDATE users SET email = ?2 WHERE id = ?1")
+        let result = sqlx::query(
+            "UPDATE users SET email = ?2,
+                email_verified_at = CASE WHEN email = ?2 THEN email_verified_at END
+             WHERE id = ?1",
+        )
             .bind(user_id)
             .bind(email)
             .execute(&self.db)
@@ -205,9 +226,10 @@ impl Core {
     pub async fn session_user(&self, token: &str) -> Result<Option<User>> {
         Ok(sqlx::query_as::<_, User>(
             "SELECT u.id, u.username, COALESCE(u.email, '') AS email, u.password_hash, u.is_admin,
-                u.kind, u.created_at
+                u.kind, u.created_at, u.email_verified_at IS NOT NULL AS email_verified, u.email_notifications,
+                u.disabled_at IS NOT NULL AS disabled
              FROM sessions s JOIN users u ON u.id = s.user_id
-             WHERE s.token_hash = ?1 AND s.expires_at > ?2",
+             WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.disabled_at IS NULL",
         )
         .bind(hash_token(token))
         .bind(now())

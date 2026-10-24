@@ -151,7 +151,7 @@ async fn register_page(
         username,
         email,
         first_user,
-        allowed: first_user || state.core.config.open_registration,
+        allowed: first_user || state.core.registration_open(),
     })
 }
 
@@ -172,6 +172,7 @@ pub struct RegisterForm {
 pub async fn register(State(state): State<AppState>, Form(f): Form<RegisterForm>) -> AppResult {
     match state.core.register(f.username.trim(), &f.email, &f.password).await {
         Ok(user) => {
+            state.core.send_verification(&user).await?;
             let token = state.core.create_session(user.id).await?;
             Ok((
                 [(header::SET_COOKIE, set_cookie(&state, &token))],

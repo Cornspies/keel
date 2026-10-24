@@ -198,6 +198,18 @@ async fn rpc(
         false,
         git_protocol(&headers),
     ));
+    if service == Service::ReceivePack {
+        // Branch protection, enforced by a pre-receive hook.
+        match state.core.receive_pack_env(repo.id).await {
+            Ok(env) => {
+                cmd.envs(env);
+            }
+            Err(e) => {
+                tracing::error!("branch rules: {e}");
+                return text(StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
+            }
+        }
+    }
     let mut child = match cmd.kill_on_drop(true).spawn() {
         Ok(c) => c,
         Err(e) => {

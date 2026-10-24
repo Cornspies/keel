@@ -27,6 +27,8 @@ struct AccountPage {
     page: Page,
     nav: &'static str,
     email: String,
+    verified: bool,
+    mail_enabled: bool,
     email_error: Option<String>,
     password_error: Option<String>,
     notice: Option<&'static str>,
@@ -41,6 +43,8 @@ fn account_page(
 ) -> AppResult {
     html(AccountPage {
         email: user.email.clone(),
+        verified: user.email_verified,
+        mail_enabled: state.core.mail_enabled(),
         page: Page::new(state, Some(user), "Account settings"),
         nav: "account",
         email_error,
@@ -60,7 +64,12 @@ pub async fn account(
     axum::extract::Query(q): axum::extract::Query<NoticeQuery>,
 ) -> AppResult {
     let notice = match q.saved.as_deref() {
+        Some("email") if state.core.mail_enabled() => {
+            Some("Your email address was updated. We sent a link to it to verify it.")
+        }
         Some("email") => Some("Your email address was updated."),
+        Some("verify") => Some("We sent a verification link to your email address. It works for 7 days."),
+        Some("verify-wait") => Some("We just sent a verification link; check your email (and spam folder)."),
         Some("password") => Some("Your password was changed. Other sessions were signed out."),
         _ => None,
     };
@@ -78,7 +87,12 @@ pub async fn change_email(
     Form(f): Form<EmailForm>,
 ) -> AppResult {
     match state.core.change_email(user.id, &f.email).await {
-        Ok(()) => Ok(Redirect::to("/settings/account?saved=email").into_response()),
+        Ok(()) => {
+            if let Some(user) = state.core.user_by_id(user.id).await? {
+                state.core.send_verification(&user).await?;
+            }
+            Ok(Redirect::to("/settings/account?saved=email").into_response())
+        }
         Err(keel_core::Error::Invalid(msg)) => account_page(&state, user, Some(msg), None, None),
         Err(e) => Err(e.into()),
     }
@@ -113,6 +127,57 @@ pub async fn change_password(
         Err(keel_core::Error::Invalid(msg)) => account_page(&state, user, None, Some(msg), None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub async fn send_verification(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
+    let to = if state.core.send_verification(&user).await? { "verify" } else { "verify-wait" };
+    Ok(Redirect::to(&format!("/settings/account?saved={to}")).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "settings/notifications.html")]
+struct NotificationsPage {
+    page: Page,
+    nav: &'static str,
+    setting: String,
+    email: String,
+    verified: bool,
+    mail_enabled: bool,
+    notice: Option<&'static str>,
+}
+
+pub async fn notifications(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    axum::extract::Query(q): axum::extract::Query<NoticeQuery>,
+) -> AppResult {
+    html(NotificationsPage {
+        setting: user.email_notifications.clone(),
+        email: user.email.clone(),
+        verified: user.email_verified,
+        mail_enabled: state.core.mail_enabled(),
+        notice: q.saved.is_some().then_some("Saved."),
+        page: Page::new(&state, Some(user), "Notification settings"),
+        nav: "notifications",
+    })
+}
+
+#[derive(Deserialize)]
+pub struct NotificationsForm {
+    email: String,
+}
+
+pub async fn save_notifications(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Form(f): Form<NotificationsForm>,
+) -> AppResult {
+    state.core.set_email_notifications(user.id, &f.email).await?;
+    Ok(Redirect::to("/settings/notifications?saved=1").into_response())
 }
 
 // ---------------------------------------------------------------------------

@@ -9,21 +9,32 @@ One binary, one data directory, no external services.
   and over a built-in SSH server.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags.
-- **Code search** across all repositories you can see, or within one.
+- **Code search** across all repositories you can see, or within one on any
+  branch; substrings or regular expressions.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
-  `@name` links, labels, assignees, and filtering by both.
-- **Code review:** pull requests from branches or forks, comments on lines of
-  the diff (with replies, marked outdated once the line changes), approvals
+  `@name` links, labels, assignees, milestones, and filtering by all of them.
+- **Code review:** pull requests from branches or forks, review requests,
+  comments on lines of the diff (with replies, marked outdated once the line
+  changes), suggested changes that can be applied with one click, approvals
   and change requests, and merging with a merge commit or squash, with
   conflict detection.
+- **Branch protection:** require pull requests and a number of approvals,
+  and refuse force pushes and deletion, for branches by name or pattern.
 - **Forks** that are created instantly and share disk space with the original.
 - **Notifications:** an inbox for issues and pull requests you opened, commented
   on, are assigned to or mentioned in, or whose repository you watch; with
-  per-thread subscribe/unsubscribe.
-- **Webhooks** for pushes, issues, comments, pull requests and reviews, in
-  GitHub's payload format and signed, with retries and a delivery log.
+  per-thread subscribe/unsubscribe, and optionally by email.
+- **Webhooks** for repositories and whole organizations: pushes, issues,
+  comments, pull requests and reviews, in GitHub's payload format and signed,
+  with retries and a delivery log.
+- **Email** (optional, via any SMTP server): notification emails, address
+  verification and "forgot password".
 - **People:** accounts, organizations (owners and members), per-repository
   collaborators (read/write/admin), private repositories.
+- **Administration:** a page for site administrators with statistics,
+  accounts (create, disable, delete, grant admin), all repositories, closing
+  sign-ups and a notice on every page.
+- **JSON API** in the style of GitHub's, with personal access tokens.
 
 CI is not built in; connect one with a webhook.
 
@@ -62,12 +73,62 @@ Every flag can also be set as an environment variable.
 | `--ssh-addr` | `KEEL_SSH_ADDR` | `0.0.0.0:2222` |
 | `--no-ssh` | `KEEL_NO_SSH` | SSH enabled |
 | `--ssh-host` / `--ssh-port` | `KEEL_SSH_HOST` / `KEEL_SSH_PORT` | host of `--base-url` / port of `--ssh-addr` |
-| `--closed-registration` | `KEEL_CLOSED_REGISTRATION` | open |
+| `--closed-registration` | `KEEL_CLOSED_REGISTRATION` | open (can also be closed on the admin page) |
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
 | `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks can't reach loopback/private addresses |
+| `--smtp-url` | `KEEL_SMTP_URL` | no email |
+| `--mail-from` | `KEEL_MAIL_FROM` | `<site name> <noreply@<host of --base-url>>` |
+
+To send email, point keel at an SMTP server; prefer the environment variable,
+since it contains a password:
+
+```sh
+KEEL_SMTP_URL='smtps://user:password@smtp.example.com' ./keel serve              # TLS (port 465)
+KEEL_SMTP_URL='smtp://user:password@smtp.example.com:587?tls=required' ./keel serve  # STARTTLS
+KEEL_SMTP_URL='smtp://localhost:25' ./keel serve                                 # a local relay
+```
+
+keel checks the configuration at startup and logs whether it can reach the
+server. Without email everything else works; only notification emails and
+password resets are unavailable.
 
 Behind a reverse proxy with TLS, set `--base-url https://git.example.com`:
 clone URLs use it, and session cookies are marked `Secure`.
+
+### JSON API
+
+The API lives under `/api/v1` and follows GitHub's REST API where that's easy:
+the same paths and field names, `page`/`per_page` with `Link` headers, and
+`{"message": "…"}` errors. Authenticate with a personal access token (Settings
+→ Access tokens); without one, public repositories can be read. Read-only
+tokens can only read.
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/v1/user
+curl -H "Authorization: Bearer $TOKEN" -d '{"title":"Crash on start","labels":["bug"]}' \
+     http://localhost:3000/api/v1/repos/ada/engine/issues
+curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
+     http://localhost:3000/api/v1/repos/ada/engine/pulls/7/merge
+```
+
+| Endpoint | |
+| --- | --- |
+| `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories |
+| `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
+| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `description`, `private` |
+| `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
+| `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
+| `GET /repos/{owner}/{repo}/contents/{path}` | `ref`; files base64-encoded |
+| `GET /repos/{owner}/{repo}/labels`, `/milestones` | |
+| `GET`, `POST /repos/{owner}/{repo}/issues` | `state`, `labels`, `assignee`, `milestone` |
+| `GET`, `PATCH /repos/{owner}/{repo}/issues/{n}` | `title`, `body`, `state`, `labels`, `assignees`, `milestone` |
+| `GET`, `POST /repos/{owner}/{repo}/issues/{n}/comments` | |
+| `GET`, `POST /repos/{owner}/{repo}/pulls` | `title`, `body`, `head` (`branch` or `owner:branch`), `base` |
+| `GET /repos/{owner}/{repo}/pulls/{n}` | adds `approvals`, `required_approvals`, `merge_blocked_by` |
+| `POST /repos/{owner}/{repo}/pulls/{n}/reviews` | `event`: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` |
+| `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge` or `squash`; `delete_branch` |
+
+Issue lists don't include pull requests (unlike GitHub's); use `/pulls`.
 
 ## Layout
 
@@ -76,15 +137,18 @@ crates/
   keel        the binary (CLI, wiring)
   keel-core   config, SQLite schema + migrations, users, organizations,
               sessions, SSH keys, access tokens, repositories and forks,
-              permissions, issues, labels, assignees, pull requests, reviews,
-              notifications, webhook queue and payloads, push events
+              permissions, issues, labels, assignees, milestones, pull
+              requests, reviews and suggestions, branch protection (and the
+              pre-receive hook), notifications, webhook queue and payloads,
+              push events, site administration
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
   keel-hooks  webhook delivery worker (reqwest)
-  keel-web    axum router: server-rendered pages (askama templates), smart
-              HTTP git protocol, background cache warming and search indexing,
-              assets (compiled into the binary)
+  keel-mail   SMTP sender for the mail outbox (lettre)
+  keel-web    axum router: server-rendered pages (askama templates), the
+              JSON API, smart HTTP git protocol, background cache warming and
+              search indexing, assets (compiled into the binary)
   keel-ssh    built-in SSH server (russh): public-key auth, git over SSH
 scripts/
   smoke-test.sh   end-to-end test with real git, ssh and curl
@@ -95,7 +159,8 @@ scripts/
 **Pages are rendered on the server** with compile-time-checked askama
 templates. There is no frontend build. The ~100 lines of JavaScript
 only add conveniences (copy buttons, late-loaded commit info, opening the
-line-comment form in place), so every page works without them.
+line-comment form in place, starting a suggested change), so every page works
+without them.
 
 **git itself serves clones and pushes.** keel authenticates and
 authorizes, then streams request and response bodies straight into and out of
@@ -132,6 +197,15 @@ insensitively. After a push only changed files are reindexed. On git.git: the
 initial index takes 1.7 s (11 MB), a push reindexes in about 25 ms, and queries
 take 2–170 ms.
 
+Other branches aren't indexed. Searching one diffs it against the indexed
+commit: unchanged files come from the index, and the files that differ (a few,
+for a typical branch) are scanned directly. So results are exact for any
+branch, and for the default branch right after a push. Regular expressions
+(`fn \w+\(`, or a query written `/like this/`) use the trigrams of the
+literal text every match must contain; one without any (like `\d+`) can only
+search within a repository, by scanning it. The `regex` crate guarantees
+linear-time matching, so no pattern can stall the server.
+
 **Forks** are `git clone --bare --local` copies whose objects are hardlinked,
 so forking git.git takes about 40 ms and almost no disk space, and a fork
 never depends on its parent (deleting either is safe). Forks of private
@@ -155,6 +229,23 @@ diff, the line still says the same thing, so the comment is shown there;
 otherwise it's shown as outdated in the conversation, with the diff lines it
 was made on (stored with it).
 
+**Branch protection** applies to everyone, administrators included. A rule
+for an exact branch name wins over patterns; among patterns the longest
+matching one applies. Merging checks the rule's required approvals: only
+approvals from people with write access (other than the author) count, any of
+them requesting changes blocks merging, and by default reviews only count for
+the commit they were given on. Pushes are checked by a `pre-receive` hook:
+keel points `git receive-pack` at its own hook directory (`data/hooks`) and
+passes the repository's rules in the environment; the hook (`keel hook
+pre-receive`) refuses updates to protected branches that aren't allowed, with
+a message for the person pushing. Repositories without rules don't run it.
+
+**Suggested changes** are ```` ```suggestion ```` blocks in line comments,
+shown as a diff of the commented line. Applying one commits the edit to the
+pull request's branch without a working tree (a new blob, tree and commit
+with libgit2, then a compare-and-swap ref update), as the person applying it,
+if they can push there and the file hasn't changed since.
+
 **Labels** come from a fixed palette of ten colors, so they read well in light
 and dark mode without inline styles (which the Content Security Policy
 forbids). New repositories start with six common labels.
@@ -168,6 +259,19 @@ timeout and retries failures after 30 s, 2 min, 10 min and 1 h. The delivery
 log keeps the last 100 per hook, with payload and response, and any of them
 can be redelivered. Push payloads list what each ref update added: the
 refs are snapshotted before `git receive-pack` runs and compared afterwards.
+
+**Email** goes through an outbox table in SQLite, like webhooks, and a
+background sender (retries after 1 min, 5 min, 30 min and 2 h; addresses the
+server rejects permanently aren't retried). Notification emails are plain
+text, quote the comment, and carry `References` headers per issue so mail
+clients thread them. They only go to verified addresses (verified by a link
+sent at sign-up or after changing the address, or by a password reset), so
+nobody can sign someone else's address up for mail. By default people get
+emails about threads they take part in, not about everything in watched
+repositories; each person can change that.
+
+**Organization webhooks** get the events of all of the organization's
+repositories, in addition to each repository's own hooks.
 
 Webhooks don't follow redirects or use proxies. Unless
 `--webhook-allow-private` is set, they can't reach loopback, private, link-local
@@ -205,6 +309,10 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 - Passwords: Argon2id. Session tokens are 256-bit random values, stored only
   as SHA-256 hashes, sent in `HttpOnly; SameSite=Lax` cookies.
 - State-changing requests must come from the same origin (CSRF).
+- Password reset and verification links are single-use, expire (1 hour and
+  7 days), are stored only as SHA-256 hashes and are sent at most once a
+  minute per account. Asking for a reset says the same thing whether or not an
+  account has that address. A reset signs out all sessions.
 - Webhook deliveries are signed with HMAC-SHA256 when a secret is set
   (`X-Hub-Signature-256: sha256=…`), and can't target internal addresses by
   default (see above).
@@ -217,15 +325,19 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   them, so their names don't leak. That includes fork lists and the
   repositories offered on the compare page.
 - Only `git-upload-pack` and `git-receive-pack` can be run over SSH.
-  Repositories never run hooks, and `GIT_PROTOCOL` values are validated before
-  being passed to git.
+  Repositories never run their own hooks (only keel's branch protection
+  hook), and `GIT_PROTOCOL` values are validated before being passed to git.
+- The API only accepts access tokens, never passwords or cookies, so it can't
+  be used cross-site or to guess passwords.
+- Administrators can disable accounts: sessions end at once, and passwords,
+  tokens and SSH keys stop working.
 
 ## Development
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~180 end-to-end checks (needs git, ssh, curl, python3, openssl)
+cargo build && scripts/smoke-test.sh      # ~300 end-to-end checks (needs git, ssh, curl, python3, openssl)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -234,10 +346,7 @@ run automatically at startup.
 
 ## Ideas
 
-- Email notifications (the inbox and recipients are there; it needs SMTP
-  settings), and webhooks for whole organizations.
-- Branch protection (e.g. require an approval before merging), review
-  requests, suggested changes in line comments, milestones.
-- An admin page (users, instance settings) and a JSON API (tokens are ready
-  for it).
-- Searching other branches, and regular-expression search.
+- Commit statuses, so CI can report results on pull requests (and branch
+  protection can require them).
+- Renaming and transferring repositories.
+- Two-factor authentication.

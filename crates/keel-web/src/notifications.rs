@@ -33,6 +33,7 @@ pub(crate) struct NotificationView {
 fn reason_label(reason: &str) -> &'static str {
     match reason {
         "assigned" => "Assigned",
+        "review_requested" => "Review requested",
         "mentioned" => "Mentioned",
         "author" => "Author",
         "participating" => "Participating",

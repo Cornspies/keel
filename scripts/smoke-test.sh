@@ -15,6 +15,7 @@ FAILED=0
 
 cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null
+    [ -n "${SMTP_PID:-}" ] && kill "$SMTP_PID" 2>/dev/null
     if [ -n "${SMOKE_KEEP:-}" ]; then
         rm -rf "$SMOKE_KEEP" && cp -r "$T/data" "$SMOKE_KEEP"
     fi
@@ -43,8 +44,43 @@ export GIT_COMMITTER_NAME=Ada GIT_COMMITTER_EMAIL=ada@example.com
 ssh-keygen -q -t ed25519 -N "" -C ada@test -f "$T/key"
 export GIT_SSH_COMMAND="ssh -i $T/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
+# An SMTP server that saves each message to $T/mail/<n>.eml.
+SMTP_PORT=$((HTTP_PORT + 3))
+mkdir -p "$T/mail"
+python3 - "$SMTP_PORT" "$T/mail" <<'PY' &
+import email, socketserver, sys, itertools
+port, out = int(sys.argv[1]), sys.argv[2]
+n = itertools.count()
+class H(socketserver.StreamRequestHandler):
+    def handle(self):
+        say = lambda s: self.wfile.write(s.encode() + b"\r\n")
+        say("220 smoke ESMTP")
+        while line := self.rfile.readline().decode():
+            cmd = line.strip().upper()
+            if cmd.startswith("DATA"):
+                say("354 go ahead")
+                data = []
+                while (l := self.rfile.readline().decode()).rstrip("\r\n") != ".":
+                    data.append(l)
+                # Save headers and the decoded body (lines may be quoted-printable).
+                msg = email.message_from_string("".join(data))
+                text = "".join(f"{k}: {v}\n" for k, v in msg.items()) + "\n"
+                text += msg.get_payload(decode=True).decode()
+                open(f"{out}/{next(n)}.eml", "w").write(text)
+                say("250 queued")
+            elif cmd.startswith("QUIT"):
+                say("221 bye"); return
+            else:
+                say("250 ok")
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+socketserver.ThreadingTCPServer(("127.0.0.1", port), H).serve_forever()
+PY
+SMTP_PID=$!
+for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$SMTP_PORT) 2>/dev/null && break; sleep 0.1; done
+
 "$BIN" serve --data-dir "$T/data" --http-addr "127.0.0.1:$HTTP_PORT" \
-    --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private >"$T/server.log" 2>&1 &
+    --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
+    --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" >"$T/server.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -196,6 +232,18 @@ check "global search finds public code" contains "$(curl -s -b "$T/eve" "$B/sear
 check "global search hides private repos" bash -c "! curl -s -b '$T/eve' '$B/search?q=fn+main' | grep -q 'ada/secret'"
 check "collaborators find private code" contains "$(curl -s -b "$T/bob" "$B/search?q=fn+main")" "ada/secret"
 check "short queries are explained" contains "$(curl -s "$B/search?q=fn")" "at least 3"
+git -C "$W" checkout -q -b searchable main
+printf 'let zebra_marker = 42;\n' >"$W/zoo.rs" && git -C "$W" add -A && git -C "$W" commit -qm "Add zoo"
+git -C "$W" push -q "$ADA_HTTP" searchable && git -C "$W" checkout -q main
+check "other branches are searchable" contains "$(curl -s "$B/ada/engine/search?q=zebra_marker&ref=searchable")" "zoo.rs"
+check "the default branch doesn't have it" contains "$(curl -s "$B/ada/engine/search?q=zebra_marker")" "No code matches"
+check "and still finds the rest on the branch" contains "$(curl -s "$B/ada/engine/search?q=fn+main&ref=searchable")" "src/main.rs"
+check "regular expressions" contains "$(curl -s "$B/ada/engine/search?q=zebra_%5Cw%2B+%3D+%5Cd%2B&regex=1&ref=searchable")" "<mark>zebra_marker = 42</mark>"
+check "written /like this/" contains "$(curl -s "$B/ada/engine/search?q=%2Ffn%5Cs%2Bmain%2F")" "src/main.rs"
+check "without literal text in one repository" contains "$(curl -s "$B/ada/engine/search?q=%5Cd%7B2%7D&regex=1&ref=searchable")" "zoo.rs"
+check "invalid expressions are explained" contains "$(curl -s "$B/ada/engine/search?q=(&regex=1")" "valid regular expression"
+check "global regular expressions" contains "$(curl -s "$B/search?q=fn%5Cs%2Bmain&regex=1")" "src/main.rs"
+check "need literal text" contains "$(curl -s "$B/search?q=%5Cd%2B&regex=1")" "literal text"
 
 echo "== forks"
 check "bob forks ada/engine" is "$(post "$T/bob" /ada/engine/fork owner=bob name=engine)" 303
@@ -314,6 +362,10 @@ check "redeliver" is "$(post "$T/ada" "/ada/engine/settings/hooks/$HOOK/deliveri
 redelivered() { for _ in $(seq 1 50); do [ "$(ls "$T"/hooks/*.json | wc -l)" -gt "$BEFORE" ] && return 0; sleep 0.1; done; return 1; }
 check "redelivery arrives" redelivered
 check "invalid URLs are rejected" contains "$(curl -s -b "$T/ada" -H "$O" -d "url=ftp://x&which=push" "$B/ada/engine/settings/hooks")" "start with http"
+check "org owners add organization webhooks" is "$(post "$T/ada" /org/acme/settings/hooks "url=http://127.0.0.1:$HOOK_PORT/org" which=push active=on)" 303
+check "members can't" is "$(status -b "$T/eve" "$B/org/acme/settings/hooks")" 403
+git -C "$W" push -q -f "http://ada:password-ada@127.0.0.1:$HTTP_PORT/acme/tool.git" main
+check "pushes to its repositories reach it" received push '"full_name":"acme/tool"'
 kill "$HOOK_PID" 2>/dev/null
 
 echo "== notifications"
@@ -337,12 +389,170 @@ check "wrong current password is rejected" contains "$(curl -s -b "$T/bob" -H "$
 check "change password" is "$(post "$T/bob" /settings/account/password current=password-bob new=password-new confirm=password-new)" 303
 check "still signed in after password change" contains "$(curl -s -b "$T/bob" "$B/settings/account")" "bob@example.com"
 
+echo "== email"
+mail_to() { # mail_to <address> <text>: waits up to 5s for a message to <address> containing <text>
+    for _ in $(seq 1 50); do
+        for m in "$T"/mail/*.eml; do
+            [ -e "$m" ] || continue
+            if grep -qi "^To: .*$1" "$m" && grep -q -- "$2" "$m"; then echo "$m"; return 0; fi
+        done
+        sleep 0.1
+    done
+    echo "no mail to $1 containing '$2'"
+    return 1
+}
+check "signing up sends a verification link" mail_to ada@example.com "/email/verify?token="
+VERIFY=$(grep -o '/email/verify?token=[A-Za-z0-9_-]*' "$(mail_to ada@example.com /email/verify)" | head -1)
+check "the link verifies the address" contains "$(curl -s "$B$VERIFY")" "is verified"
+check "account settings show it" contains "$(curl -s -b "$T/ada" "$B/settings/account")" "Verified"
+check "email everything" is "$(post "$T/ada" /settings/notifications email=all)" 303
+check "bob opens an issue" is "$(post "$T/bob" /ada/engine/issues title="Mail me" body="Watch this")" 303
+check "watchers get notification emails" mail_to ada@example.com "Subject: \[ada/engine\] Mail me"
+check "threaded by issue" bash -c "grep -q '^References: <ada/engine/issues/' '$(mail_to ada@example.com 'Mail me')'"
+check "unverified addresses get none" bash -c "! grep -l 'Mail me' '$T'/mail/*.eml | xargs grep -qi '^To: .*eve@'"
+check "login offers password resets" contains "$(curl -s "$B/login")" "Forgot your password?"
+check "unknown addresses look the same" contains "$(curl -s -H "$O" -d "email=nobody@example.com" "$B/password/forgot")" "Check your email"
+check "request a reset" contains "$(curl -s -H "$O" -d "email=eve@example.com" "$B/password/forgot")" "Check your email"
+RESET=$(grep -o 'token=[A-Za-z0-9_-]*' "$(mail_to eve@example.com /password/reset)" | head -1 | cut -d= -f2)
+check "reset form" is "$(status "$B/password/reset?token=$RESET")" 200
+check "set a new password" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/eve2" -H "$O" --data-urlencode "token=$RESET" -d "new=password-reset&confirm=password-reset" "$B/password/reset")" 303
+check "signed in afterwards" contains "$(curl -s -b "$T/eve2" "$B/settings/account")" "eve@example.com"
+check "old sessions are signed out" is "$(status -b "$T/eve" "$B/settings/account")" 303
+check "the new password works" contains "$(curl -s -H "$O" -d "login=eve&password=password-reset" -o /dev/null -w '%{http_code}' "$B/login")" 303
+check "links work once" contains "$(curl -s "$B/password/reset?token=$RESET")" "expired"
+
+echo "== branch protection"
+check "readers can't manage branch rules" is "$(status -b "$T/eve2" "$B/ada/engine/settings/branches")" 403
+check "protect main" is "$(post "$T/ada" /ada/engine/settings/branches pattern=main require_pull=on required_approvals=1 dismiss_stale=on)" 303
+check "bad patterns are rejected" contains "$(curl -s -b "$T/ada" -H "$O" -d "pattern=refs/heads/x&required_approvals=0" "$B/ada/engine/settings/branches")" "pattern like"
+check "branches page marks it" contains "$(curl -s "$B/ada/engine/branches")" "badge-protected"
+git -C "$W" checkout -q main && git -C "$W" fetch -q "$ADA_HTTP" main && git -C "$W" reset -q --hard FETCH_HEAD
+MAIN=$(git -C "$W" rev-parse HEAD)
+printf 'speed = 1\n' >"$W/config.txt" && git -C "$W" add -A && git -C "$W" commit -qm "Add config"
+check "direct pushes are refused" bash -c "git -C '$W' push '$ADA_HTTP' main 2>&1 | grep -q 'must be made through a pull request'"
+check "over SSH too" bash -c "git -C '$W' push 'ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git' main 2>&1 | grep -q 'protected'"
+check "main didn't move" is "$(git ls-remote "$B/ada/engine.git" refs/heads/main | cut -f1)" "$MAIN"
+check "deleting it is refused" bash -c "git -C '$W' push '$ADA_HTTP' :main 2>&1 | grep -q \"can't be deleted\""
+check "other branches can be pushed" git -C "$W" push -q "$ADA_HTTP" main:tune
+check "open a pull request into it" is "$(post "$T/ada" /ada/engine/pulls base=main head=tune title="Tune speed")" 303
+PP=$(curl -s "$B/ada/engine/pulls" | grep -o 'href="/ada/engine/pull/[0-9]*"' | head -1 | grep -o '[0-9]*')
+check "merge box explains the rule" contains "$(curl -s -b "$T/ada" "$B/ada/engine/pull/$PP")" "Merging is blocked"
+check "merging without approval is refused" contains "$(curl -s -b "$T/ada" -H "$O" -d style=merge "$B/ada/engine/pull/$PP/merge")" "main is protected"
+
+echo "== review requests and suggestions"
+check "make bob a writer" is "$(post "$T/ada" /ada/engine/collaborators username=bob role=write)" 303
+BOB_ID=$(curl -s -b "$T/ada" "$B/ada/engine/pull/$PP" | grep -A3 '/reviewers"' | grep -o 'name="user" value="[0-9]*"' | head -1 | grep -o '[0-9]*')
+check "eve can't request reviews" is "$(post "$T/eve2" /ada/engine/issues/$PP/reviewers "user=$BOB_ID")" 403
+check "ask bob to review" is "$(post "$T/ada" /ada/engine/issues/$PP/reviewers "user=$BOB_ID")" 303
+check "the request is in the timeline" contains "$(curl -s "$B/ada/engine/pull/$PP")" "requested a review from"
+check "bob is notified" contains "$(curl -s -b "$T/bob" "$B/notifications")" "Review requested"
+check "filter by review requests" contains "$(curl -s "$B/ada/engine/pulls?review_requested=bob")" "Tune speed"
+FILES=$(curl -s -b "$T/bob" "$B/ada/engine/pull/$PP/files")
+HEAD=$(grep -o 'name="head" value="[0-9a-f]*"' <<<"$FILES" | head -1 | cut -d'"' -f4)
+check "lines offer suggestions" contains "$FILES" "Suggest a change"
+check "bob suggests a change" is "$(post "$T/bob" /ada/engine/pull/$PP/comments path=config.txt side=new line=1 "head=$HEAD" body=$'Faster:\n```suggestion\nspeed = 2\n```')" 303
+check "it shows as a change" contains "$(curl -s "$B/ada/engine/pull/$PP/files")" "Suggested change"
+check "readers can't apply it" bash -c "! curl -s -b '$T/eve2' '$B/ada/engine/pull/$PP/files' | grep -q 'Apply suggestion'"
+APPLY=$(curl -s -b "$T/ada" "$B/ada/engine/pull/$PP/files" | grep -o 'pull/[0-9]*/comments/[0-9]*/apply' | head -1)
+check "ada applies it" is "$(post "$T/ada" "/ada/engine/$APPLY" x=1)" 303
+check "the branch has the change" is "$(curl -s "$B/ada/engine/raw/tune/config.txt")" "speed = 2"
+check "applying twice is refused" is "$(post "$T/ada" "/ada/engine/$APPLY" x=1)" 400
+check "bob approves" is "$(post "$T/bob" /ada/engine/pull/$PP/review verdict=approve)" 303
+check "the request is done" bash -c "! curl -s '$B/ada/engine/pulls?review_requested=bob' | grep -q 'Tune speed'"
+check "merge box counts the approval" contains "$(curl -s -b "$T/ada" "$B/ada/engine/pull/$PP")" "1 approving review"
+check "merge it" is "$(post "$T/ada" /ada/engine/pull/$PP/merge style=squash delete_branch=on)" 303
+check "main has the suggestion" is "$(curl -s "$B/ada/engine/raw/main/config.txt")" "speed = 2"
+
+echo "== milestones"
+check "readers can't create milestones" is "$(post "$T/eve2" /ada/engine/milestones title=v1)" 403
+check "create a milestone" is "$(post "$T/ada" /ada/engine/milestones title=v1.0 due_on=2030-01-01 description="First release")" 303
+check "bad dates are rejected" contains "$(curl -s -b "$T/ada" -H "$O" -d "title=x&due_on=soon" "$B/ada/engine/milestones")" "YYYY-MM-DD"
+MS=$(curl -s -b "$T/ada" "$B/ada/engine/milestones" | grep -o 'milestones/[0-9]*/edit' | head -1 | grep -o '[0-9]*')
+check "milestones are listed" contains "$(curl -s "$B/ada/engine/milestones")" "Due by 2030-01-01"
+check "add an issue to it" is "$(post "$T/ada" /ada/engine/issues/1/milestone "milestone=$MS")" 303
+check "the issue shows it" contains "$(curl -s "$B/ada/engine/issues/1")" "added this to the"
+check "progress counts it" contains "$(curl -s "$B/ada/engine/milestones")" "1 open"
+check "filter by milestone" contains "$(curl -s "$B/ada/engine/issues?milestone=v1.0")" "It crashes on start"
+check "close the issue" is "$(post "$T/ada" /ada/engine/issues/1/comments action=close)" 303
+check "progress moves" contains "$(curl -s "$B/ada/engine/milestones")" "<strong>100%</strong>"
+check "close the milestone" is "$(post "$T/ada" /ada/engine/milestones/$MS/state to=closed)" 303
+check "closed milestones are listed apart" contains "$(curl -s "$B/ada/engine/milestones?state=closed")" "v1.0"
+
+echo "== API"
+API=$B/api/v1
+api() { # api <token> <method> <path> [curl args...]: prints the body
+    local tok=$1 m=$2 p=$3
+    shift 3
+    curl -s -X "$m" -H "Authorization: Bearer $tok" -H "Content-Type: application/json" "$@" "$API$p"
+}
+api_status() { # api_status <token> <method> <path> [curl args...]
+    local tok=$1 m=$2 p=$3
+    shift 3
+    curl -s -o /dev/null -w '%{http_code}' -X "$m" -H "Authorization: Bearer $tok" -H "Content-Type: application/json" "$@" "$API$p"
+}
+field() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
+check "version" contains "$(curl -s "$API/version")" '"version"'
+check "anonymous /user needs a token" is "$(status "$API/user")" 401
+check "bad tokens are refused" contains "$(api keel_nope GET /user)" "Bad credentials"
+check "passwords don't work" is "$(curl -s -o /dev/null -w '%{http_code}' -u ada:password-ada "$API/user")" 401
+check "the token's user" is "$(api "$RW" GET /user | field '["login"]')" ada
+check "repository" is "$(curl -s "$API/repos/ada/engine" | field '["default_branch"]')" main
+check "private repositories are hidden" is "$(status "$API/repos/ada/secret")" 404
+check "read-only tokens read them" is "$(api_status "$RO" GET /repos/ada/secret)" 200
+check "but can't write" contains "$(api "$RO" POST /repos/ada/engine/issues -d '{"title":"x"}')" "read-only"
+check "create an issue" is "$(api_status "$RW" POST /repos/ada/engine/issues -d '{"title":"From the API","body":"Hi","labels":["bug"]}')" 201
+AI=$(api "$RW" GET "/repos/ada/engine/issues?labels=bug" | field '[0]["number"]')
+check "list issues by label" is "$(api "$RW" GET "/repos/ada/engine/issues?labels=bug" | field '[0]["title"]')" "From the API"
+check "comment on it" is "$(api_status "$RW" POST "/repos/ada/engine/issues/$AI/comments" -d '{"body":"Via curl"}')" 201
+check "comments are listed" is "$(curl -s "$API/repos/ada/engine/issues/$AI/comments" | field '[0]["body"]')" "Via curl"
+check "close it" is "$(api "$RW" PATCH "/repos/ada/engine/issues/$AI" -d '{"state":"closed","milestone":null}' | field '["state"]')" closed
+check "file contents" is "$(curl -s "$API/repos/ada/engine/contents/config.txt" | field '["content"]' | base64 -d)" "speed = 2"
+check "directory listings" contains "$(curl -s "$API/repos/ada/engine/contents")" '"README.md"'
+check "branches say what's protected" is "$(curl -s "$API/repos/ada/engine/branches/main" | field '["protected"]')" True
+check "commits are paged with Link headers" contains "$(curl -s -D - -o /dev/null "$API/repos/ada/engine/commits?per_page=1")" 'rel="next"'
+check "unknown endpoints are JSON 404s" contains "$(curl -s "$API/nope")" '"message"'
+git -C "$W" checkout -q -b api-change main~1 2>/dev/null || git -C "$W" checkout -q -b api-change
+git -C "$W" fetch -q "$ADA_HTTP" main && git -C "$W" reset -q --hard FETCH_HEAD
+echo "api" >"$W/api.txt" && git -C "$W" add -A && git -C "$W" commit -qm "Add api.txt"
+git -C "$W" push -q "$ADA_HTTP" api-change
+check "open a pull request" is "$(api_status "$RW" POST /repos/ada/engine/pulls -d '{"title":"API change","head":"api-change","base":"main"}')" 201
+AP=$(api "$RW" GET /repos/ada/engine/pulls | field '[0]["number"]')
+check "it says why it can't be merged yet" contains "$(curl -s "$API/repos/ada/engine/pulls/$AP" | field '["merge_blocked_by"]')" "approving review"
+check "merging is refused" is "$(api_status "$RW" PUT "/repos/ada/engine/pulls/$AP/merge" -d '{}')" 405
+page=$(curl -s -b "$T/bob" -H "$O" --data-urlencode "name=api" --data-urlencode "write=on" "$B/settings/tokens")
+BOBTOK=$(grep -o 'value="keel_[A-Za-z0-9_-]*"' <<<"$page" | cut -d'"' -f2)
+check "bob approves through the API" is "$(api "$BOBTOK" POST "/repos/ada/engine/pulls/$AP/reviews" -d '{"event":"APPROVE"}' | field '["state"]')" APPROVED
+check "merge through the API" is "$(api "$RW" PUT "/repos/ada/engine/pulls/$AP/merge" -d '{"merge_method":"squash","delete_branch":true}' | field '["merged"]')" True
+check "main has it" is "$(curl -s "$B/ada/engine/raw/main/api.txt")" api
+check "create a repository" is "$(api_status "$RW" POST /user/repos -d '{"name":"from-api","private":true}')" 201
+check "it's private" is "$(status "$API/repos/ada/from-api")" 404
+check "delete it" is "$(api_status "$RW" DELETE /repos/ada/from-api)" 204
+
+echo "== administration"
+check "others don't see it" is "$(status -b "$T/bob" "$B/admin")" 404
+check "overview" contains "$(curl -s -b "$T/ada" "$B/admin")" "accounts"
+check "close sign-ups and post a notice" is "$(post "$T/ada" /admin/settings registration_closed=on banner="Maintenance tonight")" 303
+check "the notice shows everywhere" contains "$(curl -s "$B/ada/engine")" "Maintenance tonight"
+check "sign-ups are closed" contains "$(curl -s -H "$O" -d "username=yan&email=yan@example.com&password=password-yan" "$B/register")" "closed"
+check "admins still create accounts" is "$(post "$T/ada" /admin/users username=zed email=zed@example.com password=password-zed)" 303
+check "the new account signs in" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/zed" -H "$O" -d "login=zed&password=password-zed" "$B/login")" 303
+Z=$(curl -s -b "$T/ada" "$B/admin/users?q=zed" | grep -o 'admin/users/[0-9]*/disable' | head -1 | grep -o '[0-9]*')
+check "disable it" is "$(post "$T/ada" "/admin/users/$Z/disable" to=on)" 303
+check "which signs it out" is "$(status -b "$T/zed" "$B/settings/account")" 303
+check "and keeps it out" contains "$(curl -s -H "$O" -d "login=zed&password=password-zed" "$B/login")" "Incorrect"
+check "the last admin stays" contains "$(curl -s -b "$T/ada" -H "$O" -d to=off "$B/admin/users/1/admin")" "at least one administrator"
+check "delete the account" is "$(post "$T/ada" "/admin/users/$Z/delete" x=1)" 303
+check "it's gone" is "$(status "$B/zed")" 404
+check "reopen sign-ups" is "$(post "$T/ada" /admin/settings banner=)" 303
+check "the notice is gone" bash -c "! curl -s '$B/' | grep -q 'Maintenance tonight'"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
-    /notifications "/notifications?all=1" /ada/engine/settings/hooks /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
+    /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
+    /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
     /org/acme/settings /settings/account /settings/keys /settings/tokens; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done

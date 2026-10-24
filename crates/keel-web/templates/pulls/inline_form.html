@@ -4,5 +4,5 @@
   <input type="hidden" name="line" value="{{ l.line }}">
   <input type="hidden" name="head" value="{{ ic.head }}">
   <textarea name="body" rows="4" placeholder="Comment on this line. Markdown is supported." required autofocus></textarea>
-  <div class="row-actions"><a class="btn btn-small" href="?#{{ l.anchor }}">Cancel</a> <button class="btn btn-primary btn-small">Add comment</button></div>
+  <div class="row-actions">{% if l.side == "new" %}<button type="button" class="btn btn-small suggest-button" data-suggest data-text="{{ l.content }}" hidden title="Propose new text for this line, which people who can push may apply">Suggest a change</button> {% endif %}<a class="btn btn-small" href="?#{{ l.anchor }}">Cancel</a> <button class="btn btn-primary btn-small">Add comment</button></div>
 </form>

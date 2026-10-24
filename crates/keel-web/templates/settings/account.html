@@ -9,6 +9,17 @@
   <label>Email address <input name="email" type="email" value="{{ email }}" autocomplete="email" required></label>
   <button class="btn">Update email</button>
 </form>
+{% if mail_enabled %}
+{% if verified %}
+<p class="muted small verified">✓ Verified</p>
+{% else %}
+<form method="post" action="/settings/account/verify" class="form form-inline">
+  <span class="muted">Not verified yet, so you won't get notification emails.</span>
+  <input type="hidden" name="x" value="1">
+  <button class="btn btn-small">Send verification email</button>
+</form>
+{% endif %}
+{% endif %}
 
 <h2>Password</h2>
 {% if let Some(e) = password_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}

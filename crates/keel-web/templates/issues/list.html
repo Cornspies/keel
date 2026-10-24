@@ -21,6 +21,15 @@
       {% for (name, url, on) in assignee_filters %}<a href="{{ url }}"{% if *on %} class="current"{% endif %}>{{ name }}</a>{% endfor %}
     </div>
   </details>
+  <details class="dropdown dropdown-right">
+    <summary class="btn btn-small">Milestone</summary>
+    <div class="dropdown-menu">
+      {% for (title, url, on) in milestone_filters %}<a href="{{ url }}"{% if *on %} class="current"{% endif %}>{{ title }}</a>{% endfor %}
+      {% if milestone_filters.is_empty() %}<span class="muted small menu-note">No open milestones</span>{% endif %}
+      <a href="/{{ repo.owner }}/{{ repo.name }}/milestones" class="menu-footer">Manage milestones</a>
+    </div>
+  </details>
+  {% if let Some((url, on)) = review_filter %}<a class="btn btn-small{% if *on %} btn-selected{% endif %}" href="{{ url }}" title="Pull requests waiting for your review">Review requested</a>{% endif %}
   {% if pulls %}
   <a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/compare">New pull request</a>
   {% else if signed_in %}

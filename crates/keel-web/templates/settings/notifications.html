@@ -1,0 +1,22 @@
+{% extends "settings/layout.html" %}
+{% block settings %}
+<h1>Notifications</h1>
+{% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
+<p class="muted">Your <a href="/notifications">inbox</a> lists issues and pull requests with new activity that you opened, commented on, are assigned to or mentioned in, subscribed to, or whose repository you watch.</p>
+
+<h2>Email</h2>
+{% if !mail_enabled %}
+<p class="flash">This server doesn't send email (an administrator can set it up with <span class="mono">--smtp-url</span>).</p>
+{% else if !verified %}
+<p class="flash">Emails go only to verified addresses. <a href="/settings/account">Verify {{ email }}</a> first.</p>
+{% endif %}
+<form method="post" action="/settings/notifications" class="form">
+  <fieldset class="hook-events">
+    <legend>Also email me</legend>
+    <label class="check"><input type="radio" name="email" value="participating"{% if setting == "participating" %} checked{% endif %}> About what I take part in <span class="hint">Issues and pull requests you opened, commented on, are assigned to, are mentioned in or subscribed to.</span></label>
+    <label class="check"><input type="radio" name="email" value="all"{% if setting == "all" %} checked{% endif %}> About everything in my inbox <span class="hint">Also all activity in repositories you watch.</span></label>
+    <label class="check"><input type="radio" name="email" value="off"{% if setting == "off" %} checked{% endif %}> Never</label>
+  </fieldset>
+  <button class="btn btn-primary">Save</button>
+</form>
+{% endblock %}

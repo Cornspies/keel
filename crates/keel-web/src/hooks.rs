@@ -4,7 +4,7 @@
 use askama::Template;
 use axum::extract::{Path, RawForm, State};
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{Access, Delivery, Repo, User, WEBHOOK_EVENTS, Webhook};
+use keel_core::{Access, Delivery, HookOwner, Repo, User, WEBHOOK_EVENTS, Webhook};
 
 use crate::error::{AppResult, html};
 use crate::labels::form_values;
@@ -81,17 +81,59 @@ impl EventChoices {
     }
 }
 
+/// Whose hooks a page manages: a repository's or an organization's.
+pub(crate) enum Scope {
+    Repo(Repo),
+    Org(User),
+}
+
+impl Scope {
+    fn owner(&self) -> HookOwner {
+        match self {
+            Self::Repo(r) => HookOwner::Repo(r.id),
+            Self::Org(o) => HookOwner::Org(o.id),
+        }
+    }
+
+    fn settings_url(&self) -> String {
+        match self {
+            Self::Repo(r) => format!("/{}/{}/settings", r.owner, r.name),
+            Self::Org(o) => format!("/org/{}/settings", o.username),
+        }
+    }
+
+    fn base(&self) -> String {
+        format!("{}/hooks", self.settings_url())
+    }
+
+    fn name(&self) -> String {
+        match self {
+            Self::Repo(r) => format!("{}/{}", r.owner, r.name),
+            Self::Org(o) => o.username.clone(),
+        }
+    }
+
+    /// The repository header, or `None` for an organization.
+    async fn view(&self, state: &AppState, user: &User) -> AppResult<Option<RepoView>> {
+        Ok(match self {
+            Self::Repo(r) => Some(RepoView::new(state, r, Access::Admin, Some(user), "settings", "").await?),
+            Self::Org(_) => None,
+        })
+    }
+}
+
 /// The repository, if `user` may administer it.
-async fn admin(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
+async fn repo_scope(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Scope> {
     let (repo, access) = load(state, Some(user), owner, name).await?;
     if access != Access::Admin {
         return Err(AppError::Forbidden);
     }
-    Ok(repo)
+    Ok(Scope::Repo(repo))
 }
 
-fn base(repo: &Repo) -> String {
-    format!("/{}/{}/settings/hooks", repo.owner, repo.name)
+/// The organization, if `user` owns it.
+async fn org_scope(state: &AppState, user: &User, org: &str) -> AppResult<Scope> {
+    Ok(Scope::Org(crate::orgs::owned_org(state, user, org).await?))
 }
 
 /// The form's fields: URL, secret, events and whether it's active.
@@ -123,7 +165,12 @@ impl HookForm {
 #[template(path = "repo/hooks.html")]
 struct HooksPage {
     page: Page,
-    repo: RepoView,
+    repo: Option<RepoView>,
+    /// The scope's name, e.g. `ada/engine` or `acme`.
+    name: String,
+    is_org: bool,
+    settings_url: String,
+    base_url: String,
     hooks: Vec<HookView>,
     events: EventChoices,
     error: Option<String>,
@@ -131,25 +178,16 @@ struct HooksPage {
     allow_private: bool,
 }
 
-pub async fn index(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name)): Path<(String, String)>,
-) -> AppResult {
-    let repo = admin(&state, &user, &owner, &name).await?;
-    hooks_page(&state, user, &repo, None, String::new(), vec!["push".into()]).await
-}
-
 async fn hooks_page(
     state: &AppState,
     user: User,
-    repo: &Repo,
+    scope: &Scope,
     error: Option<String>,
     url: String,
     chosen: Vec<String>,
 ) -> AppResult {
     let mut hooks = Vec::new();
-    for h in state.core.webhooks(repo.id).await? {
+    for h in state.core.webhooks(scope.owner()).await? {
         let last = state.core.deliveries(h.id, 1).await?.into_iter().next().map(|d| match d.status.as_str() {
             "ok" => "ok",
             "failed" => "failed",
@@ -165,8 +203,12 @@ async fn hooks_page(
         });
     }
     html(HooksPage {
-        repo: RepoView::new(state, repo, Access::Admin, Some(&user), "settings", "").await?,
-        page: Page::new(state, Some(user), format!("Webhooks · {}/{}", repo.owner, repo.name)),
+        repo: scope.view(state, &user).await?,
+        page: Page::new(state, Some(user), format!("Webhooks · {}", scope.name())),
+        name: scope.name(),
+        is_org: matches!(scope, Scope::Org(_)),
+        settings_url: scope.settings_url(),
+        base_url: scope.base(),
         hooks,
         events: EventChoices::new(&chosen),
         error,
@@ -175,17 +217,15 @@ async fn hooks_page(
     })
 }
 
-pub async fn create(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name)): Path<(String, String)>,
-    RawForm(body): RawForm,
-) -> AppResult {
-    let repo = admin(&state, &user, &owner, &name).await?;
-    let f = HookForm::parse(&body);
-    match state.core.create_webhook(repo.id, &f.url, &f.secret, &f.events, f.active).await {
-        Ok(hook) => Ok(Redirect::to(&format!("{}/{}", base(&repo), hook.id)).into_response()),
-        Err(keel_core::Error::Invalid(msg)) => hooks_page(&state, user, &repo, Some(msg), f.url, f.events).await,
+async fn index(state: AppState, user: User, scope: Scope) -> AppResult {
+    hooks_page(&state, user, &scope, None, String::new(), vec!["push".into()]).await
+}
+
+async fn create(state: AppState, user: User, scope: Scope, body: &[u8]) -> AppResult {
+    let f = HookForm::parse(body);
+    match state.core.create_webhook(scope.owner(), &f.url, &f.secret, &f.events, f.active).await {
+        Ok(hook) => Ok(Redirect::to(&format!("{}/{}", scope.base(), hook.id)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => hooks_page(&state, user, &scope, Some(msg), f.url, f.events).await,
         Err(e) => Err(e.into()),
     }
 }
@@ -198,7 +238,9 @@ pub async fn create(
 #[template(path = "repo/hook.html")]
 struct HookPage {
     page: Page,
-    repo: RepoView,
+    repo: Option<RepoView>,
+    name: String,
+    settings_url: String,
     hook: Webhook,
     events: EventChoices,
     deliveries: Vec<DeliveryView>,
@@ -207,84 +249,158 @@ struct HookPage {
     hooks_url: String,
 }
 
-async fn load_hook(state: &AppState, user: &User, owner: &str, name: &str, id: i64) -> AppResult<(Repo, Webhook)> {
-    let repo = admin(state, user, owner, name).await?;
-    let hook = state.core.webhook(repo.id, id).await?.ok_or(AppError::NotFound)?;
-    Ok((repo, hook))
+async fn load_hook(state: &AppState, scope: &Scope, id: i64) -> AppResult<Webhook> {
+    state.core.webhook(scope.owner(), id).await?.ok_or(AppError::NotFound)
 }
 
-async fn hook_page(state: &AppState, user: User, repo: &Repo, hook: Webhook, error: Option<String>) -> AppResult {
+async fn hook_page(state: &AppState, user: User, scope: &Scope, hook: Webhook, error: Option<String>) -> AppResult {
     let deliveries = state.core.deliveries(hook.id, 30).await?.into_iter().map(DeliveryView::new).collect();
     html(HookPage {
-        repo: RepoView::new(state, repo, Access::Admin, Some(&user), "settings", "").await?,
-        page: Page::new(state, Some(user), format!("Webhook · {}/{}", repo.owner, repo.name)),
+        repo: scope.view(state, &user).await?,
+        page: Page::new(state, Some(user), format!("Webhook · {}", scope.name())),
+        name: scope.name(),
+        settings_url: scope.settings_url(),
         events: EventChoices::new(&hook.event_list()),
-        url: format!("{}/{}", base(repo), hook.id),
-        hooks_url: base(repo),
+        url: format!("{}/{}", scope.base(), hook.id),
+        hooks_url: scope.base(),
         hook,
         deliveries,
         error,
     })
 }
 
-pub async fn show(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, id)): Path<(String, String, i64)>,
-) -> AppResult {
-    let (repo, hook) = load_hook(&state, &user, &owner, &name, id).await?;
-    hook_page(&state, user, &repo, hook, None).await
+async fn show(state: AppState, user: User, scope: Scope, id: i64) -> AppResult {
+    let hook = load_hook(&state, &scope, id).await?;
+    hook_page(&state, user, &scope, hook, None).await
 }
 
-pub async fn update(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, id)): Path<(String, String, i64)>,
-    RawForm(body): RawForm,
-) -> AppResult {
-    let (repo, hook) = load_hook(&state, &user, &owner, &name, id).await?;
-    let f = HookForm::parse(&body);
+async fn update(state: AppState, user: User, scope: Scope, id: i64, body: &[u8]) -> AppResult {
+    let hook = load_hook(&state, &scope, id).await?;
+    let f = HookForm::parse(body);
     // An empty secret field keeps the secret; "remove" clears it.
-    let clear = !form_values(&body, "clear_secret").is_empty();
+    let clear = !form_values(body, "clear_secret").is_empty();
     let secret = match (clear, f.secret.is_empty()) {
         (true, _) => Some(""),
         (false, true) => None,
         (false, false) => Some(f.secret.as_str()),
     };
     match state.core.update_webhook(&hook, &f.url, secret, &f.events, f.active).await {
-        Ok(()) => Ok(Redirect::to(&format!("{}/{}", base(&repo), hook.id)).into_response()),
-        Err(keel_core::Error::Invalid(msg)) => hook_page(&state, user, &repo, hook, Some(msg)).await,
+        Ok(()) => Ok(Redirect::to(&format!("{}/{}", scope.base(), hook.id)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => hook_page(&state, user, &scope, hook, Some(msg)).await,
         Err(e) => Err(e.into()),
     }
 }
 
-pub async fn delete(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, id)): Path<(String, String, i64)>,
-) -> AppResult {
-    let (repo, hook) = load_hook(&state, &user, &owner, &name, id).await?;
+async fn delete(state: AppState, scope: Scope, id: i64) -> AppResult {
+    let hook = load_hook(&state, &scope, id).await?;
     state.core.delete_webhook(&hook).await?;
-    Ok(Redirect::to(&base(&repo)).into_response())
+    Ok(Redirect::to(&scope.base()).into_response())
 }
 
-pub async fn test(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, id)): Path<(String, String, i64)>,
-) -> AppResult {
-    let (repo, hook) = load_hook(&state, &user, &owner, &name, id).await?;
+async fn test(state: AppState, scope: Scope, id: i64) -> AppResult {
+    let hook = load_hook(&state, &scope, id).await?;
     state.core.ping_webhook(&hook).await?;
-    Ok(Redirect::to(&format!("{}/{}#deliveries", base(&repo), hook.id)).into_response())
+    Ok(Redirect::to(&format!("{}/{}#deliveries", scope.base(), hook.id)).into_response())
 }
 
-pub async fn redeliver(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, id, delivery)): Path<(String, String, i64, i64)>,
-) -> AppResult {
-    let (repo, hook) = load_hook(&state, &user, &owner, &name, id).await?;
+async fn redeliver(state: AppState, scope: Scope, id: i64, delivery: i64) -> AppResult {
+    let hook = load_hook(&state, &scope, id).await?;
     let d = state.core.delivery(hook.id, delivery).await?.ok_or(AppError::NotFound)?;
     state.core.redeliver(&d).await?;
-    Ok(Redirect::to(&format!("{}/{}#deliveries", base(&repo), hook.id)).into_response())
+    Ok(Redirect::to(&format!("{}/{}#deliveries", scope.base(), hook.id)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Routes: the same pages for repositories and organizations
+// ---------------------------------------------------------------------------
+
+type RepoPath = Path<(String, String)>;
+type RepoHookPath = Path<(String, String, i64)>;
+
+pub async fn repo_index(State(s): State<AppState>, SignedIn(u): SignedIn, Path((o, n)): RepoPath) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    index(s, u, scope).await
+}
+
+pub async fn repo_create(State(s): State<AppState>, SignedIn(u): SignedIn, Path((o, n)): RepoPath, RawForm(b): RawForm) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    create(s, u, scope, &b).await
+}
+
+pub async fn repo_show(State(s): State<AppState>, SignedIn(u): SignedIn, Path((o, n, id)): RepoHookPath) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    show(s, u, scope, id).await
+}
+
+pub async fn repo_update(
+    State(s): State<AppState>,
+    SignedIn(u): SignedIn,
+    Path((o, n, id)): RepoHookPath,
+    RawForm(b): RawForm,
+) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    update(s, u, scope, id, &b).await
+}
+
+pub async fn repo_delete(State(s): State<AppState>, SignedIn(u): SignedIn, Path((o, n, id)): RepoHookPath) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    delete(s, scope, id).await
+}
+
+pub async fn repo_test(State(s): State<AppState>, SignedIn(u): SignedIn, Path((o, n, id)): RepoHookPath) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    test(s, scope, id).await
+}
+
+pub async fn repo_redeliver(
+    State(s): State<AppState>,
+    SignedIn(u): SignedIn,
+    Path((o, n, id, d)): Path<(String, String, i64, i64)>,
+) -> AppResult {
+    let scope = repo_scope(&s, &u, &o, &n).await?;
+    redeliver(s, scope, id, d).await
+}
+
+pub async fn org_index(State(s): State<AppState>, SignedIn(u): SignedIn, Path(org): Path<String>) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    index(s, u, scope).await
+}
+
+pub async fn org_create(State(s): State<AppState>, SignedIn(u): SignedIn, Path(org): Path<String>, RawForm(b): RawForm) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    create(s, u, scope, &b).await
+}
+
+pub async fn org_show(State(s): State<AppState>, SignedIn(u): SignedIn, Path((org, id)): Path<(String, i64)>) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    show(s, u, scope, id).await
+}
+
+pub async fn org_update(
+    State(s): State<AppState>,
+    SignedIn(u): SignedIn,
+    Path((org, id)): Path<(String, i64)>,
+    RawForm(b): RawForm,
+) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    update(s, u, scope, id, &b).await
+}
+
+pub async fn org_delete(State(s): State<AppState>, SignedIn(u): SignedIn, Path((org, id)): Path<(String, i64)>) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    delete(s, scope, id).await
+}
+
+pub async fn org_test(State(s): State<AppState>, SignedIn(u): SignedIn, Path((org, id)): Path<(String, i64)>) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    test(s, scope, id).await
+}
+
+pub async fn org_redeliver(
+    State(s): State<AppState>,
+    SignedIn(u): SignedIn,
+    Path((org, id, d)): Path<(String, i64, i64)>,
+) -> AppResult {
+    let scope = org_scope(&s, &u, &org).await?;
+    redeliver(s, scope, id, d).await
 }

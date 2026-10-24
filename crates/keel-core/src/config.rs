@@ -16,6 +16,19 @@ pub struct Config {
     /// (off by default, so repository admins can't probe the server's
     /// network).
     pub webhook_allow_private: bool,
+    /// `None` when no mail server is configured: no email is sent and
+    /// password resets are unavailable.
+    pub mail: Option<MailConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MailConfig {
+    /// e.g. `smtps://user:password@smtp.example.com` (TLS),
+    /// `smtp://user:password@smtp.example.com:587?tls=required` (STARTTLS)
+    /// or `smtp://localhost:25` (a local relay).
+    pub smtp_url: String,
+    /// The From address, e.g. `keel <git@example.com>`.
+    pub from: String,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +48,7 @@ impl Default for Config {
             open_registration: true,
             site_name: "keel".into(),
             webhook_allow_private: false,
+            mail: None,
         }
     }
 }
@@ -42,6 +56,11 @@ impl Default for Config {
 impl Config {
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("keel.db")
+    }
+
+    /// Git hooks keel runs (see `protection.rs`).
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.data_dir.join("hooks")
     }
 
     pub fn repos_dir(&self) -> PathBuf {

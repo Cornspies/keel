@@ -6,13 +6,16 @@
 //! containing all of its trigrams are candidates; the caller then confirms
 //! real matches by scanning the candidates' content. This is how Google Code
 //! Search and zoekt work, and unlike word-based search it finds any
-//! substring, including punctuation such as `fn main(` or `->`.
+//! substring, including punctuation such as `fn main(` or `->`. Regular
+//! expressions use the trigrams of the literal text every match contains
+//! (see [`regex_trigrams`]).
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Context;
+use regex_syntax::hir::{Class, Hir, HirKind};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery, TermSetQuery};
 use tantivy::schema::{
@@ -85,6 +88,71 @@ pub fn trigrams(s: &str) -> BTreeSet<String> {
     chars.windows(3).map(|w| w.iter().collect()).collect()
 }
 
+/// The trigrams every match of the regular expression `pattern` contains,
+/// from the literal text it requires: `fn \w+\(` gives those of `fn ` and
+/// the `(` is too short to count. Empty if it requires none (e.g. `\d+`),
+/// so the index can't narrow a search for it. Errors explain invalid
+/// patterns.
+pub fn regex_trigrams(pattern: &str) -> Result<BTreeSet<String>, String> {
+    let hir = regex_syntax::ParserBuilder::new()
+        .build()
+        .parse(pattern)
+        .map_err(|e| e.to_string())?;
+    let mut runs = Vec::new();
+    required_literals(&hir, &mut runs);
+    Ok(runs.iter().flat_map(|r| trigrams(r)).collect())
+}
+
+/// Appends the runs of literal text that every match of `hir` contains,
+/// lowercased.
+fn required_literals(hir: &Hir, out: &mut Vec<String>) {
+    match hir.kind() {
+        HirKind::Concat(subs) => {
+            let mut run = String::new();
+            for sub in subs {
+                match literal_text(sub) {
+                    Some(text) => run.push_str(&text),
+                    None => {
+                        if !run.is_empty() {
+                            out.push(std::mem::take(&mut run));
+                        }
+                        required_literals(sub, out);
+                    }
+                }
+            }
+            if !run.is_empty() {
+                out.push(run);
+            }
+        }
+        HirKind::Capture(c) => required_literals(&c.sub, out),
+        HirKind::Repetition(r) if r.min >= 1 => required_literals(&r.sub, out),
+        // Alternatives require nothing in particular; other nodes nothing
+        // literal.
+        _ => out.extend(literal_text(hir)),
+    }
+}
+
+/// The text a node always matches, ignoring case: a literal, or a class of
+/// one character in different cases (as `(?i)a` becomes `[Aa]`).
+fn literal_text(hir: &Hir) -> Option<String> {
+    match hir.kind() {
+        HirKind::Literal(lit) => std::str::from_utf8(&lit.0).ok().map(str::to_lowercase),
+        HirKind::Class(Class::Unicode(c)) => {
+            let size: u32 = c.iter().map(|r| r.end() as u32 - r.start() as u32 + 1).sum();
+            if size > 4 {
+                return None;
+            }
+            let lower: BTreeSet<String> = c
+                .iter()
+                .flat_map(|r| r.start()..=r.end())
+                .map(|ch| ch.to_lowercase().collect())
+                .collect();
+            if lower.len() == 1 { lower.into_iter().next() } else { None }
+        }
+        _ => None,
+    }
+}
+
 impl SearchIndex {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
@@ -155,7 +223,11 @@ impl SearchIndex {
 
     /// Files in `repos` that contain every trigram of `query`.
     pub fn candidates(&self, query: &str, repos: &[u64], limit: usize) -> anyhow::Result<Vec<Candidate>> {
-        let grams = trigrams(query);
+        self.candidates_with(&trigrams(query), repos, limit)
+    }
+
+    /// Files in `repos` that contain every one of `grams`.
+    pub fn candidates_with(&self, grams: &BTreeSet<String>, repos: &[u64], limit: usize) -> anyhow::Result<Vec<Candidate>> {
         if grams.is_empty() || repos.is_empty() {
             return Ok(Vec::new());
         }
@@ -211,6 +283,21 @@ mod tests {
         let mut p: Vec<String> = index.candidates(q, repos, 100).unwrap().into_iter().map(|c| c.path).collect();
         p.sort();
         p
+    }
+
+    #[test]
+    fn regex_literals() {
+        let grams = |p: &str| regex_trigrams(p).unwrap();
+        let union = |parts: &[&str]| parts.iter().flat_map(|p| trigrams(p)).collect::<BTreeSet<_>>();
+        assert_eq!(grams("fn main"), trigrams("fn main"));
+        assert_eq!(grams(r"fn \w+\("), trigrams("fn "));
+        assert_eq!(grams("(?i)Hello"), trigrams("hello"), "case-insensitive literals count");
+        assert_eq!(grams("foo(bar)+baz"), union(&["foo", "bar", "baz"]), "runs don't join across groups");
+        assert_eq!(grams(r"^impl\b"), trigrams("impl"));
+        assert!(grams(r"\d+").is_empty());
+        assert!(grams("foo|bar").is_empty(), "either may match");
+        assert!(grams("(?:xyz)?abc").iter().all(|g| trigrams("abc").contains(g)), "optional parts aren't required");
+        assert!(regex_trigrams("(unclosed").is_err());
     }
 
     #[test]

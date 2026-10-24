@@ -41,6 +41,18 @@
     {% endif %}
     <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
   </div>
+  {% else if item.kind == "review_requested" || item.kind == "review_request_removed" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-review" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "review_requested" %}requested a review from{% else %}removed the review request for{% endif %} <strong>{{ item.target }}</strong>
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  {% else if item.kind == "milestoned" || item.kind == "demilestoned" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-label" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "milestoned" %}added this to the{% else %}removed this from the{% endif %} <a href="{{ item.target_url }}"><strong>{{ item.target }}</strong></a> milestone
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
   {% else %}
   <div class="event" id="event-{{ item.id }}">
     <span class="state-dot state-{% if item.kind == "reopened" %}open{% else %}{{ item.kind }}{% endif %}" aria-hidden="true"></span>

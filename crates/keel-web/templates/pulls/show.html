@@ -16,6 +16,15 @@
     {% endfor %}
   </ul>
   {% endif %}
+  {% if let Some(c) = checks %}
+  <div class="merge-status {% if c.blocked.is_some() %}merge-blocked{% else %}merge-ok{% endif %}">
+    {% if let Some(b) = c.blocked %}<strong>Merging is blocked.</strong> <span class="muted">{{ b }}</span>
+    {% else if c.required > 0 %}<strong>{{ c.approvals }} approving review{% if c.approvals != 1 %}s{% endif %}.</strong> <span class="muted">{{ c.required }} required.</span>
+    {% else %}<strong>No reviews required.</strong>
+    {% endif %}
+    <span class="muted small">{{ pr.base_ref }} is protected by the rule <span class="branch">{{ c.pattern }}</span>.</span>
+  </div>
+  {% endif %}
   {% match m %}
   {% when MergeStatus::Ready %}
     <div class="merge-status merge-ok"><strong>This branch has no conflicts with {{ pr.base_ref }}.</strong>
@@ -27,7 +36,7 @@
         <option value="squash">Squash and merge</option>
       </select>
       {% if can_delete_branch %}<label class="check"><input type="checkbox" name="delete_branch" checked> Delete <span class="branch">{{ pr.head_label }}</span> afterwards</label>{% endif %}
-      <button class="btn btn-primary">Merge pull request</button>
+      <button class="btn btn-primary"{% if merge_blocked %} disabled{% endif %}>Merge pull request</button>
     </form>
     {% endif %}
   {% when MergeStatus::Conflicts(files) %}

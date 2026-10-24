@@ -6,6 +6,7 @@
 //! (bitmaps, commit-graph, partial clone, protocol v2).
 
 mod diff;
+mod edit;
 mod files;
 mod merge;
 mod push;
@@ -18,6 +19,7 @@ pub use read::{
     Blob, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, Resolved, Signature,
     TreeEntry,
 };
+pub use edit::replace_line;
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
 pub use push::{RefChange, Refs, ref_changes};

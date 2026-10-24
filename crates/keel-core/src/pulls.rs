@@ -1,6 +1,6 @@
 //! Pull requests: issues that propose merging one branch into another.
 
-use keel_git::{GitRepo, Oid};
+use keel_git::{GitRepo, Identity, MergeStyle, Oid};
 
 use crate::activity::{Activity, IssueAction};
 use crate::issues::{insert_comment, insert_issue};
@@ -317,6 +317,79 @@ impl Core {
     }
 }
 
+/// Commits listed in a squash commit's message.
+const SQUASH_LIST: usize = 250;
+
+impl Core {
+    /// Merges an open pull request as `user` (who needs write access), if
+    /// the base branch's rules allow it, and optionally deletes the head
+    /// branch (if `user` may). Returns the merge commit.
+    pub async fn merge_pull(&self, repo: &Repo, issue: &Issue, user: &User, style: MergeStyle, delete_branch: bool) -> Result<Oid> {
+        if self.access(repo, Some(user)).await? < Access::Write {
+            return invalid("Only people with write access can merge.");
+        }
+        if !issue.is_open() {
+            return invalid("This pull request is not open.");
+        }
+        let pull = self.pull(issue.id).await?.ok_or(Error::NotFound)?;
+        let (Some(base), Some(head)) = self.pull_tips(issue, &pull).await? else {
+            return invalid("A branch is missing.");
+        };
+        let head_str = head.to_string();
+        if let Some(blocked) = self.merge_check(repo, issue, &pull, Some(&head_str)).await?.blocked() {
+            return invalid(format!("{} is protected: {blocked}", pull.base_ref));
+        }
+        let number = issue.number;
+        let head_label = pull.head_label(issue);
+        let commits = self.git(repo.id, move |g| g.commits_between(base, head, SQUASH_LIST)).await?;
+        let message = match style {
+            MergeStyle::Merge => format!("Merge pull request #{number} from {head_label}\n\n{}", issue.title),
+            MergeStyle::Squash => {
+                let list: Vec<String> = commits.iter().map(|c| format!("* {}", c.summary)).collect();
+                format!("{} (#{number})\n\n{}", issue.title, list.join("\n"))
+            }
+        };
+        let base_ref = pull.base_ref.clone();
+        let (name, email) = (user.username.clone(), user.email.clone());
+        let before = self.ref_snapshot(repo.id).await?;
+        let merged = self
+            .git(repo.id, move |g| {
+                let merge_base = g.merge_base(base, head)?;
+                let who = Identity { name: &name, email: &email };
+                let commit = g.merge(&base_ref, base, head, style, &message, &who)?;
+                g.update_ref(&pull_ref(number), Some(head), None)?;
+                Ok((merge_base, commit))
+            })
+            .await;
+        let (merge_base, commit) = match merged {
+            Ok(v) => v,
+            Err(Error::Internal(e)) => {
+                tracing::info!("merge of {}/{}#{number} failed: {e:#}", repo.owner, repo.name);
+                return invalid("Merging failed: the branches changed or conflict. Reload and try again.");
+            }
+            Err(e) => return Err(e),
+        };
+        self.mark_merged(issue, Some(user.id), merge_base, head, Some(commit)).await?;
+
+        if delete_branch
+            && let Some(head_repo) = self.repo_by_id(pull.head_repo_id.unwrap_or(-1)).await?
+            && self.access(&head_repo, Some(user)).await? >= Access::Write
+            && self.may_update_branch(head_repo.id, &pull.head_ref, true, true).await?
+        {
+            let head_before = self.ref_snapshot(head_repo.id).await?;
+            let branch = format!("refs/heads/{}", pull.head_ref);
+            // Only if nobody pushed to it meanwhile.
+            let deleted = self.git(head_repo.id, move |g| Ok(g.update_ref(&branch, None, Some(head)).is_ok())).await?;
+            if deleted && head_repo.id != repo.id {
+                self.after_push(head_repo.id, Some(user.id), Some(head_before)).await?;
+            }
+        }
+        // After any branch deletion here, so the push event includes it.
+        self.after_push(repo.id, Some(user.id), Some(before)).await?;
+        Ok(commit)
+    }
+}
+
 /// A unique-enough name for a temporary ref.
 fn uuid_like() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -392,6 +465,58 @@ mod tests {
         assert_ne!(pull.base_commit, pull.head_commit, "merge base from before the merge");
         assert!(core.set_issue_open(&issue, &ada, true).await.is_ok());
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().state, "merged", "can't reopen");
+    }
+
+    #[tokio::test]
+    async fn applying_suggestions() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        let _work = push_branches(&core, &repo);
+        let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature").await.unwrap();
+        let tip = core.git(repo.id, |g| Ok(g.branch_tip("feature"))).await.unwrap().unwrap();
+        let blob = core.git(repo.id, move |g| Ok(g.blob(tip, "b")?.unwrap().id)).await.unwrap();
+        let anchor = crate::InlineAnchor {
+            path: "b".into(),
+            new_side: true,
+            line: 1,
+            commit_id: tip,
+            blob_id: blob,
+            hunk: "@@ -0,0 +1 @@\n+1".into(),
+        };
+        let plain = core.add_inline_comment(&issue, &bob, &anchor, "Hmm").await.unwrap();
+        let plain = core.comment(issue.id, plain).await.unwrap().unwrap();
+        assert!(core.apply_suggestion(&issue, &plain, &ada).await.is_err(), "no suggestion");
+        let id = core.add_inline_comment(&issue, &bob, &anchor, "```suggestion\ntwo\n```").await.unwrap();
+        let c = core.comment(issue.id, id).await.unwrap().unwrap();
+        assert!(core.apply_suggestion(&issue, &c, &bob).await.is_err(), "bob can't push");
+
+        core.save_branch_rule(repo.id, &crate::BranchRule {
+            id: 0,
+            pattern: "feat*".into(),
+            require_pull: true,
+            required_approvals: 0,
+            dismiss_stale: false,
+            allow_force_push: false,
+        })
+        .await
+        .unwrap();
+        let err = core.apply_suggestion(&issue, &c, &ada).await.unwrap_err();
+        assert!(err.to_string().contains("protected"), "{err}");
+        let rule = core.branch_rules(repo.id).await.unwrap()[0].id;
+        core.delete_branch_rule(repo.id, rule).await.unwrap();
+
+        let commit = core.apply_suggestion(&issue, &c, &ada).await.unwrap();
+        let (new_tip, text) = core
+            .git(repo.id, move |g| Ok((g.branch_tip("feature"), g.blob(commit, "b")?.unwrap().data)))
+            .await
+            .unwrap();
+        assert_eq!((new_tip, text.as_slice()), (Some(commit), &b"two"[..]));
+        core.sync_pulls(repo.id, None).await.unwrap(); // after_push does this in the background
+        assert_eq!(core.git(repo.id, |g| Ok(g.ref_tip("refs/pull/1/head"))).await.unwrap(), Some(commit));
+        let err = core.apply_suggestion(&issue, &c, &ada).await.unwrap_err();
+        assert!(err.to_string().contains("changed"), "{err}");
     }
 
     #[tokio::test]

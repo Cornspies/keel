@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  <nav class="state-tabs">
+    <a href="/{{ repo.owner }}/{{ repo.name }}/issues">Issues</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/labels">Labels</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/milestones" class="active">Milestones</a>
+  </nav>
+  <div class="spacer"></div>
+  {% if can_edit %}<a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/milestones/new">New milestone</a>{% endif %}
+</div>
+<nav class="state-tabs sub-tabs">
+  <a href="/{{ repo.owner }}/{{ repo.name }}/milestones"{% if show_open %} class="active"{% endif %}>{{ open_count }} Open</a>
+  <a href="/{{ repo.owner }}/{{ repo.name }}/milestones?state=closed"{% if !show_open %} class="active"{% endif %}>{{ closed_count }} Closed</a>
+</nav>
+{% if milestones.is_empty() %}
+<p class="empty">{% if show_open %}No open milestones. Milestones group issues and pull requests, e.g. for a release{% if can_edit %} — <a href="/{{ repo.owner }}/{{ repo.name }}/milestones/new">create one</a>{% endif %}.{% else %}No closed milestones.{% endif %}</p>
+{% else %}
+<ul class="card-list milestone-list">
+  {% for m in milestones %}
+  <li class="card-row milestone-row">
+    <div class="milestone-main">
+      <a class="milestone-title" href="{{ m.issues_url }}">{{ m.title }}</a>
+      {% if !m.due.is_empty() %}<div class="small{% if m.overdue %} overdue{% else %} muted{% endif %}">{{ m.due }}</div>{% endif %}
+      {% if !m.description_html.is_empty() %}<div class="markdown milestone-desc">{{ m.description_html|safe }}</div>{% endif %}
+    </div>
+    <div class="milestone-side">
+      <progress max="100" value="{{ m.progress }}" aria-label="{{ m.progress }}% complete">{{ m.progress }}%</progress>
+      <div class="small muted"><strong>{{ m.progress }}%</strong> complete · <a class="muted" href="{{ m.issues_url }}&amp;state=open">{{ m.open_items }} open</a> · <a class="muted" href="{{ m.issues_url }}&amp;state=closed">{{ m.closed_items }} closed</a> · <a class="muted" href="{{ m.pulls_url }}">pull requests</a></div>
+      {% if can_edit %}
+      <div class="row-actions">
+        <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/milestones/{{ m.id }}/edit">Edit</a>
+        <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/milestones/{{ m.id }}/state" class="inline"><input type="hidden" name="to" value="{% if m.is_open %}closed{% else %}open{% endif %}"><button class="btn btn-small">{% if m.is_open %}Close{% else %}Reopen{% endif %}</button></form>
+        <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/milestones/{{ m.id }}/delete" class="inline"><button class="btn btn-small btn-danger" title="Its issues and pull requests are kept">Delete</button></form>
+      </div>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

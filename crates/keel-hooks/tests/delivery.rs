@@ -41,7 +41,7 @@ async fn delivers_signed_payloads() {
     let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
     let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
     let (url, received) = receiver().await;
-    let hook = core.create_webhook(repo.id, &url, "s3cret", &["issues".into()], true).await.unwrap();
+    let hook = core.create_webhook(keel_core::HookOwner::Repo(repo.id), &url, "s3cret", &["issues".into()], true).await.unwrap();
     keel_hooks::start(core.clone());
     core.create_issue(repo.id, &ada, "Crash", "").await.unwrap();
 
@@ -76,12 +76,13 @@ async fn refuses_private_addresses() {
     let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
     let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
     let (url, received) = receiver().await;
-    assert!(core.create_webhook(repo.id, &url, "", &["push".into()], true).await.is_err());
+    assert!(core.create_webhook(keel_core::HookOwner::Repo(repo.id), &url, "", &["push".into()], true).await.is_err());
 
     // A name that resolves to loopback is refused when delivering, too.
     let hook = Webhook {
         id: 1,
-        repo_id: repo.id,
+        repo_id: Some(repo.id),
+        org_id: None,
         url: url.clone(),
         secret: String::new(),
         events: "*".into(),

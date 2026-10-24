@@ -1,0 +1,128 @@
+//! Links sent by email: password resets and address verification.
+
+use askama::Template;
+use axum::Form;
+use axum::extract::{Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse, Redirect};
+use serde::Deserialize;
+
+use crate::error::{AppResult, html};
+use crate::session::{Viewer, set_cookie};
+use crate::{AppState, Page};
+
+/// A short page with a heading, a message and a link onwards.
+#[derive(Template)]
+#[template(path = "message.html")]
+struct MessagePage {
+    page: Page,
+    heading: String,
+    message: String,
+    link: (String, String),
+}
+
+fn message(state: &AppState, viewer: Option<keel_core::User>, heading: &str, text: &str, link: (&str, &str)) -> AppResult {
+    html(MessagePage {
+        page: Page::new(state, viewer, heading),
+        heading: heading.into(),
+        message: text.into(),
+        link: (link.0.into(), link.1.into()),
+    })
+}
+
+#[derive(Template)]
+#[template(path = "password_forgot.html")]
+struct ForgotPage {
+    page: Page,
+    error: Option<String>,
+    email: String,
+}
+
+pub async fn forgot_form(State(state): State<AppState>) -> AppResult {
+    html(ForgotPage { page: Page::new(&state, None, "Reset your password"), error: None, email: String::new() })
+}
+
+#[derive(Deserialize)]
+pub struct ForgotForm {
+    email: String,
+}
+
+pub async fn forgot(State(state): State<AppState>, Form(f): Form<ForgotForm>) -> AppResult {
+    match state.core.request_password_reset(&f.email).await {
+        Ok(()) => message(
+            &state,
+            None,
+            "Check your email",
+            "If an account uses that address, we sent it a link to choose a new password. The link works for an hour.",
+            ("/login", "Back to sign in"),
+        ),
+        Err(keel_core::Error::Invalid(msg)) => {
+            html(ForgotPage { page: Page::new(&state, None, "Reset your password"), error: Some(msg), email: f.email })
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "password_reset.html")]
+struct ResetPage {
+    page: Page,
+    token: String,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TokenQuery {
+    #[serde(default)]
+    token: String,
+}
+
+pub async fn reset_form(State(state): State<AppState>, Query(q): Query<TokenQuery>) -> AppResult {
+    if !state.core.reset_token_valid(&q.token).await? {
+        return message(
+            &state,
+            None,
+            "This link has expired",
+            "Password reset links work once, for an hour. Request a new one.",
+            ("/password/forgot", "Reset your password"),
+        );
+    }
+    html(ResetPage { page: Page::new(&state, None, "Choose a new password"), token: q.token, error: None })
+}
+
+#[derive(Deserialize)]
+pub struct ResetForm {
+    token: String,
+    new: String,
+    confirm: String,
+}
+
+pub async fn reset(State(state): State<AppState>, Form(f): Form<ResetForm>) -> AppResult {
+    let page = |error: String| {
+        html(ResetPage { page: Page::new(&state, None, "Choose a new password"), token: f.token.clone(), error: Some(error) })
+    };
+    if f.new != f.confirm {
+        return page("The passwords don’t match.".into());
+    }
+    match state.core.reset_password(&f.token, &f.new).await {
+        Ok(user) => {
+            let token = state.core.create_session(user.id).await?;
+            Ok(([(header::SET_COOKIE, set_cookie(&state, &token))], Redirect::to("/")).into_response())
+        }
+        Err(keel_core::Error::Invalid(msg)) => page(msg),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn verify(State(state): State<AppState>, Viewer(viewer): Viewer, Query(q): Query<TokenQuery>) -> AppResult {
+    match state.core.verify_email(&q.token).await {
+        Ok(user) => {
+            let text = format!("Thanks! {} is verified, so you can now get notification emails.", user.email);
+            message(&state, viewer, "Email address verified", &text, ("/settings/notifications", "Email settings"))
+        }
+        Err(keel_core::Error::Invalid(msg)) => {
+            message(&state, viewer, "This link doesn't work", &msg, ("/settings/account", "Account settings"))
+        }
+        Err(e) => Err(e.into()),
+    }
+}

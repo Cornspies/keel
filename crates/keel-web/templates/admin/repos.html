@@ -1,0 +1,29 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<h1>Repositories</h1>
+<form method="get" action="/admin/repos" class="form form-inline admin-search">
+  <input name="q" value="{{ q }}" placeholder="Find by owner/name" aria-label="Find repositories">
+  <button class="btn">Search</button>
+</form>
+{% if repos.is_empty() %}
+<p class="empty">No repositories match.</p>
+{% else %}
+<ul class="card-list admin-list">
+  {% for (r, when, full) in repos %}
+  <li class="card-row">
+    <div class="admin-main">
+      <a href="/{{ r.owner }}/{{ r.name }}">{{ r.owner }}/<strong>{{ r.name }}</strong></a>
+      {% if r.is_private %}<span class="badge">private</span>{% endif %}
+      {% if r.forked_from.is_some() %}<span class="badge">fork</span>{% endif %}
+      <div class="muted small">{% if !r.description.is_empty() %}{{ r.description }} · {% endif %}updated <time title="{{ full }}">{{ when }}</time></div>
+    </div>
+    <a class="btn btn-small" href="/{{ r.owner }}/{{ r.name }}/settings">Settings</a>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>
+{% endblock %}

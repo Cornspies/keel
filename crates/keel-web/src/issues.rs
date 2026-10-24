@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::error::{AppResult, html};
 use crate::labels::LabelView;
+use crate::milestones::milestone_url;
 use crate::pulls::{ThreadView, inline_threads};
 use crate::render::{LinkBase, datetime, markdown_with_refs, relative_time};
 use crate::repo::{RepoView, encode_path, load, with_git};
@@ -86,8 +87,18 @@ pub(crate) struct TimelineItem {
     pub thread: Option<ThreadView>,
     /// For `labeled`/`unlabeled`: the label (gray if since deleted).
     pub label: Option<LabelView>,
-    /// For `assigned`/`unassigned`: who.
+    /// For `assigned`/`unassigned`, `review_requested`/`review_request_removed`:
+    /// who; for `milestoned`/`demilestoned`: the milestone.
     pub target: String,
+    /// For milestone events: the milestone's issues.
+    pub target_url: String,
+}
+
+/// Someone asked to review a pull request, or who reviewed it.
+pub(crate) struct ReviewerView {
+    pub name: String,
+    /// `requested`, `approved` or `changes_requested`.
+    pub state: &'static str,
 }
 
 /// Everything the conversation partial (`issues/conversation.html`) needs.
@@ -116,6 +127,14 @@ pub(crate) struct Conversation {
     pub subscription: Option<keel_core::Subscription>,
     /// Pull requests: each reviewer's latest verdict.
     pub reviews: Vec<(String, &'static str)>,
+    /// Pull requests: requested reviewers and those who reviewed.
+    pub reviewers: Vec<ReviewerView>,
+    /// May ask people to review (writers and the author).
+    pub can_request_review: bool,
+    pub reviewer_choices: Vec<(i64, String, bool)>,
+    /// The milestone: (title, url).
+    pub milestone: Option<(String, String)>,
+    pub milestone_choices: Vec<(i64, String, bool)>,
 }
 
 /// Renders comments: Markdown with `#123` and `@name` links, and relative
@@ -199,9 +218,11 @@ pub(crate) async fn conversation(
         thread: None,
         label: None,
         target: String::new(),
+        target_url: String::new(),
     }];
     let comments = state.core.comments(issue.id).await?;
-    let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, &render)
+    let can_apply = crate::pulls::viewer_can_apply(state, repo, issue, viewer).await?;
+    let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, can_apply, &render)
         .into_iter()
         .map(|mut t| {
             t.outdated = placed.is_some_and(|p| !p.contains(&t.id));
@@ -229,6 +250,11 @@ pub(crate) async fn conversation(
             delete_url: editable.then(|| format!("{base_url}/comments/{}/delete", c.id)),
             thread: threads.remove(&c.id),
             label: matches!(c.kind.as_str(), "labeled" | "unlabeled").then(|| label_view(&c.body)),
+            target_url: if matches!(c.kind.as_str(), "milestoned" | "demilestoned") {
+                milestone_url(repo, &c.body, issue.is_pull)
+            } else {
+                String::new()
+            },
             target: c.body,
             kind: c.kind,
         });
@@ -257,13 +283,51 @@ pub(crate) async fn conversation(
     } else {
         (Vec::new(), Vec::new())
     };
-    let reviews = if issue.is_pull {
+    let reviews: Vec<(String, &'static str)> = if issue.is_pull {
         state
             .core
             .review_states(issue.id)
             .await?
             .into_iter()
             .map(|(user, v)| (user, v.as_str()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let requested = if issue.is_pull { state.core.review_requests(issue.id).await? } else { Vec::new() };
+    let mut reviewers: Vec<ReviewerView> =
+        requested.iter().map(|(_, name)| ReviewerView { name: name.clone(), state: "requested" }).collect();
+    for (name, verdict) in &reviews {
+        if !reviewers.iter().any(|r| r.name == *name) {
+            reviewers.push(ReviewerView { name: name.clone(), state: verdict });
+        }
+    }
+    let can_request_review = issue.is_pull && issue.is_open() && (writer || is_author);
+    let reviewer_choices = if can_request_review {
+        state
+            .core
+            .reviewer_candidates(repo, issue)
+            .await?
+            .into_iter()
+            .map(|u| {
+                let on = requested.iter().any(|(id, _)| *id == u.id);
+                (u.id, u.username, on)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let milestone = state.core.issue_milestone(issue).await?;
+    let milestone_choices = if writer {
+        let mut all = state.core.milestones(repo.id, true).await?;
+        if let Some(m) = milestone.as_ref().filter(|m| !m.is_open()) {
+            all.push(m.clone());
+        }
+        all.into_iter()
+            .map(|m| {
+                let on = milestone.as_ref().is_some_and(|x| x.id == m.id);
+                (m.id, m.title, on)
+            })
             .collect()
     } else {
         Vec::new()
@@ -288,6 +352,14 @@ pub(crate) async fn conversation(
         assignee_choices,
         subscription,
         reviews,
+        reviewers,
+        can_request_review,
+        reviewer_choices,
+        milestone: milestone.map(|m| {
+            let url = milestone_url(repo, &m.title, issue.is_pull);
+            (m.title, url)
+        }),
+        milestone_choices,
     })
 }
 
@@ -315,9 +387,12 @@ struct ListPage {
     signed_in: bool,
     open_url: String,
     closed_url: String,
-    /// Label filter choices: (name, url, selected).
+    /// Filter choices: (label or name, url, selected).
     label_filters: Vec<(LabelView, String, bool)>,
     assignee_filters: Vec<(String, String, bool)>,
+    milestone_filters: Vec<(String, String, bool)>,
+    /// Pull requests: the viewer's review requests, (url, selected).
+    review_filter: Option<(String, bool)>,
     /// The active filters, described, and a link to clear them.
     filter_note: Option<(String, String)>,
 }
@@ -328,17 +403,33 @@ pub struct ListQuery {
     page: Option<i64>,
     label: Option<String>,
     assignee: Option<String>,
+    milestone: Option<String>,
+    /// Pull requests waiting for this user's review.
+    review_requested: Option<String>,
+}
+
+/// The filters of an issue list, by name, as in its query string.
+#[derive(Clone, Copy, Default)]
+struct Filters<'a> {
+    label: Option<&'a str>,
+    assignee: Option<&'a str>,
+    milestone: Option<&'a str>,
+    review_requested: Option<&'a str>,
 }
 
 /// A query string for an issue list.
-fn list_query(open: bool, label: Option<&str>, assignee: Option<&str>, page: Option<i64>) -> String {
+fn list_query(open: bool, f: Filters<'_>, page: Option<i64>) -> String {
     let mut q = form_urlencoded::Serializer::new(String::new());
     q.append_pair("state", if open { "open" } else { "closed" });
-    if let Some(l) = label {
-        q.append_pair("label", l);
-    }
-    if let Some(a) = assignee {
-        q.append_pair("assignee", a);
+    for (key, value) in [
+        ("label", f.label),
+        ("assignee", f.assignee),
+        ("milestone", f.milestone),
+        ("review_requested", f.review_requested),
+    ] {
+        if let Some(v) = value {
+            q.append_pair(key, v);
+        }
     }
     if let Some(p) = page {
         q.append_pair("page", &p.to_string());
@@ -366,22 +457,42 @@ pub(crate) async fn list_page(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let show_open = q.state.as_deref() != Some("closed");
     let page_no = q.page.unwrap_or(1).max(1);
+    fn nonempty(v: &Option<String>) -> Option<&str> {
+        v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    }
+    let f = Filters {
+        label: nonempty(&q.label),
+        assignee: nonempty(&q.assignee),
+        milestone: nonempty(&q.milestone),
+        review_requested: if pulls { nonempty(&q.review_requested) } else { None },
+    };
 
+    // Unknown names match nothing rather than everything.
     let all_labels = state.core.labels(repo.id).await?;
-    let label = q.label.as_deref().filter(|l| !l.is_empty());
-    // An unknown label matches nothing rather than everything.
-    let label_id = label.map(|name| all_labels.iter().find(|l| l.name.eq_ignore_ascii_case(name)).map_or(-1, |l| l.id));
+    let label_id = f.label.map(|name| all_labels.iter().find(|l| l.name.eq_ignore_ascii_case(name)).map_or(-1, |l| l.id));
     let assignable = state.core.assignable_users(&repo).await?;
-    let assignee = q.assignee.as_deref().filter(|a| !a.is_empty());
-    let assignee_id = match assignee {
-        Some(name) => Some(state.core.user_by_name(name).await?.map_or(-1, |u| u.id)),
+    let user_id = |name: Option<&str>| {
+        let state = state.clone();
+        let name = name.map(str::to_owned);
+        async move {
+            Ok::<_, AppError>(match name {
+                Some(name) => Some(state.core.user_by_name(&name).await?.map_or(-1, |u| u.id)),
+                None => None,
+            })
+        }
+    };
+    let assignee_id = user_id(f.assignee).await?;
+    let reviewer_id = user_id(f.review_requested).await?;
+    let milestones = state.core.milestones(repo.id, true).await?;
+    let milestone_id = match f.milestone {
+        Some(title) => Some(state.core.milestone_by_title(repo.id, title).await?.map_or(-1, |m| m.id)),
         None => None,
     };
-    let filter = IssueFilter { label: label_id, assignee: assignee_id };
+    let filter = IssueFilter { label: label_id, assignee: assignee_id, milestone: milestone_id, review_requested: reviewer_id };
 
     let mut issues = state
         .core
-        .issues(repo.id, pulls, show_open, filter, (page_no - 1) * PER_PAGE, PER_PAGE + 1)
+        .issues(repo.id, pulls, Some(show_open), filter, (page_no - 1) * PER_PAGE, PER_PAGE + 1)
         .await?;
     let has_more = issues.len() as i64 > PER_PAGE;
     issues.truncate(PER_PAGE as usize);
@@ -392,21 +503,28 @@ pub(crate) async fn list_page(
 
     let kind = if pulls { "pulls" } else { "issues" };
     let here = format!("/{}/{}/{kind}", repo.owner, repo.name);
-    let url = |open: bool, label: Option<&str>, assignee: Option<&str>, page: Option<i64>| {
-        format!("{here}?{}", list_query(open, label, assignee, page))
-    };
-    let filter_note = match (label, assignee) {
-        (None, None) => None,
-        (l, a) => {
-            let mut parts = Vec::new();
-            if let Some(l) = l {
-                parts.push(format!("labeled “{l}”"));
-            }
-            if let Some(a) = a {
-                parts.push(format!("assigned to {a}"));
-            }
-            Some((parts.join(" and "), url(show_open, None, None, None)))
+    let url = |open: bool, f: Filters<'_>, page: Option<i64>| format!("{here}?{}", list_query(open, f, page));
+    let mut parts = Vec::new();
+    if let Some(l) = f.label {
+        parts.push(format!("labeled “{l}”"));
+    }
+    if let Some(a) = f.assignee {
+        parts.push(format!("assigned to {a}"));
+    }
+    if let Some(m) = f.milestone {
+        parts.push(format!("in milestone “{m}”"));
+    }
+    if let Some(r) = f.review_requested {
+        parts.push(format!("awaiting review from {r}"));
+    }
+    let filter_note = (!parts.is_empty()).then(|| (parts.join(" and "), url(show_open, Filters::default(), None)));
+    let review_filter = match (&viewer, pulls) {
+        (Some(v), true) => {
+            let on = f.review_requested.is_some_and(|r| r.eq_ignore_ascii_case(&v.username));
+            let target = if on { None } else { Some(v.username.as_str()) };
+            Some((url(show_open, Filters { review_requested: target, ..f }, None), on))
         }
+        _ => None,
     };
     let default_branch = with_git(&state, &repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
     html(ListPage {
@@ -421,17 +539,17 @@ pub(crate) async fn list_page(
         open_count,
         closed_count,
         rows: issues.iter().map(|i| IssueRow::new(&repo, i, &mut labels, &mut assignees)).collect(),
-        newer_url: (page_no > 1).then(|| url(show_open, label, assignee, Some(page_no - 1))),
-        older_url: has_more.then(|| url(show_open, label, assignee, Some(page_no + 1))),
+        newer_url: (page_no > 1).then(|| url(show_open, f, Some(page_no - 1))),
+        older_url: has_more.then(|| url(show_open, f, Some(page_no + 1))),
         signed_in: viewer.is_some(),
-        open_url: url(true, label, assignee, None),
-        closed_url: url(false, label, assignee, None),
+        open_url: url(true, f, None),
+        closed_url: url(false, f, None),
         label_filters: all_labels
             .iter()
             .map(|l| {
                 let on = label_id == Some(l.id);
                 let target = if on { None } else { Some(l.name.as_str()) };
-                (LabelView::new(&repo, l, pulls), url(show_open, target, assignee, None), on)
+                (LabelView::new(&repo, l, pulls), url(show_open, Filters { label: target, ..f }, None), on)
             })
             .collect(),
         assignee_filters: assignable
@@ -439,9 +557,18 @@ pub(crate) async fn list_page(
             .map(|u| {
                 let on = assignee_id == Some(u.id);
                 let target = if on { None } else { Some(u.username.as_str()) };
-                (u.username.clone(), url(show_open, label, target, None), on)
+                (u.username.clone(), url(show_open, Filters { assignee: target, ..f }, None), on)
             })
             .collect(),
+        milestone_filters: milestones
+            .iter()
+            .map(|m| {
+                let on = milestone_id == Some(m.id);
+                let target = if on { None } else { Some(m.title.as_str()) };
+                (m.title.clone(), url(show_open, Filters { milestone: target, ..f }, None), on)
+            })
+            .collect(),
+        review_filter,
         filter_note,
     })
 }

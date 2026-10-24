@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="settings">
+  <nav class="side-nav" aria-label="Site administration">
+    <div class="menu-title">Site administration</div>
+    <a href="/admin"{% if nav == "overview" %} class="active"{% endif %}>Overview</a>
+    <a href="/admin/users"{% if nav == "users" %} class="active"{% endif %}>Accounts</a>
+    <a href="/admin/repos"{% if nav == "repos" %} class="active"{% endif %}>Repositories</a>
+  </nav>
+  <div class="settings-main">
+  {% block admin %}{% endblock %}
+  </div>
+</div>
+{% endblock %}

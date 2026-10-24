@@ -7,12 +7,12 @@ use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect};
 use keel_core::{Access, Comment, InlineAnchor, Issue, PullRequest, Repo, User, Verdict, pull_ref};
-use keel_git::{CommitSummary, DiffLineKind, Identity, MergeStyle, Mergeability, Oid};
+use keel_git::{DiffLineKind, MergeStyle, Mergeability, Oid};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
 use crate::issues::{Conversation, ListQuery, Renderer, conversation, issue_url, list_page, load_issue};
-use crate::render::{datetime, relative_time};
+use crate::render::{datetime, escape, relative_time};
 use crate::repo::{
     CommitView, DIFF_MAX_FILES, DIFF_MAX_LINES, FileView, RepoView, encode_path, file_views, load, with_git,
     with_git_pair,
@@ -85,7 +85,7 @@ fn head_spec(base: &Repo, head: &Repo, branch: &str) -> String {
 
 /// The repositories pull requests into `base` can come from, as visible to
 /// `viewer`: `base` itself, its parent and its forks.
-async fn related_repos(state: &AppState, base: &Repo, viewer: Option<&User>) -> AppResult<Vec<Repo>> {
+pub(crate) async fn related_repos(state: &AppState, base: &Repo, viewer: Option<&User>) -> AppResult<Vec<Repo>> {
     let mut out = vec![base.clone()];
     if let Some(parent) = base.forked_from
         && let Some(parent) = state.core.repo_by_id(parent).await?
@@ -99,7 +99,7 @@ async fn related_repos(state: &AppState, base: &Repo, viewer: Option<&User>) -> 
 
 /// Parses a head spec (see [`head_spec`]); `owner:branch` picks that
 /// owner's repository among `related`.
-fn resolve_head(related: &[Repo], spec: &str) -> Option<(Repo, String)> {
+pub(crate) fn resolve_head(related: &[Repo], spec: &str) -> Option<(Repo, String)> {
     let Some((repo, branch)) = spec.split_once(':') else {
         return Some((related[0].clone(), spec.to_owned()));
     };
@@ -450,7 +450,19 @@ struct PullPage {
     can_merge: bool,
     /// May delete the head branch after merging.
     can_delete_branch: bool,
+    /// What the base branch's protection rule requires, if one applies.
+    checks: Option<MergeChecks>,
+    merge_blocked: bool,
     error: Option<String>,
+}
+
+/// Branch protection requirements shown in the merge box.
+pub(crate) struct MergeChecks {
+    pub pattern: String,
+    pub required: i64,
+    pub approvals: i64,
+    /// Why merging is blocked, if it is.
+    pub blocked: Option<String>,
 }
 
 pub async fn show(
@@ -484,6 +496,7 @@ async fn show_page(
     let placed = placed_threads(changes.as_ref().map_or(&[][..], |c| &c.files), &comments);
     let conv = conversation(state, repo, access, &l.issue, viewer.as_ref(), Some(&placed)).await?;
     let can_delete_branch = can_delete_branch(state, repo, &l, viewer.as_ref()).await?;
+    let checks = if l.issue.is_open() { merge_checks(state, repo, &l).await? } else { None };
     html(PullPage {
         repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", "").await?,
         page: Page::new(
@@ -493,6 +506,8 @@ async fn show_page(
         ),
         can_merge: access >= Access::Write,
         can_delete_branch,
+        merge_blocked: checks.as_ref().is_some_and(|c| c.blocked.is_some()),
+        checks,
         pr,
         conv,
         merge,
@@ -501,7 +516,7 @@ async fn show_page(
 }
 
 /// Whether `user` may delete the head branch: they need write access to
-/// the repository it is in.
+/// the repository it is in, and no rule may protect it.
 async fn can_delete_branch(state: &AppState, repo: &Repo, l: &Loaded, user: Option<&User>) -> AppResult<bool> {
     let head_repo = match l.pull.head_repo_id {
         Some(id) if id == repo.id => repo.clone(),
@@ -511,7 +526,63 @@ async fn can_delete_branch(state: &AppState, repo: &Repo, l: &Loaded, user: Opti
         },
         None => return Ok(false),
     };
-    Ok(state.core.access(&head_repo, user).await? >= Access::Write)
+    Ok(state.core.access(&head_repo, user).await? >= Access::Write
+        && state.core.may_update_branch(head_repo.id, &l.pull.head_ref, true, true).await?)
+}
+
+/// Whether `user` may apply suggested changes: commit to the head branch.
+async fn can_apply_suggestions(state: &AppState, repo: &Repo, l: &Loaded, user: Option<&User>) -> AppResult<bool> {
+    if !l.issue.is_open() || user.is_none() {
+        return Ok(false);
+    }
+    let head_repo = match l.pull.head_repo_id {
+        Some(id) if id == repo.id => repo.clone(),
+        Some(id) => match state.core.repo_by_id(id).await? {
+            Some(r) => r,
+            None => return Ok(false),
+        },
+        None => return Ok(false),
+    };
+    Ok(state.core.access(&head_repo, user).await? >= Access::Write
+        && state.core.may_update_branch(head_repo.id, &l.pull.head_ref, false, false).await?)
+}
+
+/// For the conversation (see `issues::conversation`).
+pub(crate) async fn viewer_can_apply(state: &AppState, repo: &Repo, issue: &Issue, user: Option<&User>) -> AppResult<bool> {
+    if !issue.is_pull || !issue.is_open() || user.is_none() {
+        return Ok(false);
+    }
+    let Some(pull) = state.core.pull(issue.id).await? else { return Ok(false) };
+    let l = Loaded { issue: issue.clone(), pull, base: None, head: None, base_tip: None, head_tip: None };
+    can_apply_suggestions(state, repo, &l, user).await
+}
+
+/// Commits a suggested change to the head branch.
+pub async fn apply_suggestion(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number, id)): Path<(String, String, i64, i64)>,
+) -> AppResult {
+    let (repo, _) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    let comment = state.core.comment(issue.id, id).await?.ok_or(AppError::NotFound)?;
+    match state.core.apply_suggestion(&issue, &comment, &user).await {
+        Ok(_) => Ok(Redirect::to(&format!("{}/files", issue_url(&repo, &issue))).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => Err(AppError::BadRequest(msg)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The base branch's protection requirements, if a rule applies.
+async fn merge_checks(state: &AppState, repo: &Repo, l: &Loaded) -> AppResult<Option<MergeChecks>> {
+    let head = l.head_tip.map(|h| h.to_string());
+    let check = state.core.merge_check(repo, &l.issue, &l.pull, head.as_deref()).await?;
+    Ok(check.rule.as_ref().map(|rule| MergeChecks {
+        pattern: rule.pattern.clone(),
+        required: check.required(),
+        approvals: check.approvals,
+        blocked: check.blocked(),
+    }))
 }
 
 async fn merge_status(
@@ -597,6 +668,8 @@ pub(crate) struct InlineView {
     pub edited: bool,
     pub edit_url: Option<String>,
     pub delete_url: Option<String>,
+    /// Applies the change the comment suggests.
+    pub apply_url: Option<String>,
 }
 
 /// An inline comment and its replies.
@@ -619,40 +692,94 @@ pub(crate) struct ThreadView {
     pub in_diff: bool,
 }
 
+/// Renders a comment, showing each suggested change (a ```` ```suggestion ````
+/// block) as a diff from `original`, the commented line.
+pub(crate) fn render_with_suggestions(body: &str, original: Option<&str>, render: &dyn Fn(&str) -> String) -> String {
+    if !body.contains("suggestion") {
+        return render(body);
+    }
+    let mut out = String::new();
+    let mut text: Vec<&str> = Vec::new();
+    let mut lines = body.lines().peekable();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        let ticks = t.len() - t.trim_start_matches('`').len();
+        if ticks < 3 || t[ticks..].trim() != "suggestion" {
+            text.push(line);
+            continue;
+        }
+        let fence = &t[..ticks];
+        let mut block = Vec::new();
+        let mut closed = false;
+        for l in lines.by_ref() {
+            if l.trim_start().starts_with(fence) && l.trim().trim_start_matches('`').is_empty() {
+                closed = true;
+                break;
+            }
+            block.push(l);
+        }
+        if !closed {
+            // Not a suggestion after all; render it as written.
+            text.push(line);
+            text.extend(block);
+            continue;
+        }
+        if !text.is_empty() {
+            out.push_str(&render(&text.join("\n")));
+            text.clear();
+        }
+        out.push_str("<div class=\"suggestion\"><div class=\"suggestion-head\">Suggested change</div><table class=\"code diff\"><tbody>");
+        if let Some(o) = original {
+            out.push_str(&format!("<tr class=\"del\"><td class=\"lc\">{}</td></tr>", escape(o)));
+        }
+        for l in &block {
+            out.push_str(&format!("<tr class=\"add\"><td class=\"lc\">{}</td></tr>", escape(l)));
+        }
+        if block.is_empty() {
+            out.push_str("<tr class=\"ctx\"><td class=\"lc muted\">(delete the line)</td></tr>");
+        }
+        out.push_str("</tbody></table></div>");
+    }
+    if !text.is_empty() {
+        out.push_str(&render(&text.join("\n")));
+    }
+    out
+}
+
 /// Groups the inline comments of a pull request into threads, oldest first.
+/// `can_apply`: the viewer may apply suggested changes.
 pub(crate) fn inline_threads(
     repo: &Repo,
     issue: &Issue,
     comments: &[Comment],
     viewer: Option<&User>,
     access: Access,
+    can_apply: bool,
     render: &dyn Fn(&str) -> String,
 ) -> Vec<ThreadView> {
     let issue_base = format!("/{}/{}/issues/{}", repo.owner, repo.name, issue.number);
-    let view = |c: &Comment| {
+    let pull_base = format!("/{}/{}/pull/{}", repo.owner, repo.name, issue.number);
+    let view = |c: &Comment, original: Option<&str>| {
         let mine = viewer.is_some_and(|v| c.author_id == Some(v.id));
         let editable = mine || access >= Access::Write;
+        let applicable = can_apply && c.side.as_deref() == Some("new") && keel_core::suggestion(&c.body).is_some();
         InlineView {
             id: c.id,
             author: c.author.clone().unwrap_or_else(|| "ghost".into()),
             when: relative_time(c.created_at),
             when_full: datetime(c.created_at),
-            body_html: render(&c.body),
+            body_html: render_with_suggestions(&c.body, original, render),
             edited: c.updated_at > c.created_at,
             edit_url: editable.then(|| format!("{issue_base}/comments/{}/edit", c.id)),
             delete_url: editable.then(|| format!("{issue_base}/comments/{}/delete", c.id)),
+            apply_url: applicable.then(|| format!("{pull_base}/comments/{}/apply", c.id)),
         }
     };
     comments
         .iter()
         .filter(|c| c.kind == "inline" && c.reply_to.is_none())
-        .map(|root| ThreadView {
-            id: root.id,
-            path: root.path.clone().unwrap_or_default(),
-            side: root.side.clone().unwrap_or_default(),
-            line: root.line.unwrap_or_default(),
-            blob: root.blob_id.clone().unwrap_or_default(),
-            hunk: root
+        .map(|root| {
+            let hunk: Vec<(&'static str, String)> = root
                 .hunk
                 .as_deref()
                 .unwrap_or_default()
@@ -663,15 +790,28 @@ pub(crate) fn inline_threads(
                     Some(b'@') => ("hunk", l.to_owned()),
                     _ => ("ctx", l.get(1..).unwrap_or_default().to_owned()),
                 })
-                .collect(),
-            comments: std::iter::once(root)
-                .chain(comments.iter().filter(|c| c.reply_to == Some(root.id)))
-                .map(view)
-                .collect(),
-            reply_url: format!("/{}/{}/pull/{}/comments/{}/reply", repo.owner, repo.name, issue.number, root.id),
-            can_reply: viewer.is_some(),
-            outdated: false,
-            in_diff: false,
+                .collect();
+            // The commented line is the last of the hunk.
+            let original = match hunk.last() {
+                Some((class, text)) if *class != "del" && *class != "hunk" => Some(text.as_str()),
+                _ => None,
+            };
+            ThreadView {
+                id: root.id,
+                path: root.path.clone().unwrap_or_default(),
+                side: root.side.clone().unwrap_or_default(),
+                line: root.line.unwrap_or_default(),
+                blob: root.blob_id.clone().unwrap_or_default(),
+                comments: std::iter::once(root)
+                    .chain(comments.iter().filter(|c| c.reply_to == Some(root.id)))
+                    .map(|c| view(c, original))
+                    .collect(),
+                hunk,
+                reply_url: format!("{pull_base}/comments/{}/reply", root.id),
+                can_reply: viewer.is_some(),
+                outdated: false,
+                in_diff: false,
+            }
         })
         .collect()
 }
@@ -756,8 +896,9 @@ pub async fn files(
     let comments = state.core.comments(l.issue.id).await?;
     let renderer = Renderer::new(&state, &repo).await?;
     let render = |body: &str| renderer.render(body);
+    let can_apply = can_apply_suggestions(&state, &repo, &l, viewer.as_ref()).await?;
     let mut outdated = 0;
-    for mut t in inline_threads(&repo, &l.issue, &comments, viewer.as_ref(), access, &render) {
+    for mut t in inline_threads(&repo, &l.issue, &comments, viewer.as_ref(), access, can_apply, &render) {
         match place(&c.files, &t.path, &t.side, t.line, &t.blob) {
             Some((fi, hi, li)) => {
                 t.in_diff = true;
@@ -933,59 +1074,14 @@ pub async fn merge(
     if access < Access::Write {
         return Err(AppError::Forbidden);
     }
-    let l = load_pull(&state, &repo, number).await?;
-    if !l.issue.is_open() {
+    let issue = load_issue(&state, &repo, number).await?;
+    if !issue.is_open() {
         return Err(AppError::BadRequest("This pull request is not open.".into()));
     }
     let style = if f.style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
-    let (Some(base), Some(head)) = (l.base_tip, l.head_tip) else {
-        return show_page(&state, Some(user), &repo, access, number, Some("A branch is missing.".into())).await;
-    };
-    let commits: Vec<CommitSummary> =
-        with_git(&state, &repo, move |g| Ok(g.commits_between(base, head, MAX_COMMITS)?)).await?;
-    let head_label = l.pull.head_label(&l.issue);
-    let message = match style {
-        MergeStyle::Merge => format!("Merge pull request #{number} from {head_label}\n\n{}", l.issue.title),
-        MergeStyle::Squash => {
-            let list: Vec<String> = commits.iter().map(|c| format!("* {}", c.summary)).collect();
-            format!("{} (#{number})\n\n{}", l.issue.title, list.join("\n"))
-        }
-    };
-    let base_ref = l.pull.base_ref.clone();
-    let (name_, email) = (user.username.clone(), user.email.clone());
-    let before = state.core.ref_snapshot(repo.id).await?;
-    let merged = with_git(&state, &repo, move |g| {
-        let merge_base = g.merge_base(base, head)?;
-        let who = Identity { name: &name_, email: &email };
-        let commit = g.merge(&base_ref, base, head, style, &message, &who)?;
-        g.update_ref(&pull_ref(number), Some(head), None)?;
-        Ok((merge_base, commit))
-    })
-    .await;
-    let (merge_base, commit) = match merged {
-        Ok(v) => v,
-        Err(AppError::Internal(e)) => {
-            tracing::info!("merge of {}/{}#{number} failed: {e:#}", repo.owner, repo.name);
-            let msg = "Merging failed: the branches changed or conflict. Reload and try again.".to_owned();
-            return show_page(&state, Some(user), &repo, access, number, Some(msg)).await;
-        }
-        Err(e) => return Err(e),
-    };
-    state.core.mark_merged(&l.issue, Some(user.id), merge_base, head, Some(commit)).await?;
-
-    if f.delete_branch.is_some()
-        && can_delete_branch(&state, &repo, &l, Some(&user)).await?
-        && let Some(head_repo) = state.core.repo_by_id(l.pull.head_repo_id.unwrap_or(-1)).await?
-    {
-        let head_before = state.core.ref_snapshot(head_repo.id).await?;
-        let branch = format!("refs/heads/{}", l.pull.head_ref);
-        // Only if nobody pushed to it meanwhile.
-        let deleted = with_git(&state, &head_repo, move |g| Ok(g.update_ref(&branch, None, Some(head)).is_ok())).await?;
-        if deleted && head_repo.id != repo.id {
-            state.core.after_push(head_repo.id, Some(user.id), Some(head_before)).await?;
-        }
+    match state.core.merge_pull(&repo, &issue, &user, style, f.delete_branch.is_some()).await {
+        Ok(_) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
+        Err(e) => Err(e.into()),
     }
-    // After any branch deletion here, so the push event includes it.
-    state.core.after_push(repo.id, Some(user.id), Some(before)).await?;
-    Ok(Redirect::to(&issue_url(&repo, &l.issue)).into_response())
 }

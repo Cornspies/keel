@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% macro rule_fields(r) %}
+    <label>Branch name or pattern <input name="pattern" value="{{ r.pattern }}" placeholder="main or release/*" required class="mono"></label>
+    <p class="hint">In patterns, <span class="mono">*</span> matches any part of a name without slashes. A branch follows the rule for its exact name if there is one, otherwise the longest matching pattern.</p>
+    <label class="check"><input type="checkbox" name="require_pull"{% if r.require_pull %} checked{% endif %}> Require a pull request <span class="hint">Pushing to the branch is refused; changes are merged through pull requests.</span></label>
+    <label class="inline-number">Required approvals <input type="number" name="required_approvals" min="0" max="10" value="{{ r.required_approvals }}"> <span class="hint">from people with write access other than the author, before merging a pull request into it. Anyone with write access requesting changes also blocks merging.</span></label>
+    <label class="check"><input type="checkbox" name="dismiss_stale"{% if r.dismiss_stale %} checked{% endif %}> Only count reviews of the latest commits <span class="hint">New commits in a pull request need a fresh review.</span></label>
+    <label class="check"><input type="checkbox" name="allow_force_push"{% if r.allow_force_push %} checked{% endif %}> Allow force pushes and deleting the branch</label>
+{% endmacro %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/settings">Settings</a> / Branch protection</p>
+  <h2>Branch protection</h2>
+  <p class="muted">Rules keep important branches safe: they can require pull requests and approvals, and refuse force pushes and deletion. They apply to everyone, including admins.</p>
+  {% if !rules.is_empty() %}
+  <ul class="card-list rule-list">
+    {% for r in rules %}
+    <li class="card-row rule-row">
+      <details{% if error_for == r.id %} open{% endif %}>
+        <summary><span class="branch">{{ r.pattern }}</span>
+          <span class="muted small">{% if r.require_pull %}pull request required{% else %}direct pushes allowed{% endif %}{% if r.required_approvals > 0 %} · {{ r.required_approvals }} approval{% if r.required_approvals != 1 %}s{% endif %}{% endif %}{% if r.allow_force_push %} · force pushes allowed{% endif %}</span>
+        </summary>
+        {% if error_for == r.id %}{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}{% endif %}
+        <form method="post" action="{{ base_url }}/{{ r.id }}" class="form">
+          {% call rule_fields(r) %}{% endcall %}
+          <div class="row-actions"><button class="btn btn-primary">Save</button></div>
+        </form>
+        <form method="post" action="{{ base_url }}/{{ r.id }}/delete" class="form"><button class="btn btn-small btn-danger">Delete rule</button></form>
+      </details>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h3>Add a rule</h3>
+  {% if error_for == 0 %}{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}{% endif %}
+  <form method="post" action="{{ base_url }}" class="form">
+    {% call rule_fields(draft) %}{% endcall %}
+    <button class="btn btn-primary">Add rule</button>
+  </form>
+</div>
+{% endblock %}

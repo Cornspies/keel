@@ -6,7 +6,7 @@
   {% if results.is_empty() %}
   <p class="empty">No code matches “{{ q }}”.</p>
   {% else %}
-  <p class="muted">{% if truncated %}Showing the first {{ results.len() }} files{% else %}{{ results.len() }} {% if results.len() == 1 %}file{% else %}files{% endif %}{% endif %} matching “{{ q }}” on default branches.</p>
+  <p class="muted">{% if truncated %}Showing the first {{ results.len() }} files{% else %}{{ results.len() }} {% if results.len() == 1 %}file{% else %}files{% endif %}{% endif %} matching “{{ q }}” {{ scope }}.</p>
   {% for r in results %}
   <div class="box search-result">
     <div class="box-head file-head">

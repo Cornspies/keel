@@ -9,6 +9,7 @@ keel-core.workspace = true
 keel-web.workspace = true
 keel-ssh.workspace = true
 keel-hooks.workspace = true
+keel-mail.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
