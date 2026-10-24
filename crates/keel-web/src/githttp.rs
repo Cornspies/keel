@@ -35,6 +35,36 @@ fn unauthorized() -> Response {
     res
 }
 
+pub(crate) const TWO_FACTOR: &str =
+    "Two-factor authentication is on for this account: use an access token instead of the password";
+
+pub(crate) enum CredentialError {
+    Wrong,
+    /// A password for an account with two-factor authentication.
+    TwoFactor,
+    Internal(keel_core::Error),
+}
+
+/// The user of HTTP Basic credentials (`None` without any), and whether
+/// they may write: a password, or a personal access token (recognised by
+/// its prefix, in either field, as some tools put it in the username),
+/// which may be limited to reading.
+pub(crate) async fn basic_credentials(state: &AppState, headers: &HeaderMap) -> Result<Option<(User, bool)>, CredentialError> {
+    let Some((login, secret)) = basic_auth(headers) else { return Ok(None) };
+    let token = [&secret, &login].into_iter().find(|s| looks_like_token(s));
+    let result = match token {
+        Some(t) => state.core.authenticate_token(t).await,
+        None => state.core.authenticate(&login, &secret).await.map(|u| u.map(|u| (u, true))),
+    };
+    match result {
+        // A password alone isn't enough with two-factor authentication.
+        Ok(Some((user, _))) if user.totp_enabled && token.is_none() => Err(CredentialError::TwoFactor),
+        Ok(Some(found)) => Ok(Some(found)),
+        Ok(None) => Err(CredentialError::Wrong),
+        Err(e) => Err(CredentialError::Internal(e)),
+    }
+}
+
 /// Finds the repository and checks the client may run `service` on it.
 /// Anonymous clients get 401 for anything they can't access, existing or
 /// not, so private repository names don't leak.
@@ -50,31 +80,12 @@ async fn authorize(
         tracing::error!("git http: {e}");
         text(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
     };
-    // Either a password or a personal access token. Tokens are recognised
-    // by their prefix (in either field, as some tools put them in the
-    // username) and may be limited to reading.
-    let (user, can_write) = match basic_auth(headers) {
-        Some((login, secret)) => {
-            let result = if looks_like_token(&secret) || looks_like_token(&login) {
-                let token = if looks_like_token(&secret) { &secret } else { &login };
-                state.core.authenticate_token(token).await
-            } else {
-                state.core.authenticate(&login, &secret).await.map(|u| u.map(|u| (u, true)))
-            };
-            match result {
-                // A password alone isn't enough with two-factor authentication.
-                Ok(Some((user, _))) if user.totp_enabled && !looks_like_token(&secret) && !looks_like_token(&login) => {
-                    return Err(text(
-                        StatusCode::FORBIDDEN,
-                        "Two-factor authentication is on for this account: use an access token instead of the password",
-                    ));
-                }
-                Ok(Some((user, can_write))) => (Some(user), can_write),
-                Ok(None) => return Err(unauthorized()),
-                Err(e) => return Err(internal(e)),
-            }
-        }
-        None => (None, false),
+    let (user, can_write) = match basic_credentials(state, headers).await {
+        Ok(Some((user, can_write))) => (Some(user), can_write),
+        Ok(None) => (None, false),
+        Err(CredentialError::Wrong) => return Err(unauthorized()),
+        Err(CredentialError::TwoFactor) => return Err(text(StatusCode::FORBIDDEN, TWO_FACTOR)),
+        Err(CredentialError::Internal(e)) => return Err(internal(e)),
     };
     let name = name.strip_suffix(".git").unwrap_or(name);
     let repo = state.core.repo_or_redirect(owner, name).await.map_err(internal)?;
@@ -87,7 +98,12 @@ async fn authorize(
         None => Access::None,
     };
     match (repo, &user) {
-        (Some(repo), _) if access >= needed => Ok((repo, user)),
+        (Some(repo), _) if access >= needed => {
+            if service.is_write() && state.core.is_mirror(repo.id).await.map_err(internal)? {
+                return Err(text(StatusCode::FORBIDDEN, "This repository is a mirror; push to the repository it mirrors"));
+            }
+            Ok((repo, user))
+        }
         (_, None) => Err(unauthorized()),
         (Some(_), Some(_)) if access == Access::Read => Err(text(
             StatusCode::FORBIDDEN,

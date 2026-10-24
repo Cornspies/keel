@@ -128,7 +128,62 @@ fn parse_command(cmd: &str) -> Option<GitRequest> {
     })
 }
 
+/// A parsed `git-lfs-authenticate 'owner/repo.git' download|upload`:
+/// (owner, repo, upload).
+fn parse_lfs_command(cmd: &str) -> Option<(String, String, bool)> {
+    let rest = cmd.trim().strip_prefix("git-lfs-authenticate ")?;
+    let parts: Vec<&str> = rest.split_whitespace().map(|p| p.trim_matches('\'')).collect();
+    let [path, op] = parts[..] else { return None };
+    let upload = match op {
+        "download" => false,
+        "upload" => true,
+        _ => return None,
+    };
+    let path = path.trim_start_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((owner.to_owned(), repo.to_owned(), upload))
+}
+
 impl Connection {
+    /// Answers `git-lfs-authenticate`: where the LFS server is, and a
+    /// short-lived token for it.
+    async fn lfs_authenticate(&self, channel: ChannelId, (owner, name, upload): (String, String, bool), handle: Handle) -> anyhow::Result<()> {
+        let Some(user) = self.user.clone() else {
+            Self::fail(&handle, channel, "keel: authentication required").await;
+            return Ok(());
+        };
+        let repo = self.core.repo_or_redirect(&owner, &name).await?;
+        let access = match &repo {
+            Some(r) => self.core.access(r, Some(&user)).await?,
+            None => Access::None,
+        };
+        let needed = if upload { Access::Write } else { Access::Read };
+        let repo = match repo {
+            Some(r) if access >= needed => r,
+            Some(_) if access == Access::Read => {
+                Self::fail(&handle, channel, "keel: you don't have permission to push to this repository").await;
+                return Ok(());
+            }
+            _ => {
+                Self::fail(&handle, channel, "keel: repository not found").await;
+                return Ok(());
+            }
+        };
+        let token = self.core.lfs_token(&user, &repo, upload);
+        let answer = serde_json::json!({
+            "href": format!("{}/{}/{}.git/info/lfs", self.core.config.base_url, repo.owner, repo.name),
+            "header": { "Authorization": format!("Bearer {token}") },
+            "expires_in": keel_core::LFS_TOKEN_SECS,
+        });
+        let _ = handle.data(channel, format!("{answer}\n").into_bytes()).await;
+        finish(&handle, channel, 0).await;
+        Ok(())
+    }
+
     /// Writes a message to the client's stderr and ends the channel.
     async fn fail(handle: &Handle, channel: ChannelId, message: &str) {
         let _ = handle
@@ -161,6 +216,11 @@ impl Connection {
                 return Ok(());
             }
         };
+
+        if request.service == Service::ReceivePack && self.core.is_mirror(repo.id).await? {
+            Self::fail(&handle, channel, "keel: this repository is a mirror; push to the repository it mirrors").await;
+            return Ok(());
+        }
 
         // What the refs were, to tell webhooks what the push changed.
         let before = match request.service {
@@ -315,6 +375,10 @@ impl russh::server::Handler for Connection {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
         let handle = session.handle();
+        if let Some(lfs) = parse_lfs_command(&command) {
+            session.channel_success(channel)?;
+            return self.lfs_authenticate(channel, lfs, handle).await;
+        }
         let Some(request) = parse_command(&command) else {
             session.channel_success(channel)?;
             tokio::spawn(async move {
@@ -374,5 +438,8 @@ mod tests {
         assert_eq!(parse_command("git-upload-pack 'ada/x/y'"), None);
         assert_eq!(parse_command("git-upload-pack '/engine'"), None);
         assert_eq!(parse_command("rm -rf /"), None);
+        assert_eq!(parse_lfs_command("git-lfs-authenticate 'ada/engine.git' upload"), Some(("ada".into(), "engine".into(), true)));
+        assert_eq!(parse_lfs_command("git-lfs-authenticate /ada/engine download"), Some(("ada".into(), "engine".into(), false)));
+        assert_eq!(parse_lfs_command("git-lfs-authenticate ada/engine.git delete"), None);
     }
 }

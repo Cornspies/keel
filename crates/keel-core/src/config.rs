@@ -19,6 +19,8 @@ pub struct Config {
     /// `None` when no mail server is configured: no email is sent and
     /// password resets are unavailable.
     pub mail: Option<MailConfig>,
+    /// The largest file Git LFS accepts, in bytes.
+    pub lfs_max_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +50,7 @@ impl Default for Config {
             open_registration: true,
             site_name: "keel".into(),
             webhook_allow_private: false,
+            lfs_max_bytes: 2 << 30,
             mail: None,
         }
     }

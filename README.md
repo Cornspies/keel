@@ -24,6 +24,9 @@ One binary, one data directory, no external services.
 - **Commit statuses:** CI reports results through the API (GitHub's status
   API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
+- **Pull mirrors** of repositories hosted elsewhere (GitHub, GitLab, …),
+  kept in sync on a schedule or on demand.
+- **Git LFS** for large files, over HTTP and SSH.
 - **Notifications:** an inbox for issues and pull requests you opened, commented
   on, are assigned to or mentioned in, or whose repository you watch; with
   per-thread subscribe/unsubscribe, and optionally by email.
@@ -64,9 +67,23 @@ git push ssh://git@localhost:2222/<you>/<repo>.git main    # SSH: add your key u
 ```
 
 All state lives in `./data`: `keel.db` (SQLite), `repos/<id>.git` (bare
-repositories), the generated SSH host key, and `search/` (the code search
-index, which is rebuilt automatically if deleted). Back up that directory and
-you have backed up everything.
+repositories), `lfs/` (Git LFS files), the generated SSH host key, and
+`search/` (the code search index, which is rebuilt automatically if deleted).
+
+### Backups and monitoring
+
+```sh
+./keel backup --data-dir data /backups/keel-2026-10-24
+```
+
+copies the data directory while the server keeps running: the database as a
+consistent snapshot, then every repository, LFS file and the SSH host key. The
+copy is a data directory itself, so restoring is `keel serve --data-dir
+/backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
+backup tool of choice.
+
+`GET /healthz` answers `200 {"status":"ok",…}` while the server can use its
+database and `503` otherwise, for load balancers and uptime monitors.
 
 ### Configuration
 
@@ -82,7 +99,8 @@ Every flag can also be set as an environment variable.
 | `--ssh-host` / `--ssh-port` | `KEEL_SSH_HOST` / `KEEL_SSH_PORT` | host of `--base-url` / port of `--ssh-addr` |
 | `--closed-registration` | `KEEL_CLOSED_REGISTRATION` | open (can also be closed on the admin page) |
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
-| `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks can't reach loopback/private addresses |
+| `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks and mirrors can't reach loopback/private addresses |
+| `--lfs-max-file-size` | `KEEL_LFS_MAX_FILE_SIZE` | `2048` (MiB) |
 | `--smtp-url` | `KEEL_SMTP_URL` | no email |
 | `--mail-from` | `KEEL_MAIL_FROM` | `<site name> <noreply@<host of --base-url>>` |
 
@@ -120,7 +138,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 
 | Endpoint | |
 | --- | --- |
-| `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories |
+| `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private` |
 | `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
@@ -157,20 +175,23 @@ crates/
   keel        the binary (CLI, wiring)
   keel-core   config, SQLite schema + migrations, users, two-factor
               authentication, organizations, sessions, SSH keys, access
-              tokens, repositories (forks, renames, transfers),
+              tokens, repositories (forks, renames, transfers, mirrors),
               permissions, issues, labels, assignees, milestones, pull
               requests, reviews and suggestions, branch protection (and the
               pre-receive hook), commit statuses, notifications, webhook
-              queue and payloads, push events, site administration
+              queue and payloads, push events, site administration, Git LFS
+              storage, backups
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
   keel-hooks  webhook delivery worker (reqwest)
   keel-mail   SMTP sender for the mail outbox (lettre)
   keel-web    axum router: server-rendered pages (askama templates), the
-              JSON API, smart HTTP git protocol, background cache warming and
-              search indexing, assets (compiled into the binary)
-  keel-ssh    built-in SSH server (russh): public-key auth, git over SSH
+              JSON API, smart HTTP git protocol, the Git LFS server, background
+              cache warming and search indexing, assets (compiled into the
+              binary)
+  keel-ssh    built-in SSH server (russh): public-key auth, git over SSH,
+              git-lfs-authenticate
 scripts/
   smoke-test.sh   end-to-end test with real git, ssh and curl
 ```
@@ -249,6 +270,31 @@ they were made on. While that side of the file is unchanged in the current
 diff, the line still says the same thing, so the comment is shown there;
 otherwise it's shown as outdated in the conversation, with the diff lines it
 was made on (stored with it).
+
+**Mirrors** are fetched by a background worker with `git fetch --prune` (so
+branches and tags deleted upstream go too), every 1–24 hours or on "Sync now",
+with a 10-minute limit. Changes are handled like a push: webhooks, search
+indexing and caches follow. Mirrors can't be pushed to and don't take pull
+requests; "Stop mirroring" turns one into an ordinary repository. Credentials
+are stored apart from the URL, never shown again, and passed to git through
+its environment (not its command line). Like webhooks, mirrors can't fetch
+from internal addresses unless `--webhook-allow-private` is set: keel resolves
+the host and checks every address, then pins git to the checked one
+(`http.curloptResolve`), forbids redirects and allows only http(s), so a
+rebinding DNS name or a redirect can't get around it. LFS files aren't
+mirrored.
+
+**Git LFS** lives where clients expect it, at `<repo>.git/info/lfs`, with the
+batch API and basic transfers. Files are stored once by SHA-256 (under
+`data/lfs`), and uploads are hashed while they stream to disk and refused if
+the content doesn't match. Each repository has its own list of the files it
+may serve, so knowing a file's hash isn't enough to read it from another
+repository. Forks start with their parent's list, and merging a pull request
+adds the files its changes point to. Unused files are deleted when
+repositories are. Transfers are authorized with short-lived signed tokens,
+which over SSH come from `git-lfs-authenticate`. File locking isn't
+supported. The web UI shows LFS files with their real size, and "Raw" serves
+their content.
 
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
@@ -367,6 +413,9 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,
   tokens and SSH keys stop working.
+- Mirrors only fetch over http(s) from public addresses by default (see
+  above). Git LFS tokens are HMAC-signed, scoped to one repository and one
+  operation, and expire after an hour.
 - Two-factor authentication uses TOTP (RFC 6238; any authenticator app).
   Each code works once, five wrong codes end a sign-in attempt, and ten in 15
   minutes lock the second step for a while. Ten single-use recovery codes are
@@ -379,7 +428,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~360 end-to-end checks (needs git, ssh, curl, python3, openssl)
+cargo build && scripts/smoke-test.sh      # ~400 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -388,7 +437,6 @@ run automatically at startup.
 
 ## Ideas
 
-- A `keel backup` command (a consistent snapshot of a running server) and a
-  health endpoint for monitoring.
-- Pull mirrors of repositories hosted elsewhere.
-- Git LFS for large files.
+- Push mirrors (sending changes to another server), and LFS files in mirrors.
+- Git LFS file locking.
+- Metrics for Prometheus.

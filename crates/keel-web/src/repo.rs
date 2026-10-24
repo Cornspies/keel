@@ -115,6 +115,17 @@ pub(crate) struct RepoView {
     pub watchers: i64,
     /// Whether the viewer watches it (`None` when signed out).
     pub watching: Option<bool>,
+    pub mirror: Option<MirrorView>,
+}
+
+/// What the header says about a mirror.
+pub(crate) struct MirrorView {
+    pub url: String,
+    /// "synced 3 hours ago", or that the first sync is pending.
+    pub status: String,
+    pub failed: bool,
+    /// The last error, for people with write access.
+    pub error: Option<String>,
 }
 
 impl RepoView {
@@ -132,7 +143,18 @@ impl RepoView {
             Some(id) => state.core.repo_by_id(id).await?.map(|p| format!("{}/{}", p.owner, p.name)),
             None => None,
         };
+        let mirror = state.core.mirror(repo.id).await?.map(|m| MirrorView {
+            status: match m.synced_at {
+                Some(t) => format!("synced {}", relative_time(t)),
+                None if m.last_error.is_none() => "first sync in progress".into(),
+                None => "not synced yet".into(),
+            },
+            failed: m.last_error.is_some(),
+            error: m.last_error.filter(|_| access >= Access::Write),
+            url: m.url,
+        });
         Ok(Self {
+            mirror,
             parent,
             fork_count: state.core.fork_count(repo.id).await?,
             watchers: state.core.watcher_count(repo.id).await?,
@@ -504,6 +526,8 @@ pub(crate) enum BlobContent {
     Image,
     Binary,
     TooLarge,
+    /// A Git LFS pointer: the file's size, and whether it was uploaded.
+    Lfs { size: String, stored: bool },
 }
 
 #[derive(Template)]
@@ -554,7 +578,11 @@ pub async fn blob(
         let is_markdown = matches!(ext.as_str(), "md" | "markdown");
         let size = blob.data.len();
 
-        let content = if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        let lfs = keel_core::parse_pointer(&blob.data);
+        let content = if let Some((_, size)) = &lfs {
+            // Whether it's stored is checked below.
+            BlobContent::Lfs { size: human_size(*size as usize), stored: false }
+        } else if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             BlobContent::Image
         } else if blob.binary {
             BlobContent::Binary
@@ -587,24 +615,40 @@ pub async fn blob(
             _ => bytecount_lines(&blob.data),
         };
         let latest = g.log(r.commit, &r.path, 0, 1)?.into_iter().next();
-        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(g, &link_base, "tree")?)))
+        let image = IMAGE_EXTENSIONS.contains(&ext.as_str());
+        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(g, &link_base, "tree")?, lfs, image)))
     })
     .await?;
 
-    let (r, default_branch, size, line_count, content, is_markdown, latest, refs) = match result {
+    let (r, default_branch, size, line_count, mut content, is_markdown, latest, refs, lfs, image) = match result {
         Ok(v) => v,
         Err(r) => {
             return Ok(Redirect::to(&format!("{base}/tree/{}/{}", encode_path(&r.rev), encode_path(&r.path)))
                 .into_response());
         }
     };
+    // For LFS files, the size of the file rather than of its pointer.
+    let shown_size = match &lfs {
+        Some((_, s)) => human_size(*s as usize),
+        None => human_size(size),
+    };
+    let line_count = if lfs.is_some() { 0 } else { line_count };
+    if let Some((oid, _)) = lfs
+        && state.core.lfs_object(repo.id, &oid).await?.is_some()
+    {
+        content = match content {
+            _ if image => BlobContent::Image,
+            BlobContent::Lfs { size, .. } => BlobContent::Lfs { size, stored: true },
+            other => other,
+        };
+    }
     let rev_url = encode_path(&r.rev);
     let path_url = encode_path(&r.path);
     html(BlobPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
         crumbs: crumbs(&base, &r.rev, &r.path),
-        size: human_size(size),
+        size: shown_size,
         line_count,
         content,
         is_markdown,
@@ -637,6 +681,24 @@ pub async fn raw(
     })
     .await?;
 
+    // Git LFS: the file itself rather than its pointer, if it's stored.
+    if let Some((oid, size)) = keel_core::parse_pointer(&blob.data)
+        && state.core.lfs_object(repo.id, &oid).await?.is_some()
+    {
+        let content_type = match extension(&r.path).as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "pdf" => "application/pdf",
+            _ => "application/octet-stream",
+        };
+        let mut res = crate::lfs::serve_object(&state, &oid, size, content_type).await;
+        let h = res.headers_mut();
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if repo.is_private { "private, no-cache" } else { "public, no-cache" }));
+        h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'"));
+        return Ok(res);
+    }
     let etag = format!("\"{}\"", blob.id);
     let cache = match (repo.is_private, r.rev.len() == 40) {
         // A full commit hash pins the content forever.
@@ -980,6 +1042,10 @@ struct SettingsPage {
     owned_by_org: bool,
     /// Accounts the repository can be moved to: you and your organizations.
     transfer_targets: Vec<String>,
+    mirror: Option<keel_core::Mirror>,
+    intervals: &'static [(i64, &'static str)],
+    /// Git LFS files and their total size, if any.
+    lfs: Option<(i64, String)>,
 }
 
 /// An error message for one of the settings page's forms.
@@ -990,6 +1056,7 @@ pub(crate) struct SettingsErrors {
     pub collaborator: Option<String>,
     pub transfer: Option<String>,
     pub delete: Option<String>,
+    pub mirror: Option<String>,
 }
 
 /// The repository, if `user` may administer it.
@@ -1021,6 +1088,12 @@ async fn settings_page(state: &AppState, user: User, repo: &Repo, errors: Settin
         collaborators,
         owned_by_org,
         transfer_targets,
+        mirror: state.core.mirror(repo.id).await?,
+        intervals: keel_core::MIRROR_INTERVALS,
+        lfs: match state.core.lfs_usage(repo.id).await? {
+            (0, _) => None,
+            (n, bytes) => Some((n, crate::render::human_size(bytes as usize))),
+        },
     })
 }
 
@@ -1108,6 +1181,58 @@ pub async fn delete(
     }
     state.core.delete_repo(&repo).await?;
     Ok(Redirect::to(&format!("/{}", repo.owner)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct MirrorForm {
+    url: String,
+    #[serde(default)]
+    username: String,
+    /// Empty keeps the stored one.
+    #[serde(default)]
+    password: String,
+    interval: i64,
+}
+
+pub async fn update_mirror(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<MirrorForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    let password = (!f.password.is_empty()).then_some(f.password.as_str());
+    match state.core.update_mirror(repo.id, &f.url, &f.username, password, f.interval).await {
+        Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings#mirror", repo.owner, repo.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => {
+            settings_page(&state, user, &repo, SettingsErrors { mirror: Some(msg), ..Default::default() }).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn stop_mirroring(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.stop_mirroring(repo.id).await?;
+    Ok(Redirect::to(&format!("/{}/{}/settings", repo.owner, repo.name)).into_response())
+}
+
+/// "Sync now", for anyone with write access.
+pub async fn sync_mirror(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+) -> AppResult {
+    let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    if access < Access::Write {
+        return Err(AppError::Forbidden);
+    }
+    state.core.request_mirror_sync(repo.id).await?;
+    Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
 }
 
 #[derive(Deserialize)]

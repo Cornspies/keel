@@ -14,14 +14,17 @@ macro_rules! user_columns {
 mod activity;
 mod admin;
 mod auth;
+mod backup;
 mod cache;
 mod config;
 mod issues;
 mod labels;
+mod lfs;
 mod mail;
 mod names;
 mod notifications;
 mod milestones;
+mod mirrors;
 mod permissions;
 mod protection;
 mod pulls;
@@ -40,16 +43,19 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
+pub use backup::{BackupReport, backup};
 pub use activity::{Activity, IssueAction, label_json, time as json_time};
 pub use admin::{AdminUser, SiteSettings, SiteStats};
 pub use cache::EntryCommits;
 pub use config::{Config, MailConfig, SshConfig};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
+pub use lfs::{LFS_TOKEN_SECS, parse_pointer, valid_oid};
 pub use mail::Mail;
 pub use names::{validate_repo_name, validate_username};
 pub use notifications::{Notification, Subscription, mentions};
 pub use milestones::{Milestone, parse_due_date};
+pub use mirrors::{MIRROR_INTERVALS, Mirror, start_mirror_worker};
 pub use permissions::{Access, OrgRole};
 pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for};
 pub use pulls::{PullRequest, pull_ref, related};
@@ -117,8 +123,12 @@ pub struct Core {
     hook_wakeup: Arc<tokio::sync::Notify>,
     /// Signalled when mail is queued.
     mail_wakeup: Arc<tokio::sync::Notify>,
+    /// Signalled when a mirror should sync.
+    mirror_wakeup: Arc<tokio::sync::Notify>,
     /// Instance settings from the admin page, read on every page view.
     settings: Arc<std::sync::RwLock<SiteSettings>>,
+    /// Signs short-lived tokens (Git LFS).
+    token_secret: Arc<String>,
 }
 
 impl Core {
@@ -139,18 +149,22 @@ impl Core {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&db).await?;
+        let token_secret = Arc::new(Self::load_token_secret(&db).await?);
         let core = Self {
             db,
             config: Arc::new(config),
             events: tokio::sync::broadcast::channel(256).0,
             hook_wakeup: Arc::default(),
             mail_wakeup: Arc::default(),
+            mirror_wakeup: Arc::default(),
             settings: Arc::default(),
+            token_secret,
         };
         core.load_settings().await?;
         core.delete_expired_sessions().await?;
         core.prune_notifications(180).await?;
         core.prune_mail().await?;
+        core.prune_lfs().await?;
         Ok(core)
     }
 

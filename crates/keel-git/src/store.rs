@@ -83,6 +83,38 @@ pub fn fork(src: &Path, dst: &Path) -> Result<()> {
     })
 }
 
+/// Copies the bare repository `src` to `dst` for a backup: every ref
+/// (including pull request refs) and the objects they need, as real copies
+/// rather than hardlinks. Safe while `src` is in use: git reads the refs
+/// first and then copies what they reach, so pushes or repacks meanwhile
+/// can't leave the copy inconsistent.
+pub fn backup(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        return Err(Error::Other(format!("{} already exists", dst.display())));
+    }
+    let out = Command::new("git")
+        .args(["clone", "--mirror", "--no-hardlinks", "--quiet"])
+        .arg(src)
+        .arg(dst)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()?;
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(dst);
+        return Err(Error::Other(format!("git clone: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let finish = || -> Result<()> {
+        let repo = git2::Repository::open_bare(dst)?;
+        repo.remote_delete("origin")?;
+        drop(repo);
+        apply_config(dst)?;
+        let _ = std::fs::remove_dir_all(dst.join("hooks"));
+        Ok(())
+    };
+    finish().inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(dst);
+    })
+}
+
 /// Runs after every push. Keeps reads fast without full `git gc` runs:
 /// - points HEAD at an existing branch if it is unborn (first push was to a
 ///   branch other than the default),

@@ -17,6 +17,15 @@ struct Cli {
 enum Command {
     /// Run the web UI, git over HTTP and the SSH server.
     Serve(ServeArgs),
+    /// Copy a data directory, consistently, while the server runs. The copy
+    /// is a data directory itself: restore by pointing --data-dir at it.
+    Backup {
+        /// The data directory to back up.
+        #[arg(long, env = "KEEL_DATA_DIR", default_value = "data")]
+        data_dir: PathBuf,
+        /// Where to put the copy (a new or empty directory).
+        out: PathBuf,
+    },
     /// Git hooks; run by git during pushes, not by people.
     #[command(hide = true)]
     Hook {
@@ -78,6 +87,10 @@ struct ServeArgs {
     #[arg(long, env = "KEEL_SMTP_URL", hide_env_values = true)]
     smtp_url: Option<String>,
 
+    /// The largest file Git LFS accepts, in MiB.
+    #[arg(long, env = "KEEL_LFS_MAX_FILE_SIZE", default_value_t = 2048)]
+    lfs_max_file_size: u64,
+
     /// The From address of emails [default: "<site name> <noreply@<host of
     /// --base-url>>"].
     #[arg(long, env = "KEEL_MAIL_FROM")]
@@ -93,6 +106,20 @@ fn main() -> anyhow::Result<()> {
                 )
                 .init();
             tokio::runtime::Runtime::new()?.block_on(serve(args))
+        }
+        Command::Backup { data_dir, out } => {
+            let report = tokio::runtime::Runtime::new()?.block_on(keel_core::backup(&data_dir, &out))?;
+            println!(
+                "Backed up {} to {}: the database, {} repositories{}, {} large files; {:.1} MB in {:.1}s.",
+                data_dir.display(),
+                out.display(),
+                report.repos,
+                if report.skipped > 0 { format!(" ({} deleted meanwhile, skipped)", report.skipped) } else { String::new() },
+                report.lfs_objects,
+                report.bytes as f64 / 1e6,
+                report.took.as_secs_f64(),
+            );
+            Ok(())
         }
         Command::Hook { name } if name == "pre-receive" => std::process::exit(keel_core::pre_receive()),
         Command::Hook { name } => bail!("unknown hook {name}"),
@@ -150,6 +177,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         open_registration: !args.closed_registration,
         site_name: args.site_name,
         webhook_allow_private: args.webhook_allow_private,
+        lfs_max_bytes: args.lfs_max_file_size.saturating_mul(1 << 20),
         mail,
     };
     let core = Core::open(config)
@@ -158,6 +186,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     keel_hooks::start(core.clone());
     keel_mail::start(core.clone()).context("setting up email")?;
+    keel_core::start_mirror_worker(core.clone());
     let app = keel_web::router(keel_web::AppState::new(core.clone()));
     let listener = tokio::net::TcpListener::bind(args.http_addr)
         .await

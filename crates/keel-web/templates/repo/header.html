@@ -24,6 +24,13 @@
     </div>
   </div>
   {% if let Some(p) = repo.parent %}<p class="muted small forked-from">forked from <a href="/{{ p }}">{{ p }}</a></p>{% endif %}
+  {% if let Some(m) = repo.mirror %}
+  <div class="muted small forked-from mirror-line">
+    <span>mirror of <a href="{{ m.url }}" rel="nofollow noopener noreferrer" class="mono">{{ m.url }}</a> · {{ m.status }}{% if m.failed %} · <span class="overdue">last sync failed</span>{% endif %}</span>
+    {% if repo.can_write %}<form method="post" action="/{{ repo.owner }}/{{ repo.name }}/mirror/sync" class="inline"><button class="linkish">Sync now</button></form>{% endif %}
+  </div>
+  {% if let Some(e) = m.error %}<p class="flash flash-error small">Last sync failed: {{ e }}</p>{% endif %}
+  {% endif %}
   {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
   <nav class="tabs">
     <a href="/{{ repo.owner }}/{{ repo.name }}"{% if repo.tab == "code" %} class="active"{% endif %}>Code</a>

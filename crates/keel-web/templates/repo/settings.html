@@ -18,6 +18,29 @@
   </form>
   <p class="hint">Links, clones and remotes using the old name keep working until another repository takes it.</p>
 
+  {% if let Some(m) = mirror %}
+  <h2 id="mirror">Mirror</h2>
+  <p class="muted">This repository mirrors another one: keel fetches its branches and tags {% for (secs, label) in intervals %}{% if *secs == m.interval_secs %}{{ label }}{% endif %}{% endfor %}, and nobody can push to it.</p>
+  {% if let Some(e) = errors.mirror %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/mirror" class="form">
+    <label>Clone URL <input name="url" value="{{ m.url }}" required></label>
+    <div class="form-row">
+      <label>Username <input name="username" value="{{ m.username }}" autocomplete="off"></label>
+      <label>Password or token <input name="password" type="password" autocomplete="new-password" placeholder="{% if m.has_password %}(unchanged){% endif %}"></label>
+    </div>
+    <label>Sync <select name="interval">{% for (secs, label) in intervals %}<option value="{{ secs }}"{% if *secs == m.interval_secs %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <button class="btn btn-primary">Save</button>
+  </form>
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/mirror/stop" class="form">
+    <p class="hint">Stop mirroring to make it an ordinary repository that people can push to.</p>
+    <button class="btn">Stop mirroring</button>
+  </form>
+  {% endif %}
+
+  {% if let Some((files, size)) = lfs %}
+  <p class="muted">Git LFS: {{ files }} file{% if *files != 1 %}s{% endif %}, {{ size }}.</p>
+  {% endif %}
+
   <h2>Branch protection</h2>
   <p class="muted">Require pull requests and approvals for important branches, and refuse force pushes: <a href="/{{ repo.owner }}/{{ repo.name }}/settings/branches">manage rules</a>.</p>
 

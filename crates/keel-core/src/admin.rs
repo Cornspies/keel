@@ -90,6 +90,11 @@ impl Core {
         self.load_settings().await
     }
 
+    /// Whether the database answers (for health checks).
+    pub async fn database_ok(&self) -> bool {
+        sqlx::query("SELECT 1").execute(&self.db).await.is_ok()
+    }
+
     pub async fn site_stats(&self) -> Result<SiteStats> {
         let (users, admins, disabled, orgs): (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT COALESCE(SUM(kind = 'user'), 0), COALESCE(SUM(kind = 'user' AND is_admin), 0),

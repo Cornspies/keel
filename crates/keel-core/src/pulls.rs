@@ -82,6 +82,9 @@ impl Core {
         if !related(repo, head_repo) || self.access(head_repo, Some(author)).await? == Access::None {
             return Err(Error::NotFound);
         }
+        if self.is_mirror(repo.id).await? {
+            return invalid("This repository is a mirror; open pull requests where it's mirrored from.");
+        }
         let cross = repo.id != head_repo.id;
         if !cross && base_ref == head_ref {
             return invalid("Choose two different branches.");
@@ -331,6 +334,9 @@ impl Core {
         if !issue.is_open() {
             return invalid("This pull request is not open.");
         }
+        if self.is_mirror(repo.id).await? {
+            return invalid("This repository is a mirror and can't be changed here.");
+        }
         let pull = self.pull(issue.id).await?.ok_or(Error::NotFound)?;
         let (Some(base), Some(head)) = self.pull_tips(issue, &pull).await? else {
             return invalid("A branch is missing.");
@@ -370,6 +376,10 @@ impl Core {
             Err(e) => return Err(e),
         };
         self.mark_merged(issue, Some(user.id), merge_base, head, Some(commit)).await?;
+        // Large files uploaded to a fork come along.
+        if let Some(head_repo) = pull.head_repo_id {
+            self.share_lfs_objects(head_repo, repo.id, merge_base, head).await?;
+        }
 
         if delete_branch
             && let Some(head_repo) = self.repo_by_id(pull.head_repo_id.unwrap_or(-1)).await?
@@ -569,6 +579,21 @@ mod tests {
         git(&["push", "-q", core.repo_path(&repo).to_str().unwrap(), "topic:main"]);
         core.sync_pulls(repo.id, Some(ada.id)).await.unwrap();
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().state, "merged");
+
+        // Merging it lets the base read the fork's large files.
+        let oid = "e".repeat(64);
+        std::fs::create_dir_all(core.lfs_path(&oid).parent().unwrap()).unwrap();
+        std::fs::write(core.lfs_path(&oid), "big").unwrap();
+        core.lfs_link(fork.id, &oid, 3).await.unwrap();
+        git(&["checkout", "-qb", "lfs", "topic"]);
+        std::fs::write(work.path().join("big.bin"), format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 3\n")).unwrap();
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-qm", "big"]);
+        git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "lfs"]);
+        let lfs_pull = core.create_pull(&repo, &bob, "Big", "", "main", &fork, "lfs").await.unwrap();
+        assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), None);
+        core.merge_pull(&repo, &lfs_pull, &ada, keel_git::MergeStyle::Merge, false).await.unwrap();
+        assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), Some(3));
 
         // Deleting the fork keeps the pull request.
         core.delete_repo(&fork).await.unwrap();

@@ -10,6 +10,7 @@ mod githttp;
 mod issues;
 mod labels;
 mod lastcommit;
+mod lfs;
 mod notifications;
 mod orgs;
 mod hooks;
@@ -70,6 +71,7 @@ pub struct Inner {
     /// Unread notifications per user id, looked up with the session on each
     /// request so that page headers can show it.
     unread: Cache<i64, i64>,
+    started: std::time::Instant,
 }
 
 impl Deref for AppState {
@@ -112,6 +114,7 @@ impl AppState {
                 .build(),
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
+            started: std::time::Instant::now(),
         }))
     }
 
@@ -217,6 +220,9 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/settings", get(repo::settings).post(repo::update_settings))
         .route("/{owner}/{repo}/delete", post(repo::delete))
         .route("/{owner}/{repo}/rename", post(repo::rename))
+        .route("/{owner}/{repo}/settings/mirror", post(repo::update_mirror))
+        .route("/{owner}/{repo}/settings/mirror/stop", post(repo::stop_mirroring))
+        .route("/{owner}/{repo}/mirror/sync", post(repo::sync_mirror))
         .route("/{owner}/{repo}/transfer", post(repo::transfer))
         .route("/{owner}/{repo}/search", get(search::in_repo))
         .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
@@ -274,7 +280,12 @@ pub fn router(state: AppState) -> Router {
     let git = Router::new()
         .route("/{owner}/{repo}/info/refs", get(githttp::info_refs))
         .route("/{owner}/{repo}/git-upload-pack", post(githttp::upload_pack))
-        .route("/{owner}/{repo}/git-receive-pack", post(githttp::receive_pack));
+        .route("/{owner}/{repo}/git-receive-pack", post(githttp::receive_pack))
+        .route("/{owner}/{repo}/info/lfs/objects/batch", post(lfs::batch))
+        .route("/{owner}/{repo}/info/lfs/objects/{oid}", get(lfs::download).put(lfs::upload))
+        .route("/{owner}/{repo}/info/lfs/locks/verify", post(lfs::verify_locks))
+        .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks))
+        .route("/healthz", get(health));
 
     // The API authenticates with tokens only, so needs no CSRF check.
     let api = api::routes().layer(CompressionLayer::new());
@@ -283,6 +294,20 @@ pub fn router(state: AppState) -> Router {
         .merge(api)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+/// For monitoring and load balancers: 200 if the server can use its
+/// database, 503 otherwise.
+async fn health(State(state): State<AppState>) -> Response {
+    let database = state.core.database_ok().await;
+    let body = serde_json::json!({
+        "status": if database { "ok" } else { "unavailable" },
+        "version": env!("CARGO_PKG_VERSION"),
+        "database": database,
+        "uptime_seconds": state.started.elapsed().as_secs(),
+    });
+    let status = if database { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status, [(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
 }
 
 /// Security headers for HTML pages, plus CSRF protection: state-changing

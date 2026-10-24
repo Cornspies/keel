@@ -32,6 +32,8 @@
   <div class="blob-image"><img src="{{ raw_url }}" alt="{{ path }}"></div>
   {% when BlobContent::Binary %}
   <p class="blob-note">Binary file not shown. <a href="{{ raw_url }}">Download</a></p>
+  {% when BlobContent::Lfs { size, stored } %}
+  <p class="blob-note">Stored with Git LFS ({{ size }}).{% if *stored %} <a href="{{ raw_url }}">Download</a>{% else %} The file hasn't been uploaded to this server.{% endif %}</p>
   {% when BlobContent::TooLarge %}
   <p class="blob-note">This file is too large to display. <a href="{{ raw_url }}">View raw</a></p>
   {% endmatch %}

@@ -103,6 +103,18 @@ impl Core {
             .execute(&mut *tx)
             .await?;
         insert_default_labels(&mut tx, id).await?;
+        // Forks can read their parent's large files.
+        if let Some(parent) = fork_of {
+            sqlx::query(
+                "INSERT INTO lfs_objects (repo_id, oid, size, created_at)
+                 SELECT ?1, oid, size, ?3 FROM lfs_objects WHERE repo_id = ?2",
+            )
+            .bind(id)
+            .bind(parent.id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
         // People watch their own repositories.
         if !owner.is_org() {
             sqlx::query("INSERT INTO watches (user_id, repo_id, created_at) VALUES (?1, ?2, ?3)")
@@ -406,6 +418,13 @@ impl Core {
             .await
             .map_err(anyhow::Error::from)?
             .map_err(anyhow::Error::from)?;
+        // Large files only it used can go.
+        let core = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = core.prune_lfs().await {
+                tracing::warn!("pruning LFS objects: {e}");
+            }
+        });
         Ok(())
     }
 }

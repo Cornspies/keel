@@ -291,6 +291,9 @@ impl Core {
         if self.access(&head_repo, Some(user)).await? < Access::Write {
             return invalid("Only people who can push to the branch can apply suggestions.");
         }
+        if self.is_mirror(head_repo.id).await? {
+            return invalid("The branch is in a mirror, which can't be changed here.");
+        }
         if !self.may_update_branch(head_repo.id, &pull.head_ref, false, false).await? {
             return invalid(format!("{} is protected; change it through a pull request.", pull.head_ref));
         }

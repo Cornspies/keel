@@ -351,6 +351,9 @@ async fn repo_value(state: &AppState, r: &Repo) -> ApiResult<Value> {
     let mut v = state.core.repo_json(r);
     let default = crate::repo::with_git(state, r, |g| Ok(g.default_branch()?)).await?;
     v["default_branch"] = json!(default);
+    let mirror = state.core.mirror(r.id).await?;
+    v["mirror_url"] = json!(mirror.as_ref().map(|m| &m.url));
+    v["mirror_synced_at"] = mirror.and_then(|m| m.synced_at).map_or(Value::Null, json_time);
     Ok(v)
 }
 
@@ -392,13 +395,28 @@ pub struct NewRepo {
     description: String,
     #[serde(default)]
     private: bool,
+    /// Mirror the repository at this http(s) URL.
+    mirror_url: Option<String>,
+    #[serde(default)]
+    mirror_username: String,
+    #[serde(default)]
+    mirror_password: String,
+    /// Seconds between syncs: 3600, 14400, 28800 (default) or 86400.
+    mirror_interval: Option<i64>,
 }
 
 async fn create_repo_in(state: &AppState, user: &User, owner: &User, body: NewRepo) -> ApiResult {
     if !state.core.can_create_repo_in(owner, user).await? {
         return Err(error(StatusCode::FORBIDDEN, format!("You can't create repositories in {}", owner.username)));
     }
-    let r = state.core.create_repo(owner, &body.name, &body.description, body.private).await?;
+    let r = match body.mirror_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        Some(url) => {
+            let interval = body.mirror_interval.unwrap_or(28_800);
+            let (user, pass) = (&body.mirror_username, &body.mirror_password);
+            state.core.create_mirror(owner, &body.name, &body.description, body.private, url, user, pass, interval).await?
+        }
+        None => state.core.create_repo(owner, &body.name, &body.description, body.private).await?,
+    };
     Ok((StatusCode::CREATED, Json(repo_value(state, &r).await?)).into_response())
 }
 

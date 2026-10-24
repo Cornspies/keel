@@ -191,6 +191,8 @@ struct NewRepoPage {
     name: String,
     description: String,
     is_private: bool,
+    mirror_url: String,
+    intervals: &'static [(i64, &'static str)],
 }
 
 pub(crate) async fn possible_owners(state: &AppState, user: &User) -> AppResult<Vec<String>> {
@@ -222,6 +224,8 @@ pub async fn new_repo_form(
         name: String::new(),
         description: String::new(),
         is_private: false,
+        mirror_url: String::new(),
+        intervals: keel_core::MIRROR_INTERVALS,
     })
 }
 
@@ -232,6 +236,13 @@ pub struct NewRepoForm {
     #[serde(default)]
     description: String,
     private: Option<String>,
+    #[serde(default)]
+    mirror_url: String,
+    #[serde(default)]
+    mirror_username: String,
+    #[serde(default)]
+    mirror_password: String,
+    mirror_interval: Option<i64>,
 }
 
 pub async fn new_repo(
@@ -249,7 +260,16 @@ pub async fn new_repo(
     if !state.core.can_create_repo_in(&owner, &user).await? {
         return Err(AppError::Forbidden);
     }
-    match state.core.create_repo(&owner, &f.name, &f.description, is_private).await {
+    let created = if f.mirror_url.trim().is_empty() {
+        state.core.create_repo(&owner, &f.name, &f.description, is_private).await
+    } else {
+        let interval = f.mirror_interval.unwrap_or(8 * 3600);
+        state
+            .core
+            .create_mirror(&owner, &f.name, &f.description, is_private, &f.mirror_url, &f.mirror_username, &f.mirror_password, interval)
+            .await
+    };
+    match created {
         Ok(repo) => {
             // People watch repositories they create (also in organizations).
             state.core.set_watching(user.id, repo.id, true).await?;
@@ -263,6 +283,8 @@ pub async fn new_repo(
             name: f.name,
             description: f.description,
             is_private,
+            mirror_url: f.mirror_url,
+            intervals: keel_core::MIRROR_INTERVALS,
         }),
         Err(e) => Err(e.into()),
     }

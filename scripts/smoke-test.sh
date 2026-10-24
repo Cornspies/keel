@@ -604,6 +604,86 @@ TIA=$(curl -s -b "$T/ada" "$B/admin/users?q=tia" | grep -o 'admin/users/[0-9]*/2
 check "admins can turn it off" is "$(post "$T/ada" "/admin/users/$TIA/2fa" x=1)" 303
 check "then the password is enough" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=tia&password=password-tia" "$B/login")" "$B/"
 
+echo "== mirrors"
+check "only http(s) URLs" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=m0" --data-urlencode "mirror_url=file:///etc" "$B/new")" "http://"
+check "mirror a repository" is "$(post "$T/ada" /new name=engine-mirror "mirror_url=$B/ada/engine.git" mirror_interval=3600)" 303
+synced() { # synced <repo> <ref> <commit>: waits up to 10s for the mirror to have it
+    for _ in $(seq 1 100); do [ "$(git ls-remote "$B/ada/$1.git" "$2" | cut -f1)" = "$3" ] && return 0; sleep 0.1; done
+    echo "$1 doesn't have $2 at $3"; return 1
+}
+SRC_MAIN=$(git ls-remote "$B/ada/engine.git" refs/heads/main | cut -f1)
+check "it copies the branches" synced engine-mirror refs/heads/main "$SRC_MAIN"
+check "the page says so" contains "$(curl -s "$B/ada/engine-mirror")" "mirror of"
+check "and the default branch" is "$(curl -s "$API/repos/ada/engine-mirror" | field '["default_branch"]')" main
+check "pushing to it is refused" bash -c "git -C '$W' push 'http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/engine-mirror.git' HEAD:refs/heads/x 2>&1 | grep -q mirror"
+check "so are pull requests into it" contains "$(curl -s -b "$T/ada" -H "$O" -d "base=main&head=checked&title=x" "$B/ada/engine-mirror/pulls")" "mirror"
+git -C "$W" checkout -q -b later main && echo later >"$W/later.txt" && git -C "$W" add -A && git -C "$W" commit -qm Later
+git -C "$W" push -q "$ADA_HTTP" later
+check "sync now" is "$(post "$T/ada" /ada/engine-mirror/mirror/sync x=1)" 303
+check "brings new branches" synced engine-mirror refs/heads/later "$(git -C "$W" rev-parse HEAD)"
+git -C "$W" push -q "$ADA_HTTP" :later
+check "and deletions" bash -c "post() { :; }; curl -s -o /dev/null -b '$T/ada' -H '$O' -d x=1 '$B/ada/engine-mirror/mirror/sync'; for _ in \$(seq 1 100); do [ -z \"\$(git ls-remote '$B/ada/engine-mirror.git' refs/heads/later)\" ] && exit 0; sleep 0.1; done; exit 1"
+check "private sources need credentials" is "$(post "$T/ada" /new name=vault-mirror private=on "mirror_url=$B/ada/secret.git")" 303
+failed() { for _ in $(seq 1 100); do curl -s -b "$T/ada" "$B/ada/vault-mirror" | grep -q "Last sync failed" && return 0; sleep 0.1; done; return 1; }
+check "without them it fails, and says why" failed
+check "add a token" is "$(post "$T/ada" /ada/vault-mirror/settings/mirror "url=$B/ada/secret.git" username=ada "password=$RO" interval=3600)" 303
+check "then it syncs" bash -c "curl -s -o /dev/null -b '$T/ada' -H '$O' -d x=1 '$B/ada/vault-mirror/mirror/sync'; for _ in \$(seq 1 100); do git ls-remote 'http://ada:$RO@127.0.0.1:$HTTP_PORT/ada/vault-mirror.git' refs/heads/main | grep -q . && exit 0; sleep 0.1; done; exit 1"
+check "the token isn't shown" bash -c "! curl -s -b '$T/ada' '$B/ada/vault-mirror/settings' | grep -q '$RO'"
+check "stop mirroring" is "$(post "$T/ada" /ada/engine-mirror/settings/mirror/stop x=1)" 303
+check "then it takes pushes" git -C "$W" push -q "http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/engine-mirror.git" HEAD:refs/heads/x
+
+echo "== Git LFS"
+LFS_URL="$B/ada/engine.git/info/lfs"
+batch() { # batch <token or ""> <repo> <json>
+    local auth=()
+    [ -n "$1" ] && auth=(-u "ada:$1")
+    curl -s "${auth[@]}" -H "Accept: application/vnd.git-lfs+json" -H "Content-Type: application/vnd.git-lfs+json" -d "$3" "$B/ada/$2.git/info/lfs/objects/batch"
+}
+printf 'large\n' >"$T/large.txt"
+OID=$(sha256sum "$T/large.txt" | cut -d' ' -f1)
+REQ='{"operation":"upload","transfers":["basic"],"objects":[{"oid":"'$OID'","size":6}]}'
+check "anonymous uploads are refused" contains "$(batch "" engine "$REQ")" "Authentication required"
+check "read-only tokens can't upload" contains "$(batch "$RO" engine "$REQ")" "read-only"
+UP=$(batch "$RW" engine "$REQ")
+check "uploads are offered" contains "$UP" '"upload"'
+HREF=$(field '["objects"][0]["actions"]["upload"]["href"]' <<<"$UP")
+AUTH=$(field '["objects"][0]["actions"]["upload"]["header"]["Authorization"]' <<<"$UP")
+check "content that doesn't match is refused" is "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: $AUTH" --data-binary 'other' "$HREF")" 422
+check "upload with the batch's token" is "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: $AUTH" --data-binary @"$T/large.txt" "$HREF")" 200
+check "then it's already there" bash -c "! grep -q '\"actions\"' <<<'$(batch "$RW" engine "$REQ")'"
+DOWN=$(batch "" engine '{"operation":"download","objects":[{"oid":"'$OID'","size":6}]}')
+check "public repositories' files download anonymously" is "$(curl -s "$(field '["objects"][0]["actions"]["download"]["href"]' <<<"$DOWN")")" large
+check "other repositories can't read it" contains "$(batch "$RW" engine-mirror '{"operation":"download","objects":[{"oid":"'$OID'","size":6}]}')" "does not exist"
+check "forged tokens are refused" is "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer lfs1.1.1.1.9999999999.abc" "$HREF")" 401
+check "locks are answered" contains "$(curl -s -u "ada:$RW" -H "Content-Type: application/vnd.git-lfs+json" -d '{}' "$LFS_URL/locks/verify")" '"ours"'
+if command -v git-lfs >/dev/null; then
+    L=$T/lfs-work
+    git clone -q "http://ada:$RW@127.0.0.1:$HTTP_PORT/ada/engine.git" "$L"
+    git -C "$L" lfs install --local >/dev/null
+    git -C "$L" lfs track "*.bin" >/dev/null
+    head -c 3000000 /dev/urandom >"$L/data.bin"
+    BIN_SUM=$(sha256sum "$L/data.bin" | cut -d' ' -f1)
+    git -C "$L" add -A && git -C "$L" commit -qm "Add data.bin"
+    check "git lfs push" bash -c "git -C '$L' push -q origin HEAD:refs/heads/lfs 2>&1 | grep -v -i 'uploading' | grep -qi 'error' && exit 1 || exit 0"
+    check "the pointer is in the repository" contains "$(curl -s "$B/ada/engine/blob/lfs/data.bin")" "Stored with Git LFS"
+    check "raw serves the file" is "$(curl -s "$B/ada/engine/raw/lfs/data.bin" | sha256sum | cut -d' ' -f1)" "$BIN_SUM"
+    check "settings count it" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings")" "Git LFS: 2 files"
+    GIT_LFS_SKIP_SMUDGE=1 git clone -q -b lfs "http://ada:$RW@127.0.0.1:$HTTP_PORT/ada/engine.git" "$T/lfs-clone"
+    check "git lfs pull over HTTP" bash -c "cd '$T/lfs-clone' && git lfs install --local >/dev/null && git lfs pull >/dev/null 2>&1 && [ \"\$(sha256sum data.bin | cut -d' ' -f1)\" = '$BIN_SUM' ]"
+    GIT_LFS_SKIP_SMUDGE=1 git clone -q -b lfs "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/lfs-ssh"
+    check "and over SSH" bash -c "cd '$T/lfs-ssh' && git lfs install --local >/dev/null && git lfs pull >/dev/null 2>&1 && [ \"\$(sha256sum data.bin | cut -d' ' -f1)\" = '$BIN_SUM' ]"
+else
+    echo "SKIP  git lfs client checks (git-lfs isn't installed)"
+fi
+
+echo "== backups and health"
+check "health" is "$(curl -s "$B/healthz" | field '["status"]')" ok
+check "backup a running server" bash -c "'$BIN' backup --data-dir '$T/data' '$T/backup' | grep -q 'Backed up'"
+check "the copy has the repositories" git clone -q "$T/backup/repos/1.git" "$T/restored"
+check "and the database" is "$(sqlite3 "$T/backup/keel.db" "SELECT COUNT(*) FROM users WHERE username = 'ada'")" 1
+check "and the large files" bash -c "[ -f '$T/backup/lfs/${OID:0:2}/${OID:2:2}/$OID' ]"
+check "it won't overwrite" bash -c "! '$BIN' backup --data-dir '$T/data' '$T/backup' 2>/dev/null"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \

@@ -9,6 +9,7 @@ mod diff;
 mod edit;
 mod files;
 mod merge;
+mod mirror;
 mod push;
 mod read;
 mod store;
@@ -22,8 +23,9 @@ pub use read::{
 pub use edit::replace_line;
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
+pub use mirror::{Remote, mirror_fetch};
 pub use push::{RefChange, Refs, ref_changes};
-pub use store::{create_bare, fork, run_maintenance};
+pub use store::{backup, create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 
 pub use git2::Oid;
