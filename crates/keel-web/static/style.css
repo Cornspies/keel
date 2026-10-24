@@ -661,3 +661,5 @@ a.ci-status:hover { text-decoration: none; }
 .mirror-options > * + * { margin-top: 10px; }
 .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .form-row > label { flex: 1; min-width: 200px; }
+.push-mirror-row { justify-content: flex-start; }
+.push-mirror-row .admin-main { overflow-wrap: anywhere; }

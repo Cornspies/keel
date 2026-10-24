@@ -21,6 +21,7 @@ mod issues;
 mod labels;
 mod lfs;
 mod mail;
+mod metrics;
 mod names;
 mod notifications;
 mod milestones;
@@ -50,12 +51,13 @@ pub use cache::EntryCommits;
 pub use config::{Config, MailConfig, SshConfig};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
-pub use lfs::{LFS_TOKEN_SECS, parse_pointer, valid_oid};
+pub use lfs::{LFS_TOKEN_SECS, LfsLock, parse_pointer, valid_oid};
+pub use metrics::Metrics;
 pub use mail::Mail;
 pub use names::{validate_repo_name, validate_username};
 pub use notifications::{Notification, Subscription, mentions};
 pub use milestones::{Milestone, parse_due_date};
-pub use mirrors::{MIRROR_INTERVALS, Mirror, start_mirror_worker};
+pub use mirrors::{MIRROR_INTERVALS, Mirror, MirrorRemote, PushMirror};
 pub use permissions::{Access, OrgRole};
 pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for};
 pub use pulls::{PullRequest, pull_ref, related};
@@ -129,6 +131,7 @@ pub struct Core {
     settings: Arc<std::sync::RwLock<SiteSettings>>,
     /// Signs short-lived tokens (Git LFS).
     token_secret: Arc<String>,
+    metrics: Arc<Metrics>,
 }
 
 impl Core {
@@ -159,6 +162,7 @@ impl Core {
             mirror_wakeup: Arc::default(),
             settings: Arc::default(),
             token_secret,
+            metrics: Arc::default(),
         };
         core.load_settings().await?;
         core.delete_expired_sessions().await?;

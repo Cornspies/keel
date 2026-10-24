@@ -2022,6 +2022,7 @@ dependencies = [
  "keel-core",
  "keel-hooks",
  "keel-mail",
+ "keel-mirror",
  "keel-ssh",
  "keel-web",
  "tokio",
@@ -2087,6 +2088,25 @@ dependencies = [
  "lettre",
  "tempfile",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "keel-mirror"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "hex",
+ "keel-core",
+ "keel-hooks",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3154,6 +3174,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -3171,12 +3192,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -4834,6 +4857,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

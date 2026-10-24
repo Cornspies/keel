@@ -222,6 +222,9 @@ impl Connection {
             return Ok(());
         }
 
+        let kind = if request.service.is_write() { "receive-pack" } else { "upload-pack" };
+        self.core.metrics().git_operation(kind, "ssh");
+
         // What the refs were, to tell webhooks what the push changed.
         let before = match request.service {
             Service::ReceivePack => self.core.ref_snapshot(repo.id).await.ok(),

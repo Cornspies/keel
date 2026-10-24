@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
-use keel_core::{Access, LFS_TOKEN_SECS, Repo, User, valid_oid};
+use keel_core::{Access, LFS_TOKEN_SECS, LfsLock, Repo, User, valid_oid};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -186,7 +186,10 @@ pub async fn download(
         return fail(StatusCode::NOT_FOUND, "Object does not exist");
     }
     match state.core.lfs_object(repo.id, &oid).await {
-        Ok(Some(size)) => serve_object(&state, &oid, size, "application/octet-stream").await,
+        Ok(Some(size)) => {
+            state.core.metrics().lfs_transfer("download", size);
+            serve_object(&state, &oid, size, "application/octet-stream").await
+        }
         Ok(None) => fail(StatusCode::NOT_FOUND, "Object does not exist"),
         Err(e) => internal(e),
     }
@@ -222,7 +225,7 @@ pub async fn upload(
         return fail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid object id");
     }
     match receive(&state, &oid, body).await {
-        Ok(Ok(size)) => match state.core.lfs_link(repo.id, &oid, size).await {
+        Ok(Ok(size)) => match state.core.lfs_link(repo.id, &oid, size).await.inspect(|_| state.core.metrics().lfs_transfer("upload", size)) {
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => internal(e),
         },
@@ -270,27 +273,185 @@ async fn receive(state: &AppState, oid: &str, body: Body) -> std::io::Result<Res
     result
 }
 
-/// `POST …/info/lfs/locks/verify`: file locking isn't supported, so there
-/// are never locks. Answering keeps clients from warning on every push.
+// ---------------------------------------------------------------------------
+// File locking (https://github.com/git-lfs/git-lfs/blob/main/docs/api/locking.md)
+// ---------------------------------------------------------------------------
+
+const LOCK_PAGE: i64 = 100;
+
+fn lock_json(l: &LfsLock) -> Value {
+    json!({
+        "id": l.id.to_string(),
+        "path": l.path,
+        "locked_at": keel_core::json_time(l.created_at),
+        "owner": { "name": l.owner },
+    })
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RefSpec {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct NewLock {
+    path: String,
+    #[serde(default, rename = "ref")]
+    ref_spec: RefSpec,
+}
+
+/// `POST …/info/lfs/locks`: locks a file.
+pub async fn create_lock(
+    State(state): State<AppState>,
+    Path((owner, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (repo, user) = match authorize(&state, &headers, &owner, &name, true).await {
+        Ok(r) => r,
+        Err(res) => return res,
+    };
+    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    let Ok(req) = serde_json::from_slice::<NewLock>(&body) else {
+        return fail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid lock request");
+    };
+    match state.core.create_lfs_lock(repo.id, &user, &req.path, &req.ref_spec.name).await {
+        Ok(Ok(lock)) => reply(StatusCode::CREATED, json!({ "lock": lock_json(&lock) })),
+        Ok(Err(existing)) => reply(StatusCode::CONFLICT, json!({ "lock": lock_json(&existing), "message": "already created lock" })),
+        Err(keel_core::Error::Invalid(msg)) => fail(StatusCode::UNPROCESSABLE_ENTITY, &msg),
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct LockQuery {
+    path: Option<String>,
+    id: Option<String>,
+    cursor: Option<String>,
+    limit: Option<String>,
+}
+
+fn page_params(cursor: Option<&str>, limit: Option<&str>) -> (i64, i64) {
+    let after = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
+    let limit = limit.and_then(|l| l.parse().ok()).unwrap_or(LOCK_PAGE).clamp(1, LOCK_PAGE);
+    (after, limit)
+}
+
+/// `GET …/info/lfs/locks`: lists locks.
+pub async fn list_locks(
+    State(state): State<AppState>,
+    Path((owner, name)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<LockQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let (repo, _) = match authorize(&state, &headers, &owner, &name, false).await {
+        Ok(r) => r,
+        Err(res) => return res,
+    };
+    let (after, limit) = page_params(q.cursor.as_deref(), q.limit.as_deref());
+    let id = match q.id.as_deref().filter(|i| !i.is_empty()) {
+        Some(i) => match i.parse() {
+            Ok(i) => Some(i),
+            Err(_) => return reply(StatusCode::OK, json!({ "locks": [] })),
+        },
+        None => None,
+    };
+    let path = q.path.as_deref().filter(|p| !p.is_empty()).map(|p| p.trim_start_matches('/'));
+    match state.core.lfs_locks(repo.id, path, id, after, limit + 1).await {
+        Ok(mut locks) => {
+            let next = (locks.len() as i64 > limit).then(|| locks[limit as usize - 1].id.to_string());
+            locks.truncate(limit as usize);
+            let mut body = json!({ "locks": locks.iter().map(lock_json).collect::<Vec<_>>() });
+            if let Some(n) = next {
+                body["next_cursor"] = json!(n);
+            }
+            reply(StatusCode::OK, body)
+        }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct VerifyRequest {
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `POST …/info/lfs/locks/verify`: the pusher's locks and everyone
+/// else's, so the client can refuse to push changes to others' files.
 pub async fn verify_locks(
     State(state): State<AppState>,
     Path((owner, name)): Path<(String, String)>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
-    match authorize(&state, &headers, &owner, &name, true).await {
-        Ok(_) => reply(StatusCode::OK, json!({ "ours": [], "theirs": [] })),
-        Err(res) => res,
+    let (repo, user) = match authorize(&state, &headers, &owner, &name, true).await {
+        Ok(r) => r,
+        Err(res) => return res,
+    };
+    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    let req: VerifyRequest = serde_json::from_slice(&body).unwrap_or_default();
+    let limit = req.limit.map(|l| l.to_string());
+    let (after, limit) = page_params(req.cursor.as_deref(), limit.as_deref());
+    match state.core.lfs_locks(repo.id, None, None, after, limit + 1).await {
+        Ok(mut locks) => {
+            let next = (locks.len() as i64 > limit).then(|| locks[limit as usize - 1].id.to_string());
+            locks.truncate(limit as usize);
+            let (ours, theirs): (Vec<_>, Vec<_>) = locks.iter().partition(|l| l.owner_id == user.id);
+            let mut body = json!({
+                "ours": ours.into_iter().map(lock_json).collect::<Vec<_>>(),
+                "theirs": theirs.into_iter().map(lock_json).collect::<Vec<_>>(),
+            });
+            if let Some(n) = next {
+                body["next_cursor"] = json!(n);
+            }
+            reply(StatusCode::OK, body)
+        }
+        Err(e) => internal(e),
     }
 }
 
-/// `GET …/info/lfs/locks`.
-pub async fn list_locks(
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct UnlockRequest {
+    force: bool,
+}
+
+/// `POST …/info/lfs/locks/<id>/unlock`: your own lock, or (with `force`,
+/// for repository admins) anyone's.
+pub async fn unlock(
     State(state): State<AppState>,
-    Path((owner, name)): Path<(String, String)>,
+    Path((owner, name, id)): Path<(String, String, String)>,
     headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
-    match authorize(&state, &headers, &owner, &name, false).await {
-        Ok(_) => reply(StatusCode::OK, json!({ "locks": [] })),
-        Err(res) => res,
+    let (repo, user) = match authorize(&state, &headers, &owner, &name, true).await {
+        Ok(r) => r,
+        Err(res) => return res,
+    };
+    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    let req: UnlockRequest = serde_json::from_slice(&body).unwrap_or_default();
+    let Ok(id) = id.parse::<i64>() else { return fail(StatusCode::NOT_FOUND, "Lock not found") };
+    let lock = match state.core.lfs_locks(repo.id, None, Some(id), 0, 1).await {
+        Ok(l) => l.into_iter().next(),
+        Err(e) => return internal(e),
+    };
+    let Some(lock) = lock else { return fail(StatusCode::NOT_FOUND, "Lock not found") };
+    if lock.owner_id != user.id {
+        if !req.force {
+            return fail(StatusCode::FORBIDDEN, &format!("{} holds this lock; only they can unlock it (or an admin, with --force)", lock.owner));
+        }
+        match state.core.access(&repo, Some(&user)).await {
+            Ok(a) if a >= Access::Admin => {}
+            Ok(_) => return fail(StatusCode::FORBIDDEN, "Only repository admins can break others' locks"),
+            Err(e) => return internal(e),
+        }
+    }
+    match state.core.delete_lfs_lock(repo.id, lock.id).await {
+        Ok(()) => reply(StatusCode::OK, json!({ "lock": lock_json(&lock) })),
+        Err(e) => internal(e),
     }
 }

@@ -208,6 +208,7 @@ async fn rpc(
         Err(res) => return res,
     };
     let pusher = user.map(|u| u.id);
+    state.core.metrics().git_operation(if service.is_write() { "receive-pack" } else { "upload-pack" }, "http");
     // What the refs were, to tell webhooks what the push changed.
     let before = match service {
         Service::ReceivePack => state.core.ref_snapshot(repo.id).await.ok(),

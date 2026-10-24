@@ -80,7 +80,8 @@ for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$SMTP_PORT) 2>/dev/null && 
 
 "$BIN" serve --data-dir "$T/data" --http-addr "127.0.0.1:$HTTP_PORT" \
     --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
-    --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" >"$T/server.log" 2>&1 &
+    --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" \
+    --metrics-token smoke-metrics >"$T/server.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -667,7 +668,7 @@ if command -v git-lfs >/dev/null; then
     check "git lfs push" bash -c "git -C '$L' push -q origin HEAD:refs/heads/lfs 2>&1 | grep -v -i 'uploading' | grep -qi 'error' && exit 1 || exit 0"
     check "the pointer is in the repository" contains "$(curl -s "$B/ada/engine/blob/lfs/data.bin")" "Stored with Git LFS"
     check "raw serves the file" is "$(curl -s "$B/ada/engine/raw/lfs/data.bin" | sha256sum | cut -d' ' -f1)" "$BIN_SUM"
-    check "settings count it" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings")" "Git LFS: 2 files"
+    check "settings count it" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings")" ">2 files, "
     GIT_LFS_SKIP_SMUDGE=1 git clone -q -b lfs "http://ada:$RW@127.0.0.1:$HTTP_PORT/ada/engine.git" "$T/lfs-clone"
     check "git lfs pull over HTTP" bash -c "cd '$T/lfs-clone' && git lfs install --local >/dev/null && git lfs pull >/dev/null 2>&1 && [ \"\$(sha256sum data.bin | cut -d' ' -f1)\" = '$BIN_SUM' ]"
     GIT_LFS_SKIP_SMUDGE=1 git clone -q -b lfs "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/lfs-ssh"
@@ -676,12 +677,55 @@ else
     echo "SKIP  git lfs client checks (git-lfs isn't installed)"
 fi
 
+echo "== LFS locks and mirrors"
+locks() { curl -s -u "$1" -H "Accept: application/vnd.git-lfs+json" -H "Content-Type: application/vnd.git-lfs+json" "${@:2}"; }
+check "lock a file" is "$(locks "ada:$RW" -o /dev/null -w '%{http_code}' -d '{"path":"large.txt"}' "$LFS_URL/locks")" 201
+check "others can't lock it too" contains "$(locks "bob:$BOBTOK" -d '{"path":"large.txt"}' "$LFS_URL/locks")" "already created lock"
+check "locks are listed" contains "$(locks "bob:$BOBTOK" "$LFS_URL/locks?path=large.txt")" '"name":"ada"'
+check "verify says whose they are" is "$(locks "bob:$BOBTOK" -d '{}' "$LFS_URL/locks/verify" | field '["theirs"][0]["path"]')" large.txt
+LOCK=$(locks "ada:$RW" "$LFS_URL/locks" | field '["locks"][0]["id"]')
+check "others can't unlock it" is "$(locks "bob:$BOBTOK" -o /dev/null -w '%{http_code}' -d '{}' "$LFS_URL/locks/$LOCK/unlock")" 403
+check "the owner can" is "$(locks "ada:$RW" -o /dev/null -w '%{http_code}' -d '{}' "$LFS_URL/locks/$LOCK/unlock")" 200
+if command -v git-lfs >/dev/null; then
+    check "git lfs lock" bash -c "cd '$L' && git lfs lock data.bin >/dev/null 2>&1 && git lfs locks | grep -q 'data.bin.*ada'"
+    check "shows on the file" contains "$(curl -s "$B/ada/engine/blob/lfs/data.bin")" "locked by ada"
+    check "and in settings" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings")" "Locked files"
+    GIT_LFS_SKIP_SMUDGE=1 git clone -q -b lfs "http://bob:$BOBTOK@127.0.0.1:$HTTP_PORT/ada/engine.git" "$T/bob-lfs"
+    (cd "$T/bob-lfs" && git lfs install --local >/dev/null && git lfs pull >/dev/null 2>&1)
+    head -c 1000 /dev/urandom >"$T/bob-lfs/data.bin"
+    git -C "$T/bob-lfs" -c user.name=Bob -c user.email=bob@example.com commit -qam "Change data.bin"
+    check "git lfs refuses to push changes to others' locked files" bash -c "git -C '$T/bob-lfs' push origin HEAD:refs/heads/bob-change 2>&1 | grep -qi 'locked'"
+    check "git lfs unlock" bash -c "cd '$L' && git lfs unlock data.bin >/dev/null 2>&1 && ! git lfs locks | grep -q data.bin"
+fi
+# A commit pointing to the LFS file uploaded above, without needing git-lfs.
+git -C "$W" checkout -q -b lfs-pointer main
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize 6\n' "$OID" >"$W/large.txt"
+git -C "$W" add -A && git -C "$W" commit -qm "Add large.txt with LFS"
+git -C "$W" push -q "$ADA_HTTP" lfs-pointer
+check "pull mirrors bring LFS files" is "$(post "$T/ada" /new name=lfs-mirror "mirror_url=$B/ada/engine.git" mirror_interval=3600)" 303
+lfs_arrived() { for _ in $(seq 1 100); do [ "$(curl -s "$B/ada/$1/raw/lfs-pointer/large.txt")" = large ] && return 0; sleep 0.1; done; echo "no LFS file in $1"; return 1; }
+check "the file is there" lfs_arrived lfs-mirror
+check "create a repository to push to" is "$(post "$T/ada" /new name=engine-backup)" 303
+check "add a push mirror" is "$(post "$T/ada" /ada/engine/settings/push-mirrors "url=$B/ada/engine-backup.git" username=ada "password=$RW")" 303
+check "it gets the branches" synced engine-backup refs/heads/lfs-pointer "$(git -C "$W" rev-parse HEAD)"
+check "and the LFS files" lfs_arrived engine-backup
+check "the settings show it" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings")" "pushed"
+git -C "$W" checkout -q -b pushed-later lfs-pointer && echo later >"$W/later2.txt" && git -C "$W" add -A && git -C "$W" commit -qm "Later"
+git -C "$W" push -q "$ADA_HTTP" pushed-later
+check "new pushes follow by themselves" synced engine-backup refs/heads/pushed-later "$(git -C "$W" rev-parse HEAD)"
+
 echo "== backups and health"
 check "health" is "$(curl -s "$B/healthz" | field '["status"]')" ok
 check "backup a running server" bash -c "'$BIN' backup --data-dir '$T/data' '$T/backup' | grep -q 'Backed up'"
 check "the copy has the repositories" git clone -q "$T/backup/repos/1.git" "$T/restored"
 check "and the database" is "$(sqlite3 "$T/backup/keel.db" "SELECT COUNT(*) FROM users WHERE username = 'ada'")" 1
 check "and the large files" bash -c "[ -f '$T/backup/lfs/${OID:0:2}/${OID:2:2}/$OID' ]"
+check "metrics need the token" is "$(status "$B/metrics")" 401
+METRICS=$(curl -s -H "Authorization: Bearer smoke-metrics" "$B/metrics")
+check "metrics count requests by route" contains "$METRICS" 'keel_http_requests_total{method="GET",route="/{owner}/{repo}",status="200"}'
+check "and git over SSH" contains "$METRICS" 'keel_git_operations_total{service="upload-pack",transport="ssh"}'
+check "and mirror runs" contains "$METRICS" 'keel_mirror_runs_total{kind="push",outcome="ok"}'
+check "and stored LFS files" contains "$METRICS" "keel_lfs_files "
 check "it won't overwrite" bash -c "! '$BIN' backup --data-dir '$T/data' '$T/backup' 2>/dev/null"
 
 echo "== pages"

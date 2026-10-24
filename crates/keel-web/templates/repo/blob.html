@@ -8,7 +8,7 @@
 <div class="box">
   {% include "repo/latest.html" %}
   <div class="box-head file-head">
-    <span class="muted small">{% if line_count > 0 %}{{ line_count }} lines · {% endif %}{{ size }}</span>
+    <span class="muted small">{% if line_count > 0 %}{{ line_count }} lines · {% endif %}{{ size }}{% if let Some(who) = locked_by %} · <span class="badge" title="Locked with git lfs lock">locked by {{ who }}</span>{% endif %}</span>
     <span class="spacer"></span>
     {% if is_markdown %}
       {% if plain %}<a class="btn btn-small" href="?">Preview</a>{% else %}<a class="btn btn-small" href="?plain=1">Source</a>{% endif %}

@@ -17,8 +17,35 @@ use crate::{Core, Error, Repo, Result, User, invalid, is_private_ip, now};
 pub const MIRROR_INTERVALS: &[(i64, &str)] =
     &[(3600, "every hour"), (4 * 3600, "every 4 hours"), (8 * 3600, "every 8 hours"), (86_400, "every day")];
 const FETCH_LIMIT: Duration = Duration::from_secs(600);
+const MAX_PUSH_MIRRORS: i64 = 10;
+/// Delays before retrying a failed push.
+const PUSH_RETRY_SECS: &[i64] = &[60, 300, 1800, 7200, 21_600];
 /// After a failure, try again within this long at the latest.
 const RETRY_SECS: i64 = 3600;
+
+/// Where a mirror fetches from or pushes to, with credentials.
+#[derive(Clone)]
+pub struct MirrorRemote {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
+/// A remote that gets every change pushed.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct PushMirror {
+    pub id: i64,
+    pub repo_id: i64,
+    pub url: String,
+    pub username: String,
+    pub has_password: bool,
+    /// Changes are waiting to be pushed.
+    pub pending: bool,
+    pub next_attempt_at: i64,
+    pub attempts: i64,
+    pub pushed_at: Option<i64>,
+    pub last_error: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct Mirror {
@@ -233,23 +260,70 @@ impl Core {
         Ok(t)
     }
 
-    /// Fetches a mirror's branches and tags from its remote, then handles
-    /// what changed like a push (webhooks, search, caches).
-    pub async fn sync_mirror(&self, repo_id: i64) -> Result<()> {
-        let row: Option<(String, String, String, i64)> =
-            sqlx::query_as("SELECT url, username, password, interval_secs FROM mirrors WHERE repo_id = ?1")
+    /// Where a mirror fetches from, if it's still a mirror.
+    pub async fn mirror_remote(&self, repo_id: i64) -> Result<Option<MirrorRemote>> {
+        let row: Option<(String, String, String)> =
+            sqlx::query_as("SELECT url, username, password FROM mirrors WHERE repo_id = ?1")
                 .bind(repo_id)
                 .fetch_optional(&self.db)
                 .await?;
-        let Some((url, username, password, interval)) = row else { return Ok(()) };
-        let result = self.fetch_mirror(repo_id, &url, &username, &password).await;
-        let now = now();
-        let (next, error) = match &result {
-            Ok(()) => (now + interval, None),
-            Err(e) => (now + interval.min(RETRY_SECS), Some(e.to_string())),
+        Ok(row.map(|(url, username, password)| MirrorRemote { url, username, password }))
+    }
+
+    /// Fetches a mirror's branches and tags, then handles what changed
+    /// like a push (webhooks, search, caches). Returns where it fetched from
+    /// and the LFS files it needs (those the new commits point to, and
+    /// earlier ones still missing); `None` if it isn't a mirror (any more).
+    /// Errors are for the mirror's page.
+    pub async fn fetch_mirror(&self, repo_id: i64) -> Result<Option<(MirrorRemote, Vec<(String, u64)>)>> {
+        let Some(remote) = self.mirror_remote(repo_id).await? else { return Ok(None) };
+        let before = self.ref_snapshot(repo_id).await?;
+        let path = self.config.repo_path(repo_id);
+        self.with_remote(&remote, move |r| keel_git::mirror_fetch(&path, r, FETCH_LIMIT)).await?;
+        let after = self.ref_snapshot(repo_id).await?;
+        let changes: Vec<_> = keel_git::ref_changes(&before, &after)
+            .into_iter()
+            .filter_map(|c| Some((c.old, c.new?)))
+            .collect();
+        let mut wanted = self.lfs_pending(repo_id).await?;
+        if !changes.is_empty() {
+            wanted.extend(self.git(repo_id, move |g| g.lfs_pointers(&changes)).await?);
+            self.after_push(repo_id, None, Some(before)).await?;
+        }
+        wanted.sort();
+        wanted.dedup();
+        let mut missing = Vec::new();
+        for (oid, size) in wanted {
+            if self.lfs_object(repo_id, &oid).await?.is_none() {
+                missing.push((oid, size));
+            }
+        }
+        Ok(Some((remote, missing)))
+    }
+
+    async fn lfs_pending(&self, repo_id: i64) -> Result<Vec<(String, u64)>> {
+        let (json,): (String,) = sqlx::query_as("SELECT lfs_pending FROM mirrors WHERE repo_id = ?1")
+            .bind(repo_id)
+            .fetch_one(&self.db)
+            .await?;
+        Ok(serde_json::from_str(&json).unwrap_or_default())
+    }
+
+    /// Records a sync's outcome: LFS files still missing (`None`: as
+    /// before), and an error.
+    pub async fn finish_mirror_sync(&self, repo_id: i64, lfs_missing: Option<&[(String, u64)]>, error: Option<String>) -> Result<()> {
+        let (interval,): (i64,) = match sqlx::query_as("SELECT interval_secs FROM mirrors WHERE repo_id = ?1")
+            .bind(repo_id)
+            .fetch_optional(&self.db)
+            .await?
+        {
+            Some(row) => row,
+            None => return Ok(()),
         };
+        let now = now();
+        let next = if error.is_some() { now + interval.min(RETRY_SECS) } else { now + interval };
         sqlx::query(
-            "UPDATE mirrors SET next_sync_at = ?2, last_error = ?3,
+            "UPDATE mirrors SET next_sync_at = ?2, last_error = ?3, lfs_pending = COALESCE(?5, lfs_pending),
                 synced_at = CASE WHEN ?3 IS NULL THEN ?4 ELSE synced_at END
              WHERE repo_id = ?1",
         )
@@ -257,67 +331,224 @@ impl Core {
         .bind(next)
         .bind(&error)
         .bind(now)
+        .bind(match lfs_missing {
+            Some(m) => Some(serde_json::to_string(m).map_err(anyhow::Error::from)?),
+            None => None,
+        })
         .execute(&self.db)
         .await?;
+        self.metrics.mirror_run("pull", error.is_none());
         if let Some(e) = error {
             tracing::info!(repo = repo_id, "mirror sync failed: {e}");
         }
         Ok(())
     }
 
-    async fn fetch_mirror(&self, repo_id: i64, url: &str, username: &str, password: &str) -> Result<()> {
-        let parsed = parse_mirror_url(url)?;
+    /// Fetches and records the outcome, without LFS files (for tests and
+    /// callers without an HTTP client).
+    pub async fn sync_mirror(&self, repo_id: i64) -> Result<()> {
+        match self.fetch_mirror(repo_id).await {
+            Ok(Some((_, missing))) => self.finish_mirror_sync(repo_id, Some(&missing), None).await,
+            Ok(None) => Ok(()),
+            Err(Error::Invalid(e)) => self.finish_mirror_sync(repo_id, None, Some(e)).await,
+            Err(e) => self.finish_mirror_sync(repo_id, None, Some(e.to_string())).await,
+        }
+    }
+
+    /// Runs `f` (git, blocking) against a remote after checking its host,
+    /// pinned to a checked address. Errors are for people to read.
+    async fn with_remote<T: Send + 'static>(
+        &self,
+        remote: &MirrorRemote,
+        f: impl FnOnce(&keel_git::Remote<'_>) -> keel_git::Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let parsed = parse_mirror_url(&remote.url)?;
         let addrs = self.check_mirror_host(&parsed).await?;
-        let before = self.ref_snapshot(repo_id).await?;
-        let path = self.config.repo_path(repo_id);
-        let (url, user, pass) = (parsed.url.clone(), username.to_owned(), password.to_owned());
+        let (user, pass) = (remote.username.clone(), remote.password.clone());
         let (host, port, ip) = (parsed.host.clone(), parsed.port, addrs[0]);
-        let fetched = tokio::task::spawn_blocking(move || {
-            let remote = keel_git::Remote {
+        let url = parsed.url.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let r = keel_git::Remote {
                 url: &url,
                 auth: (!user.is_empty() || !pass.is_empty()).then_some((user.as_str(), pass.as_str())),
                 pin: Some((host.as_str(), port, ip)),
             };
-            keel_git::mirror_fetch(&path, &remote, FETCH_LIMIT)
+            f(&r)
         })
         .await
         .map_err(anyhow::Error::from)?;
-        if let Err(e) = fetched {
-            return Err(Error::Invalid(e.to_string()));
+        result.map_err(|e| Error::Invalid(e.to_string()))
+    }
+
+    // -- Push mirrors -------------------------------------------------------
+
+    pub async fn push_mirrors(&self, repo_id: i64) -> Result<Vec<PushMirror>> {
+        Ok(sqlx::query_as(
+            "SELECT id, repo_id, url, username, password != '' AS has_password, pending, next_attempt_at, attempts,
+                pushed_at, last_error
+             FROM push_mirrors WHERE repo_id = ?1 ORDER BY id",
+        )
+        .bind(repo_id)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    /// Adds a remote that every change is pushed to (starting now).
+    pub async fn add_push_mirror(&self, repo_id: i64, url: &str, username: &str, password: &str) -> Result<i64> {
+        let parsed = parse_mirror_url(url)?;
+        self.check_mirror_host(&parsed).await?;
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM push_mirrors WHERE repo_id = ?1")
+            .bind(repo_id)
+            .fetch_one(&self.db)
+            .await?;
+        if count >= MAX_PUSH_MIRRORS {
+            return invalid(format!("A repository can push to at most {MAX_PUSH_MIRRORS} mirrors."));
         }
-        if self.ref_snapshot(repo_id).await? != before {
-            self.after_push(repo_id, None, Some(before)).await?;
+        let username = parsed.username.clone().unwrap_or_else(|| username.trim().to_owned());
+        let password = parsed.password.clone().unwrap_or_else(|| password.to_owned());
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO push_mirrors (repo_id, url, username, password, next_attempt_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
+        )
+        .bind(repo_id)
+        .bind(&parsed.url)
+        .bind(username)
+        .bind(password)
+        .bind(now())
+        .fetch_one(&self.db)
+        .await?;
+        self.mirror_wakeup.notify_one();
+        Ok(id)
+    }
+
+    pub async fn delete_push_mirror(&self, repo_id: i64, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM push_mirrors WHERE repo_id = ?1 AND id = ?2").bind(repo_id).bind(id).execute(&self.db).await?;
+        Ok(())
+    }
+
+    /// Asks for a push now (also resetting the backoff after failures).
+    pub async fn request_push(&self, repo_id: i64, id: i64) -> Result<()> {
+        sqlx::query("UPDATE push_mirrors SET pending = 1, next_attempt_at = ?3 WHERE repo_id = ?1 AND id = ?2")
+            .bind(repo_id)
+            .bind(id)
+            .bind(now())
+            .execute(&self.db)
+            .await?;
+        self.mirror_wakeup.notify_one();
+        Ok(())
+    }
+
+    /// After refs changed: the repository's push mirrors have something to
+    /// push. Ones backing off after failures keep their schedule.
+    pub(crate) async fn push_mirrors_pending(&self, repo_id: i64) -> Result<()> {
+        let done = sqlx::query("UPDATE push_mirrors SET pending = 1, next_attempt_at = ?2 WHERE repo_id = ?1 AND pending = 0")
+            .bind(repo_id)
+            .bind(now())
+            .execute(&self.db)
+            .await?;
+        if done.rows_affected() > 0 {
+            self.mirror_wakeup.notify_one();
         }
         Ok(())
     }
-}
 
-/// Keeps mirrors in sync: syncs whichever is due, one at a time, and sleeps
-/// until the next is due (or one is asked to sync now).
-pub fn start_mirror_worker(core: Core) {
-    tokio::spawn(async move {
-        let wakeup = core.mirror_wakeup();
-        loop {
-            match core.claim_mirror().await {
-                Ok(Some(repo_id)) => {
-                    if let Err(e) = core.sync_mirror(repo_id).await {
-                        tracing::warn!(repo = repo_id, "mirror sync: {e}");
-                    }
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("mirror queue: {e}"),
-            }
-            let wait = match core.next_mirror_due().await {
-                Ok(Some(t)) => (t - now()).clamp(1, 300) as u64,
-                _ => 300,
-            };
-            tokio::select! {
-                _ = wakeup.notified() => {}
-                _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+    /// Claims the push mirror most overdue, if any: (id, repository).
+    pub async fn claim_push_mirror(&self) -> Result<Option<(i64, i64)>> {
+        let now = now();
+        // Not pending while it runs, so changes meanwhile make it pending again.
+        Ok(sqlx::query_as(
+            "UPDATE push_mirrors SET pending = 0, next_attempt_at = ?1 + 1800
+             WHERE id = (SELECT id FROM push_mirrors WHERE pending = 1 AND next_attempt_at <= ?1
+                         ORDER BY next_attempt_at LIMIT 1)
+             RETURNING id, repo_id",
+        )
+        .bind(now)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn push_mirror_remote(&self, id: i64) -> Result<Option<MirrorRemote>> {
+        let row: Option<(String, String, String)> = sqlx::query_as("SELECT url, username, password FROM push_mirrors WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.map(|(url, username, password)| MirrorRemote { url, username, password }))
+    }
+
+    /// The LFS files to upload before pushing: those that commits the
+    /// remote doesn't have point to, and that are stored here.
+    pub async fn lfs_files_to_push(&self, repo_id: i64, remote: &MirrorRemote) -> Result<Vec<(String, u64)>> {
+        let path = self.config.repo_path(repo_id);
+        let theirs = self.with_remote(remote, move |r| keel_git::ls_remote(&path, r)).await?;
+        let ours = self.ref_snapshot(repo_id).await?;
+        let changes: Vec<_> = ours
+            .iter()
+            .filter(|(name, id)| theirs.get(*name) != Some(id))
+            .map(|(name, id)| (theirs.get(name).copied(), *id))
+            .collect();
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pointers = self.git(repo_id, move |g| g.lfs_pointers(&changes)).await?;
+        let mut out = Vec::new();
+        for (oid, size) in pointers {
+            if self.lfs_object(repo_id, &oid).await?.is_some() {
+                out.push((oid, size));
             }
         }
-    });
+        Ok(out)
+    }
+
+    /// Pushes branches and tags to a push mirror.
+    pub async fn push_to_mirror(&self, repo_id: i64, remote: &MirrorRemote) -> Result<()> {
+        let path = self.config.repo_path(repo_id);
+        self.with_remote(remote, move |r| keel_git::mirror_push(&path, r, FETCH_LIMIT)).await
+    }
+
+    /// Records a push's outcome; failures are retried with growing delays.
+    pub async fn finish_push(&self, id: i64, error: Option<String>) -> Result<()> {
+        let now = now();
+        match &error {
+            None => {
+                sqlx::query("UPDATE push_mirrors SET attempts = 0, pushed_at = ?2, last_error = NULL WHERE id = ?1")
+                    .bind(id)
+                    .bind(now)
+                    .execute(&self.db)
+                    .await?;
+            }
+            Some(e) => {
+                let (attempts,): (i64,) = sqlx::query_as("SELECT attempts FROM push_mirrors WHERE id = ?1")
+                    .bind(id)
+                    .fetch_optional(&self.db)
+                    .await?
+                    .unwrap_or((0,));
+                let delay = PUSH_RETRY_SECS[(attempts as usize).min(PUSH_RETRY_SECS.len() - 1)];
+                sqlx::query(
+                    "UPDATE push_mirrors SET pending = 1, attempts = attempts + 1, next_attempt_at = ?2, last_error = ?3
+                     WHERE id = ?1",
+                )
+                .bind(id)
+                .bind(now + delay)
+                .bind(e)
+                .execute(&self.db)
+                .await?;
+                tracing::info!(push_mirror = id, "push mirror failed: {e}");
+            }
+        }
+        self.metrics.mirror_run("push", error.is_none());
+        Ok(())
+    }
+
+    /// When the next pull or push mirror is due.
+    pub async fn next_mirror_work(&self) -> Result<Option<i64>> {
+        let (t,): (Option<i64>,) = sqlx::query_as(
+            "SELECT MIN(t) FROM (SELECT MIN(next_sync_at) AS t FROM mirrors
+                                 UNION ALL SELECT MIN(next_attempt_at) FROM push_mirrors WHERE pending = 1)",
+        )
+        .fetch_one(&self.db)
+        .await?;
+        Ok(t)
+    }
 }
 
 #[cfg(test)]

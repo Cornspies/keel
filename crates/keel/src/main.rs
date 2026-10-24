@@ -91,6 +91,11 @@ struct ServeArgs {
     #[arg(long, env = "KEEL_LFS_MAX_FILE_SIZE", default_value_t = 2048)]
     lfs_max_file_size: u64,
 
+    /// Serve Prometheus metrics at /metrics to requests with this bearer
+    /// token (off without one).
+    #[arg(long, env = "KEEL_METRICS_TOKEN", hide_env_values = true)]
+    metrics_token: Option<String>,
+
     /// The From address of emails [default: "<site name> <noreply@<host of
     /// --base-url>>"].
     #[arg(long, env = "KEEL_MAIL_FROM")]
@@ -178,6 +183,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         site_name: args.site_name,
         webhook_allow_private: args.webhook_allow_private,
         lfs_max_bytes: args.lfs_max_file_size.saturating_mul(1 << 20),
+        metrics_token: args.metrics_token.filter(|t| !t.is_empty()),
         mail,
     };
     let core = Core::open(config)
@@ -186,7 +192,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     keel_hooks::start(core.clone());
     keel_mail::start(core.clone()).context("setting up email")?;
-    keel_core::start_mirror_worker(core.clone());
+    keel_mirror::start(core.clone());
     let app = keel_web::router(keel_web::AppState::new(core.clone()));
     let listener = tokio::net::TcpListener::bind(args.http_addr)
         .await

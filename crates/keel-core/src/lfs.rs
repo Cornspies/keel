@@ -8,7 +8,25 @@
 
 use std::path::PathBuf;
 
-use crate::{Core, Repo, Result, User, now, sign};
+use crate::{Core, Repo, Result, User, invalid, now, sign};
+
+/// A file locked with `git lfs lock`.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct LfsLock {
+    pub id: i64,
+    pub path: String,
+    pub ref_name: String,
+    pub owner_id: i64,
+    pub owner: String,
+    pub created_at: i64,
+}
+
+macro_rules! lock_select {
+    () => {
+        "SELECT l.id, l.path, l.ref_name, l.owner_id, u.username AS owner, l.created_at
+         FROM lfs_locks l JOIN users u ON u.id = l.owner_id "
+    };
+}
 
 /// How long LFS tokens are valid.
 pub const LFS_TOKEN_SECS: i64 = 3600;
@@ -20,24 +38,7 @@ pub fn valid_oid(oid: &str) -> bool {
 
 /// The object a Git LFS pointer file refers to: (oid, size).
 pub fn parse_pointer(data: &[u8]) -> Option<(String, u64)> {
-    if data.len() > 1024 {
-        return None;
-    }
-    let text = std::str::from_utf8(data).ok()?;
-    if !text.starts_with("version https://git-lfs.github.com/spec/v1\n") {
-        return None;
-    }
-    let mut oid = None;
-    let mut size = None;
-    for line in text.lines() {
-        if let Some(o) = line.strip_prefix("oid sha256:") {
-            oid = Some(o.trim().to_owned());
-        } else if let Some(s) = line.strip_prefix("size ") {
-            size = s.trim().parse().ok();
-        }
-    }
-    let oid = oid.filter(|o| valid_oid(o))?;
-    Some((oid, size?))
+    keel_git::parse_lfs_pointer(data)
 }
 
 impl Core {
@@ -61,6 +62,17 @@ impl Core {
         Ok(row.map(|(s,)| s as u64).filter(|_| self.lfs_path(oid).is_file()))
     }
 
+    /// Moves a downloaded file, whose SHA-256 the caller checked is `oid`,
+    /// into the store and lets `repo_id` read it.
+    pub async fn lfs_store(&self, repo_id: i64, tmp: &std::path::Path, oid: &str, size: u64) -> Result<()> {
+        let path = self.lfs_path(oid);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(anyhow::Error::from)?;
+        }
+        tokio::fs::rename(tmp, &path).await.map_err(anyhow::Error::from)?;
+        self.lfs_link(repo_id, oid, size).await
+    }
+
     /// Records that `repo_id` has an object (after it was uploaded and its
     /// content checked).
     pub async fn lfs_link(&self, repo_id: i64, oid: &str, size: u64) -> Result<()> {
@@ -82,23 +94,11 @@ impl Core {
             return Ok(());
         }
         let oids: Vec<String> = self
-            .git(to, move |g| {
-                let files = match base {
-                    Some(b) => g.changed_files(b, head)?.changed,
-                    None => g.files(head)?,
-                };
-                let mut out = Vec::new();
-                for f in files {
-                    if g.blob_size(f.id)? <= 1024
-                        && let Some((data, _)) = g.blob_by_id(f.id)?
-                        && let Some((oid, _)) = parse_pointer(&data)
-                    {
-                        out.push(oid);
-                    }
-                }
-                Ok(out)
-            })
-            .await?;
+            .git(to, move |g| g.lfs_pointers(&[(base, head)]))
+            .await?
+            .into_iter()
+            .map(|(oid, _)| oid)
+            .collect();
         if oids.is_empty() {
             return Ok(());
         }
@@ -113,6 +113,56 @@ impl Core {
         .bind(now())
         .execute(&self.db)
         .await?;
+        Ok(())
+    }
+
+    // -- Locks ----------------------------------------------------------------
+
+    /// Locks of a repository, oldest first, after lock id `after` (for
+    /// paging), optionally only for `path` or lock `id`.
+    pub async fn lfs_locks(&self, repo_id: i64, path: Option<&str>, id: Option<i64>, after: i64, limit: i64) -> Result<Vec<LfsLock>> {
+        Ok(sqlx::query_as(concat!(
+            lock_select!(),
+            "WHERE l.repo_id = ?1 AND (?2 IS NULL OR l.path = ?2) AND (?3 IS NULL OR l.id = ?3) AND l.id > ?4
+             ORDER BY l.id LIMIT ?5"
+        ))
+        .bind(repo_id)
+        .bind(path)
+        .bind(id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    /// Locks `path` for `user`. If someone (maybe the user) holds it
+    /// already, returns that lock as the error value.
+    pub async fn create_lfs_lock(&self, repo_id: i64, user: &User, path: &str, ref_name: &str) -> Result<Result<LfsLock, LfsLock>> {
+        let path = path.trim().trim_start_matches('/');
+        if path.is_empty() || path.len() > 1024 || path.chars().any(char::is_control) {
+            return invalid("Invalid path.");
+        }
+        let inserted: Option<(i64,)> = sqlx::query_as(
+            "INSERT INTO lfs_locks (repo_id, path, ref_name, owner_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (repo_id, path) DO NOTHING RETURNING id",
+        )
+        .bind(repo_id)
+        .bind(path)
+        .bind(ref_name)
+        .bind(user.id)
+        .bind(now())
+        .fetch_optional(&self.db)
+        .await?;
+        let lock = match inserted {
+            Some((id,)) => self.lfs_locks(repo_id, None, Some(id), 0, 1).await?,
+            None => self.lfs_locks(repo_id, Some(path), None, 0, 1).await?,
+        };
+        let lock = lock.into_iter().next().ok_or(crate::Error::NotFound)?;
+        Ok(if inserted.is_some() { Ok(lock) } else { Err(lock) })
+    }
+
+    pub async fn delete_lfs_lock(&self, repo_id: i64, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM lfs_locks WHERE repo_id = ?1 AND id = ?2").bind(repo_id).bind(id).execute(&self.db).await?;
         Ok(())
     }
 
@@ -254,6 +304,19 @@ mod tests {
         assert!(core.check_lfs_token(&token, &other).await.unwrap().is_none(), "other repository");
         assert!(core.check_lfs_token(&token.replace("lfs1.1", "lfs1.2"), &repo).await.unwrap().is_none(), "forged");
         assert!(core.check_lfs_token("nonsense", &repo).await.unwrap().is_none());
+
+        // Locks.
+        let mine = core.create_lfs_lock(repo.id, &ada, "/art/logo.psd", "refs/heads/main").await.unwrap().unwrap();
+        assert_eq!((mine.path.as_str(), mine.owner.as_str()), ("art/logo.psd", "ada"));
+        let taken = core.create_lfs_lock(repo.id, &bob, "art/logo.psd", "").await.unwrap().unwrap_err();
+        assert_eq!(taken.id, mine.id);
+        assert!(core.create_lfs_lock(repo.id, &bob, " ", "").await.is_err());
+        core.create_lfs_lock(repo.id, &bob, "b.bin", "").await.unwrap().unwrap();
+        assert_eq!(core.lfs_locks(repo.id, None, None, 0, 10).await.unwrap().len(), 2);
+        assert_eq!(core.lfs_locks(repo.id, None, None, mine.id, 10).await.unwrap()[0].path, "b.bin", "paged");
+        assert_eq!(core.lfs_locks(repo.id, Some("b.bin"), None, 0, 10).await.unwrap().len(), 1);
+        core.delete_lfs_lock(repo.id, mine.id).await.unwrap();
+        assert_eq!(core.lfs_locks(repo.id, None, None, 0, 10).await.unwrap().len(), 1);
 
         // Unused objects are pruned.
         let orphan = "c".repeat(64);

@@ -124,9 +124,109 @@ pub fn mirror_fetch(path: &Path, remote: &Remote<'_>, limit: Duration) -> Result
     Ok(())
 }
 
+/// The remote's branches and tags.
+pub fn ls_remote(path: &Path, remote: &Remote<'_>) -> Result<crate::Refs> {
+    let mut cmd = git(path, remote);
+    cmd.args(["ls-remote", "--heads", "--tags", "--"]).arg(remote.url);
+    let out = run(cmd, Duration::from_secs(120))?;
+    let mut refs = crate::Refs::new();
+    for line in out.lines() {
+        let Some((id, name)) = line.split_once('\t') else { continue };
+        // `^{}` lines are what annotated tags point at.
+        if name.ends_with("^{}") {
+            continue;
+        }
+        if let Ok(id) = git2::Oid::from_str(id) {
+            refs.insert(name.to_owned(), id);
+        }
+    }
+    Ok(refs)
+}
+
+/// Makes the remote's branches and tags match the bare repository at
+/// `path`, deleting there what's gone here (other refs are left alone).
+pub fn mirror_push(path: &Path, remote: &Remote<'_>, limit: Duration) -> Result<()> {
+    let mut cmd = git(path, remote);
+    cmd.args(["push", "--prune", "--quiet", "--no-verify", "--"])
+        .arg(remote.url)
+        .args(["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]);
+    run(cmd, limit).map(|_| ())
+}
+
+/// The object a Git LFS pointer file refers to: (oid, size).
+pub fn parse_lfs_pointer(data: &[u8]) -> Option<(String, u64)> {
+    if data.len() > 1024 {
+        return None;
+    }
+    let text = std::str::from_utf8(data).ok()?;
+    if !text.starts_with("version https://git-lfs.github.com/spec/v1\n") {
+        return None;
+    }
+    let (mut oid, mut size) = (None, None);
+    for line in text.lines() {
+        if let Some(o) = line.strip_prefix("oid sha256:") {
+            oid = Some(o.trim().to_owned());
+        } else if let Some(s) = line.strip_prefix("size ") {
+            size = s.trim().parse().ok();
+        }
+    }
+    let oid = oid.filter(|o| o.len() == 64 && o.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))?;
+    Some((oid, size?))
+}
+
+impl crate::GitRepo {
+    /// The Git LFS pointers in files that ref updates `(old, new)` added
+    /// or changed (everything at `new` without `old`, or if `old` is
+    /// unknown here): (oid, size), without duplicates.
+    pub fn lfs_pointers(&self, changes: &[(Option<git2::Oid>, git2::Oid)]) -> Result<Vec<(String, u64)>> {
+        let mut seen_blobs = std::collections::HashSet::new();
+        let mut out = std::collections::BTreeMap::new();
+        for (old, new) in changes {
+            let known_old = old.filter(|o| self.repo.find_commit(*o).is_ok());
+            let files = match known_old {
+                Some(o) => self.changed_files(o, *new)?.changed,
+                None => self.files(*new)?,
+            };
+            for f in files {
+                if !seen_blobs.insert(f.id) || self.blob_size(f.id)? > 1024 {
+                    continue;
+                }
+                if let Some((data, _)) = self.blob_by_id(f.id)?
+                    && let Some((oid, size)) = parse_lfs_pointer(&data)
+                {
+                    out.insert(oid, size);
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointers() {
+        let oid = "a".repeat(64);
+        let p = format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 12345\n");
+        assert_eq!(parse_lfs_pointer(p.as_bytes()), Some((oid.clone(), 12345)));
+        assert_eq!(parse_lfs_pointer(b"just a file"), None);
+        assert_eq!(parse_lfs_pointer(p.replace("sha256:a", "sha256:Z").as_bytes()), None);
+
+        let s = crate::read::tests::Scratch::new();
+        s.write("a.txt", "text");
+        s.write("big.bin", &p);
+        let first = s.commit("first");
+        let other = format!("version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 1\n", "b".repeat(64));
+        s.write("more.bin", &other);
+        let second = s.commit("second");
+        let repo = s.open();
+        assert_eq!(repo.lfs_pointers(&[(None, second)]).unwrap().len(), 2);
+        assert_eq!(repo.lfs_pointers(&[(Some(first), second)]).unwrap(), [("b".repeat(64), 1)]);
+        let unknown = git2::Oid::from_str(&"c".repeat(40)).unwrap();
+        assert_eq!(repo.lfs_pointers(&[(Some(unknown), second)]).unwrap().len(), 2, "unknown old: everything");
+    }
 
     #[test]
     fn refuses_other_protocols() {

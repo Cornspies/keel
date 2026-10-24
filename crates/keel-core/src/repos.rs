@@ -287,6 +287,7 @@ impl Core {
             .bind(now())
             .execute(&self.db)
             .await?;
+        self.push_mirrors_pending(repo_id).await?;
         let path = self.config.repo_path(repo_id);
         let core = self.clone();
         tokio::spawn(async move {

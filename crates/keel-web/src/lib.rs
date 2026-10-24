@@ -223,6 +223,10 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/settings/mirror", post(repo::update_mirror))
         .route("/{owner}/{repo}/settings/mirror/stop", post(repo::stop_mirroring))
         .route("/{owner}/{repo}/mirror/sync", post(repo::sync_mirror))
+        .route("/{owner}/{repo}/settings/push-mirrors", post(repo::add_push_mirror))
+        .route("/{owner}/{repo}/settings/push-mirrors/{id}/push", post(repo::push_now))
+        .route("/{owner}/{repo}/settings/push-mirrors/{id}/delete", post(repo::delete_push_mirror))
+        .route("/{owner}/{repo}/settings/lfs-locks/{id}/unlock", post(repo::unlock_file))
         .route("/{owner}/{repo}/transfer", post(repo::transfer))
         .route("/{owner}/{repo}/search", get(search::in_repo))
         .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
@@ -284,16 +288,57 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/info/lfs/objects/batch", post(lfs::batch))
         .route("/{owner}/{repo}/info/lfs/objects/{oid}", get(lfs::download).put(lfs::upload))
         .route("/{owner}/{repo}/info/lfs/locks/verify", post(lfs::verify_locks))
-        .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks))
-        .route("/healthz", get(health));
+        .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks).post(lfs::create_lock))
+        .route("/{owner}/{repo}/info/lfs/locks/{id}/unlock", post(lfs::unlock))
+        .route("/healthz", get(health))
+        .route("/metrics", get(metrics));
 
     // The API authenticates with tokens only, so needs no CSRF check.
     let api = api::routes().layer(CompressionLayer::new());
 
     web.merge(git)
         .merge(api)
+        .layer(middleware::from_fn_with_state(state.clone(), track))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Counts requests and their durations, by route pattern.
+async fn track(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let method = req.method().clone();
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", |p| p.as_str())
+        .to_owned();
+    let res = next.run(req).await;
+    state.core.metrics().http_request(method.as_str(), &route, res.status().as_u16(), started.elapsed().as_secs_f64());
+    res
+}
+
+/// Prometheus metrics, for requests with the configured bearer token.
+async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let Some(token) = state.core.config.metrics_token.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let given = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    // Constant-time, so the token can't be guessed byte by byte.
+    let ok = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0;
+    if !ok {
+        return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], "Unauthorized\n").into_response();
+    }
+    match state.core.metrics_text().await {
+        Ok(text) => ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], text).into_response(),
+        Err(e) => {
+            tracing::error!("metrics: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// For monitoring and load balancers: 200 if the server can use its

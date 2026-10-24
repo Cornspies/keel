@@ -37,8 +37,47 @@
   </form>
   {% endif %}
 
-  {% if let Some((files, size)) = lfs %}
-  <p class="muted">Git LFS: {{ files }} file{% if *files != 1 %}s{% endif %}, {{ size }}.</p>
+  <h2 id="push-mirrors">Push mirrors</h2>
+  <p class="muted">Push every change (branches, tags and Git LFS files) to repositories elsewhere, e.g. a backup on another server. Use an access token as the password.</p>
+  {% if !push_mirrors.is_empty() %}
+  <ul class="card-list">
+    {% for m in push_mirrors %}
+    <li class="card-row push-mirror-row">
+      <div class="admin-main">
+        <span class="mono">{{ m.url }}</span>
+        <div class="muted small">{{ m.status }}</div>
+        {% if let Some(e) = m.error %}<div class="small overdue">Last push failed: {{ e }}</div>{% endif %}
+      </div>
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/push-mirrors/{{ m.id }}/push"><button class="btn btn-small">Push now</button></form>
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/push-mirrors/{{ m.id }}/delete"><button class="btn btn-small btn-danger">Remove</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if let Some(e) = errors.push_mirror %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/push-mirrors" class="form">
+    <label>Repository URL <input name="url" placeholder="https://github.com/team/project.git" required></label>
+    <div class="form-row">
+      <label>Username <input name="username" autocomplete="off"></label>
+      <label>Password or token <input name="password" type="password" autocomplete="new-password"></label>
+    </div>
+    <button class="btn">Add push mirror</button>
+  </form>
+
+  {% if lfs.is_some() || !lfs_locks.is_empty() %}
+  <h2 id="lfs">Git LFS</h2>
+  {% if let Some((files, size)) = lfs %}<p class="muted">{{ files }} file{% if *files != 1 %}s{% endif %}, {{ size }}.</p>{% endif %}
+  {% if !lfs_locks.is_empty() %}
+  <p class="muted">Locked files (<span class="mono">git lfs lock</span>). Unlocking someone's file lets others change it again.</p>
+  <ul class="card-list">
+    {% for (l, when) in lfs_locks %}
+    <li class="card-row">
+      <div class="admin-main"><span class="mono">{{ l.path }}</span> <span class="muted small">locked by <a href="/{{ l.owner }}">{{ l.owner }}</a> {{ when }}</span></div>
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/lfs-locks/{{ l.id }}/unlock"><button class="btn btn-small">Unlock</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   {% endif %}
 
   <h2>Branch protection</h2>

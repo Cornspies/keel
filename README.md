@@ -24,9 +24,10 @@ One binary, one data directory, no external services.
 - **Commit statuses:** CI reports results through the API (GitHub's status
   API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
-- **Pull mirrors** of repositories hosted elsewhere (GitHub, GitLab, …),
-  kept in sync on a schedule or on demand.
-- **Git LFS** for large files, over HTTP and SSH.
+- **Mirrors:** pull mirrors of repositories hosted elsewhere (GitHub,
+  GitLab, …), kept in sync on a schedule, and push mirrors that get every
+  change, both with their Git LFS files.
+- **Git LFS** for large files, over HTTP and SSH, with file locking.
 - **Notifications:** an inbox for issues and pull requests you opened, commented
   on, are assigned to or mentioned in, or whose repository you watch; with
   per-thread subscribe/unsubscribe, and optionally by email.
@@ -85,6 +86,19 @@ backup tool of choice.
 `GET /healthz` answers `200 {"status":"ok",…}` while the server can use its
 database and `503` otherwise, for load balancers and uptime monitors.
 
+With `--metrics-token` (or `KEEL_METRICS_TOKEN`) set, `GET /metrics` serves
+Prometheus metrics to requests with that bearer token: requests and their
+durations by route, clones and pushes by transport, mirror runs, LFS traffic,
+and totals (accounts, repositories, issues, queued webhooks and email, stored
+LFS files). A scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: keel
+    authorization: { credentials: "<the token>" }
+    static_configs: [{ targets: ["git.example.com:3000"] }]
+```
+
 ### Configuration
 
 Every flag can also be set as an environment variable.
@@ -101,6 +115,7 @@ Every flag can also be set as an environment variable.
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
 | `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks and mirrors can't reach loopback/private addresses |
 | `--lfs-max-file-size` | `KEEL_LFS_MAX_FILE_SIZE` | `2048` (MiB) |
+| `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
 | `--smtp-url` | `KEEL_SMTP_URL` | no email |
 | `--mail-from` | `KEEL_MAIL_FROM` | `<site name> <noreply@<host of --base-url>>` |
 
@@ -186,6 +201,7 @@ crates/
   keel-search trigram code search index (tantivy)
   keel-hooks  webhook delivery worker (reqwest)
   keel-mail   SMTP sender for the mail outbox (lettre)
+  keel-mirror pull and push mirror worker, and its Git LFS client
   keel-web    axum router: server-rendered pages (askama templates), the
               JSON API, smart HTTP git protocol, the Git LFS server, background
               cache warming and search indexing, assets (compiled into the
@@ -271,18 +287,28 @@ diff, the line still says the same thing, so the comment is shown there;
 otherwise it's shown as outdated in the conversation, with the diff lines it
 was made on (stored with it).
 
-**Mirrors** are fetched by a background worker with `git fetch --prune` (so
-branches and tags deleted upstream go too), every 1–24 hours or on "Sync now",
-with a 10-minute limit. Changes are handled like a push: webhooks, search
-indexing and caches follow. Mirrors can't be pushed to and don't take pull
-requests; "Stop mirroring" turns one into an ordinary repository. Credentials
-are stored apart from the URL, never shown again, and passed to git through
-its environment (not its command line). Like webhooks, mirrors can't fetch
-from internal addresses unless `--webhook-allow-private` is set: keel resolves
-the host and checks every address, then pins git to the checked one
-(`http.curloptResolve`), forbids redirects and allows only http(s), so a
-rebinding DNS name or a redirect can't get around it. LFS files aren't
-mirrored.
+**Pull mirrors** are fetched by a background worker (`keel-mirror`) with
+`git fetch --prune` (so branches and tags deleted upstream go too), every
+1–24 hours or on "Sync now", with a 10-minute limit. Changes are handled like
+a push: webhooks, search indexing and caches follow. Mirrors can't be pushed
+to and don't take pull requests; "Stop mirroring" turns one into an ordinary
+repository. **Push mirrors** get branches and tags pushed (`git push --prune`)
+whenever they change, or on "Push now"; failures are retried after 1 min,
+5 min, 30 min, 2 h, then every 6 h.
+
+Both carry Git LFS files: keel is an LFS client too. A pull mirror downloads
+the files that new commits point to (content checked, and ones that fail are
+retried on the next sync); a push mirror uploads the files the remote's
+commits don't have yet, before pushing the commits.
+
+Credentials are stored apart from the URL, never shown again, and passed to
+git through its environment (not its command line). Like webhooks, mirrors
+can't reach internal addresses unless `--webhook-allow-private` is set: for
+git, keel resolves the host, checks every address, then pins git to the
+checked one (`http.curloptResolve`), forbids redirects and allows only
+http(s), so a rebinding DNS name or a redirect can't get around it; LFS
+transfers check the addresses actually connected to, including after the
+few redirects storage services use.
 
 **Git LFS** lives where clients expect it, at `<repo>.git/info/lfs`, with the
 batch API and basic transfers. Files are stored once by SHA-256 (under
@@ -292,9 +318,12 @@ may serve, so knowing a file's hash isn't enough to read it from another
 repository. Forks start with their parent's list, and merging a pull request
 adds the files its changes point to. Unused files are deleted when
 repositories are. Transfers are authorized with short-lived signed tokens,
-which over SSH come from `git-lfs-authenticate`. File locking isn't
-supported. The web UI shows LFS files with their real size, and "Raw" serves
-their content.
+which over SSH come from `git-lfs-authenticate`. File locking follows the
+LFS locking API: `git lfs lock` takes a file, and git-lfs then refuses to push
+others' changes to it (it checks with the server before every push); owners
+unlock their files, repository admins can break anyone's lock (`--force`, or
+in the settings). The web UI shows LFS files with their real size and who
+locked them, and "Raw" serves their content.
 
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
@@ -413,8 +442,9 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,
   tokens and SSH keys stop working.
-- Mirrors only fetch over http(s) from public addresses by default (see
-  above). Git LFS tokens are HMAC-signed, scoped to one repository and one
+- Mirrors only fetch from and push to http(s) URLs at public addresses by
+  default (see above). `/metrics` is off unless a token is set, and compares
+  it in constant time. Git LFS tokens are HMAC-signed, scoped to one repository and one
   operation, and expire after an hour.
 - Two-factor authentication uses TOTP (RFC 6238; any authenticator app).
   Each code works once, five wrong codes end a sign-in attempt, and ten in 15
@@ -428,7 +458,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~400 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
+cargo build && scripts/smoke-test.sh      # ~420 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -437,6 +467,6 @@ run automatically at startup.
 
 ## Ideas
 
-- Push mirrors (sending changes to another server), and LFS files in mirrors.
-- Git LFS file locking.
-- Metrics for Prometheus.
+- Downloading a branch or tag as `.tar.gz` or `.zip`.
+- Releases: notes and files attached to tags.
+- An activity feed on the home page.

@@ -21,6 +21,8 @@ pub struct Config {
     pub mail: Option<MailConfig>,
     /// The largest file Git LFS accepts, in bytes.
     pub lfs_max_bytes: u64,
+    /// Bearer token for `/metrics`; without one, metrics are off.
+    pub metrics_token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +53,7 @@ impl Default for Config {
             site_name: "keel".into(),
             webhook_allow_private: false,
             lfs_max_bytes: 2 << 30,
+            metrics_token: None,
             mail: None,
         }
     }

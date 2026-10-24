@@ -548,6 +548,8 @@ struct BlobPage {
     history_url: String,
     latest: Option<CommitView>,
     refs: RefNames,
+    /// Who locked the file with Git LFS.
+    locked_by: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -642,9 +644,11 @@ pub async fn blob(
             other => other,
         };
     }
+    let locked_by = state.core.lfs_locks(repo.id, Some(&r.path), None, 0, 1).await?.into_iter().next().map(|l| l.owner);
     let rev_url = encode_path(&r.rev);
     let path_url = encode_path(&r.path);
     html(BlobPage {
+        locked_by,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
         crumbs: crumbs(&base, &r.rev, &r.path),
@@ -1046,6 +1050,16 @@ struct SettingsPage {
     intervals: &'static [(i64, &'static str)],
     /// Git LFS files and their total size, if any.
     lfs: Option<(i64, String)>,
+    lfs_locks: Vec<(keel_core::LfsLock, String)>,
+    push_mirrors: Vec<PushMirrorView>,
+}
+
+pub(crate) struct PushMirrorView {
+    pub id: i64,
+    pub url: String,
+    /// "pushed 3 minutes ago", "waiting to push", ….
+    pub status: String,
+    pub error: Option<String>,
 }
 
 /// An error message for one of the settings page's forms.
@@ -1057,6 +1071,7 @@ pub(crate) struct SettingsErrors {
     pub transfer: Option<String>,
     pub delete: Option<String>,
     pub mirror: Option<String>,
+    pub push_mirror: Option<String>,
 }
 
 /// The repository, if `user` may administer it.
@@ -1094,6 +1109,33 @@ async fn settings_page(state: &AppState, user: User, repo: &Repo, errors: Settin
             (0, _) => None,
             (n, bytes) => Some((n, crate::render::human_size(bytes as usize))),
         },
+        lfs_locks: state
+            .core
+            .lfs_locks(repo.id, None, None, 0, 200)
+            .await?
+            .into_iter()
+            .map(|l| {
+                let when = relative_time(l.created_at);
+                (l, when)
+            })
+            .collect(),
+        push_mirrors: state
+            .core
+            .push_mirrors(repo.id)
+            .await?
+            .into_iter()
+            .map(|m| PushMirrorView {
+                status: match (m.pending, m.pushed_at) {
+                    (true, _) if m.attempts > 0 => format!("retrying {}", relative_time_future(m.next_attempt_at)),
+                    (true, _) => "pushing soon".into(),
+                    (false, Some(t)) => format!("pushed {}", relative_time(t)),
+                    (false, None) => "not pushed yet".into(),
+                },
+                id: m.id,
+                url: m.url,
+                error: m.last_error,
+            })
+            .collect(),
     })
 }
 
@@ -1233,6 +1275,71 @@ pub async fn sync_mirror(
     }
     state.core.request_mirror_sync(repo.id).await?;
     Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
+}
+
+/// "in 5 minutes", for retries.
+fn relative_time_future(ts: i64) -> String {
+    match ts - crate::now() {
+        d if d < 60 => "in a moment".into(),
+        d if d < 3600 => format!("in {} minutes", d / 60),
+        d => format!("in {} hours", d / 3600),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PushMirrorForm {
+    url: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+}
+
+pub async fn add_push_mirror(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<PushMirrorForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    match state.core.add_push_mirror(repo.id, &f.url, &f.username, &f.password).await {
+        Ok(_) => Ok(Redirect::to(&format!("/{}/{}/settings#push-mirrors", repo.owner, repo.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => {
+            settings_page(&state, user, &repo, SettingsErrors { push_mirror: Some(msg), ..Default::default() }).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn delete_push_mirror(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.delete_push_mirror(repo.id, id).await?;
+    Ok(Redirect::to(&format!("/{}/{}/settings#push-mirrors", repo.owner, repo.name)).into_response())
+}
+
+pub async fn push_now(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.request_push(repo.id, id).await?;
+    Ok(Redirect::to(&format!("/{}/{}/settings#push-mirrors", repo.owner, repo.name)).into_response())
+}
+
+/// Breaks a Git LFS lock (repository admins).
+pub async fn unlock_file(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.delete_lfs_lock(repo.id, id).await?;
+    Ok(Redirect::to(&format!("/{}/{}/settings#lfs", repo.owner, repo.name)).into_response())
 }
 
 #[derive(Deserialize)]

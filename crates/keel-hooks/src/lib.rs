@@ -28,24 +28,31 @@ impl Resolve for PublicOnly {
             let addrs: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
             let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| !is_private_ip(a.ip())).collect();
             if public.is_empty() {
-                return Err(format!("{} resolves only to private addresses, which webhooks may not reach", name.as_str()).into());
+                return Err(format!("{} resolves only to private addresses, which may not be reached", name.as_str()).into());
             }
             Ok(Box::new(public.into_iter()) as Addrs)
         })
     }
 }
 
-pub fn client(allow_private: bool) -> reqwest::Client {
+/// An HTTP client builder for requests to addresses people enter: no
+/// redirects, no proxies, and unless `allow_private`, no private addresses
+/// (checked on the addresses actually connected to). Literal IP addresses
+/// in URLs don't go through the resolver; callers check those.
+pub fn safe_client_builder(allow_private: bool) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
-        .user_agent(concat!("keel-hooks/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("keel/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(TIMEOUT);
+        .connect_timeout(Duration::from_secs(5));
     if !allow_private {
         builder = builder.dns_resolver(Arc::new(PublicOnly));
     }
-    builder.build().expect("valid HTTP client configuration")
+    builder
+}
+
+pub fn client(allow_private: bool) -> reqwest::Client {
+    safe_client_builder(allow_private).timeout(TIMEOUT).build().expect("valid HTTP client configuration")
 }
 
 /// Starts the delivery worker (needs a Tokio runtime).
