@@ -18,8 +18,11 @@ One binary, one data directory, no external services.
   changes), suggested changes that can be applied with one click, approvals
   and change requests, and merging with a merge commit or squash, with
   conflict detection.
-- **Branch protection:** require pull requests and a number of approvals,
-  and refuse force pushes and deletion, for branches by name or pattern.
+- **Branch protection:** require pull requests, a number of approvals and
+  passing checks, and refuse force pushes and deletion, for branches by name
+  or pattern.
+- **Commit statuses:** CI reports results through the API (GitHub's status
+  API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
 - **Notifications:** an inbox for issues and pull requests you opened, commented
   on, are assigned to or mentioned in, or whose repository you watch; with
@@ -29,14 +32,18 @@ One binary, one data directory, no external services.
   with retries and a delivery log.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
-- **People:** accounts, organizations (owners and members), per-repository
-  collaborators (read/write/admin), private repositories.
+- **People:** accounts with optional two-factor authentication (authenticator
+  apps and recovery codes), organizations (owners and members),
+  per-repository collaborators (read/write/admin), private repositories.
+- **Renaming and transferring** repositories (to you or your organizations);
+  old links, clones and remotes keep working.
 - **Administration:** a page for site administrators with statistics,
   accounts (create, disable, delete, grant admin), all repositories, closing
   sign-ups and a notice on every page.
 - **JSON API** in the style of GitHub's, with personal access tokens.
 
-CI is not built in; connect one with a webhook.
+CI is not built in: connect one with a webhook, and let it report back with
+commit statuses.
 
 ## Quick start
 
@@ -115,9 +122,12 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | --- | --- |
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
-| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `description`, `private` |
+| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private` |
+| `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
 | `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
 | `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
+| `POST /repos/{owner}/{repo}/statuses/{sha}` | `state` (`pending`, `success`, `failure`, `error`), `context`, `description`, `target_url` |
+| `GET /repos/{owner}/{repo}/commits/{ref}/status`, `/statuses` | combined state, and each status |
 | `GET /repos/{owner}/{repo}/contents/{path}` | `ref`; files base64-encoded |
 | `GET /repos/{owner}/{repo}/labels`, `/milestones` | |
 | `GET`, `POST /repos/{owner}/{repo}/issues` | `state`, `labels`, `assignee`, `milestone` |
@@ -129,18 +139,29 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge` or `squash`; `delete_branch` |
 
 Issue lists don't include pull requests (unlike GitHub's); use `/pulls`.
+Bodies are JSON with or without a `Content-Type` header. Old names of
+renamed or transferred repositories keep working.
+
+A CI job reports its result like this:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+     -d '{"state":"success","context":"ci/build","target_url":"https://ci.example.com/builds/42"}' \
+     http://localhost:3000/api/v1/repos/ada/engine/statuses/$GIT_COMMIT
+```
 
 ## Layout
 
 ```
 crates/
   keel        the binary (CLI, wiring)
-  keel-core   config, SQLite schema + migrations, users, organizations,
-              sessions, SSH keys, access tokens, repositories and forks,
+  keel-core   config, SQLite schema + migrations, users, two-factor
+              authentication, organizations, sessions, SSH keys, access
+              tokens, repositories (forks, renames, transfers),
               permissions, issues, labels, assignees, milestones, pull
               requests, reviews and suggestions, branch protection (and the
-              pre-receive hook), notifications, webhook queue and payloads,
-              push events, site administration
+              pre-receive hook), commit statuses, notifications, webhook
+              queue and payloads, push events, site administration
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
@@ -240,6 +261,21 @@ passes the repository's rules in the environment; the hook (`keel hook
 pre-receive`) refuses updates to protected branches that aren't allowed, with
 a message for the person pushing. Repositories without rules don't run it.
 
+**Commit statuses** keep the latest state per context and commit (up to 100
+contexts per commit). A commit's overall state is failure if any status
+failed, pending if any is still running, and success otherwise. A branch rule
+can list required contexts: merging waits until each has succeeded on the pull
+request's latest commit; ones that haven't reported are shown as expected.
+
+**Renames and transfers** only change database rows, since repositories are
+stored by id on disk. The old owner and name are kept as a redirect to the
+repository's id, so a chain of renames still leads to it. Browsers get
+redirected; git (HTTP and SSH) and the API just serve the repository. A new
+repository with the old name takes it over. Private repositories don't
+redirect people who can't see them, so new names don't leak. Repositories can
+be transferred to yourself and to organizations you're in, not to other
+people.
+
 **Suggested changes** are ```` ```suggestion ```` blocks in line comments,
 shown as a diff of the commented line. Applying one commits the edit to the
 pull request's branch without a working tree (a new blob, tree and commit
@@ -331,13 +367,19 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,
   tokens and SSH keys stop working.
+- Two-factor authentication uses TOTP (RFC 6238; any authenticator app).
+  Each code works once, five wrong codes end a sign-in attempt, and ten in 15
+  minutes lock the second step for a while. Ten single-use recovery codes are
+  stored hashed. With it on, git over HTTP no longer accepts the password
+  (use a token or SSH key), and a password reset still asks for a code.
+  Administrators can turn it off for someone who lost their phone and codes.
 
 ## Development
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~300 end-to-end checks (needs git, ssh, curl, python3, openssl)
+cargo build && scripts/smoke-test.sh      # ~360 end-to-end checks (needs git, ssh, curl, python3, openssl)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -346,7 +388,7 @@ run automatically at startup.
 
 ## Ideas
 
-- Commit statuses, so CI can report results on pull requests (and branch
-  protection can require them).
-- Renaming and transferring repositories.
-- Two-factor authentication.
+- A `keel backup` command (a consistent snapshot of a running server) and a
+  health endpoint for monitoring.
+- Pull mirrors of repositories hosted elsewhere.
+- Git LFS for large files.

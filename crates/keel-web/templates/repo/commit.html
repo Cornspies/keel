@@ -12,5 +12,10 @@
   </div>
 </div>
 
+{% if !checks.is_empty() %}
+<h3 class="checks-title">Checks</h3>
+{% include "checks.html" %}
+{% endif %}
+
 {% include "repo/diff.html" %}
 {% endblock %}

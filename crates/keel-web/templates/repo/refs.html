@@ -12,7 +12,7 @@
       <a class="mono" href="{{ b.url }}"><strong>{{ b.name }}</strong></a>{% if b.is_default %} <span class="badge">default</span>{% endif %}{% if b.protected %} <span class="badge badge-protected" title="A branch protection rule applies">protected</span>{% endif %}
       <div class="muted small"><a class="muted" href="{{ b.commit.url }}">{{ b.commit.summary }}</a> · {{ b.commit.author }} · <time title="{{ b.commit.when_full }}">{{ b.commit.when }}</time></div>
     </div>
-    <a class="btn btn-small mono" href="{{ b.commit.url }}">{{ b.commit.short }}</a>
+    {{ b.commit.status|safe }}<a class="btn btn-small mono" href="{{ b.commit.url }}">{{ b.commit.short }}</a>
   </li>
   {% endfor %}
 </ul>

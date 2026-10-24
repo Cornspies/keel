@@ -16,6 +16,7 @@
       <a href="/{{ u.username }}"><strong>{{ u.username }}</strong></a>
       {% if u.is_admin %}<span class="badge">admin</span>{% endif %}
       {% if u.disabled %}<span class="badge badge-danger">disabled</span>{% endif %}
+      {% if u.two_factor %}<span class="badge" title="Two-factor authentication is on">2FA</span>{% endif %}
       <div class="muted small">{{ u.email }}{% if !u.verified %} (unverified){% endif %} · {{ u.repos }} repositor{% if u.repos == 1 %}y{% else %}ies{% endif %} · joined <time title="{{ u.joined_full }}">{{ u.joined }}</time> · last signed in {{ u.last_seen }}</div>
     </div>
     {% if !u.is_self %}
@@ -24,6 +25,7 @@
       <div class="dropdown-menu dropdown-wide admin-actions">
         <form method="post" action="/admin/users/{{ u.id }}/admin"><input type="hidden" name="to" value="{% if u.is_admin %}off{% else %}on{% endif %}"><button class="linkish">{% if u.is_admin %}Remove administrator rights{% else %}Make administrator{% endif %}</button></form>
         <form method="post" action="/admin/users/{{ u.id }}/disable"><input type="hidden" name="to" value="{% if u.disabled %}off{% else %}on{% endif %}"><button class="linkish">{% if u.disabled %}Enable account{% else %}Disable account (signs them out){% endif %}</button></form>
+        {% if u.two_factor %}<form method="post" action="/admin/users/{{ u.id }}/2fa"><button class="linkish" title="If they lost their phone and recovery codes">Turn off two-factor authentication</button></form>{% endif %}
         <form method="post" action="/admin/users/{{ u.id }}/delete"><button class="linkish danger-text" title="Only accounts without repositories">Delete account</button></form>
       </div>
     </details>

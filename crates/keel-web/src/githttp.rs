@@ -62,6 +62,13 @@ async fn authorize(
                 state.core.authenticate(&login, &secret).await.map(|u| u.map(|u| (u, true)))
             };
             match result {
+                // A password alone isn't enough with two-factor authentication.
+                Ok(Some((user, _))) if user.totp_enabled && !looks_like_token(&secret) && !looks_like_token(&login) => {
+                    return Err(text(
+                        StatusCode::FORBIDDEN,
+                        "Two-factor authentication is on for this account: use an access token instead of the password",
+                    ));
+                }
                 Ok(Some((user, can_write))) => (Some(user), can_write),
                 Ok(None) => return Err(unauthorized()),
                 Err(e) => return Err(internal(e)),
@@ -70,7 +77,7 @@ async fn authorize(
         None => (None, false),
     };
     let name = name.strip_suffix(".git").unwrap_or(name);
-    let repo = state.core.repo(owner, name).await.map_err(internal)?;
+    let repo = state.core.repo_or_redirect(owner, name).await.map_err(internal)?;
     let needed = if service.is_write() { Access::Write } else { Access::Read };
     let access = match &repo {
         Some(repo) => {

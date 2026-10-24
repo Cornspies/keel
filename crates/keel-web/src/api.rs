@@ -43,6 +43,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/tags", get(tags))
         .route("/api/v1/repos/{owner}/{repo}/commits", get(commits))
         .route("/api/v1/repos/{owner}/{repo}/commits/{sha}", get(commit))
+        .route("/api/v1/repos/{owner}/{repo}/commits/{sha}/statuses", get(statuses))
+        .route("/api/v1/repos/{owner}/{repo}/commits/{sha}/status", get(combined_status))
+        .route("/api/v1/repos/{owner}/{repo}/statuses/{sha}", get(statuses).post(create_status))
+        .route("/api/v1/repos/{owner}/{repo}/transfer", post(transfer))
         .route("/api/v1/repos/{owner}/{repo}/contents", get(contents_root))
         .route("/api/v1/repos/{owner}/{repo}/contents/{*path}", get(contents))
         .route("/api/v1/repos/{owner}/{repo}/labels", get(labels))
@@ -110,17 +114,20 @@ impl From<keel_git::Error> for ApiError {
     }
 }
 
-/// `Json`, with errors as JSON.
+/// A JSON request body, with errors as JSON. Like GitHub, any content
+/// type is accepted, so `curl -d '{…}'` works without a header.
 pub struct Body<T>(T);
 
 impl<T: serde::de::DeserializeOwned, S: Send + Sync> FromRequest<S> for Body<T> {
     type Rejection = ApiError;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, ApiError> {
-        match Json::<T>::from_request(req, state).await {
-            Ok(Json(v)) => Ok(Self(v)),
-            Err(e) => Err(error(e.status(), e.body_text())),
-        }
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| error(e.status(), e.body_text()))?;
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, format!("Invalid JSON: {e}")))
     }
 }
 
@@ -195,7 +202,8 @@ impl Caller {
 /// A repository the caller can see, and their access to it (read-only
 /// tokens get at most read access).
 async fn find_repo(state: &AppState, caller: &Caller, owner: &str, name: &str) -> ApiResult<(Repo, Access)> {
-    let repo = state.core.repo(owner, name).await?.ok_or_else(not_found_error)?;
+    // Renamed and transferred repositories are found under their old names.
+    let repo = state.core.repo_or_redirect(owner, name).await?.ok_or_else(not_found_error)?;
     let access = state.core.access(&repo, caller.user.as_ref()).await?;
     if access == Access::None {
         return Err(not_found_error());
@@ -427,6 +435,8 @@ async fn repo(
 
 #[derive(Deserialize)]
 pub struct RepoUpdate {
+    /// A new name (renames it; the old one redirects).
+    name: Option<String>,
     description: Option<String>,
     private: Option<bool>,
 }
@@ -441,8 +451,35 @@ async fn update_repo(
     need(&caller, access, Access::Admin)?;
     let description = body.description.unwrap_or_else(|| r.description.clone());
     state.core.update_repo(r.id, &description, body.private.unwrap_or(r.is_private)).await?;
+    if let Some(name) = body.name.as_deref().filter(|n| *n != r.name) {
+        state.core.rename_repo(&r, name).await?;
+    }
     let r = state.core.repo_by_id(r.id).await?.ok_or_else(not_found_error)?;
     Ok(Json(repo_value(&state, &r).await?))
+}
+
+#[derive(Deserialize)]
+pub struct Transfer {
+    /// You, or an organization you're a member of.
+    new_owner: String,
+}
+
+async fn transfer(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Body(body): Body<Transfer>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Admin)?;
+    let new_owner = state
+        .core
+        .user_by_name(&body.new_owner)
+        .await?
+        .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, format!("No user or organization named “{}”", body.new_owner)))?;
+    let moved = state.core.transfer_repo(&r, user, &new_owner).await?;
+    Ok((StatusCode::ACCEPTED, Json(repo_value(&state, &moved).await?)).into_response())
 }
 
 async fn delete_repo(
@@ -588,6 +625,85 @@ async fn commit(
     .await?
     .ok_or_else(not_found_error)?;
     Ok(Json(commit_value(&repo_url(&state, &r), &detail)))
+}
+
+/// The full id of the commit `rev` names, if it exists.
+async fn commit_id(state: &AppState, r: &Repo, rev: String) -> ApiResult<String> {
+    crate::repo::with_git(state, r, move |g| Ok(g.resolve_rev(&rev)))
+        .await?
+        .map(|id| id.to_string())
+        .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, "No such commit"))
+}
+
+#[derive(Deserialize)]
+pub struct NewStatus {
+    /// `pending`, `success`, `failure` or `error`.
+    state: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+async fn create_status(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, sha)): Path<(String, String, String)>,
+    Body(body): Body<NewStatus>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, access, Access::Write)?;
+    let sha = commit_id(&state, &r, sha).await?;
+    let s = state
+        .core
+        .set_status(
+            &r,
+            user,
+            &sha,
+            &body.state,
+            body.context.as_deref().unwrap_or("default"),
+            body.description.as_deref().unwrap_or(""),
+            body.target_url.as_deref().unwrap_or(""),
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(state.core.status_json(&r, &s))).into_response())
+}
+
+async fn statuses(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, rev)): Path<(String, String, String)>,
+    Q(paging): Q<Paging>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let sha = commit_id(&state, &r, rev).await?;
+    let mut list = state.core.statuses(r.id, &sha).await?;
+    list.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    let (list, more) = page_of(list, &paging);
+    Ok(paged(&state, &uri, &paging, list.iter().map(|s| state.core.status_json(&r, s)).collect(), more))
+}
+
+/// One state for the commit, and its statuses.
+async fn combined_status(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, rev)): Path<(String, String, String)>,
+) -> ApiResult<Json<Value>> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let sha = commit_id(&state, &r, rev).await?;
+    let list = state.core.statuses(r.id, &sha).await?;
+    Ok(Json(json!({
+        // GitHub reports a commit without statuses as pending.
+        "state": keel_core::combined_state(&list).unwrap_or("pending"),
+        "sha": sha,
+        "total_count": list.len(),
+        "statuses": list.iter().map(|s| state.core.status_json(&r, s)).collect::<Vec<_>>(),
+        "repository": state.core.repo_json(&r),
+    })))
 }
 
 #[derive(Deserialize)]

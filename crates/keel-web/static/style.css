@@ -303,7 +303,7 @@ input:focus, textarea:focus { outline: 2px solid var(--link); outline-offset: -1
 .cmd { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; overflow-x: auto; }
 
 .form-inline { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
-.form-inline input:not([type=hidden]) { flex: 1; min-width: 160px; width: auto; }
+.form-inline input:not([type=hidden]):not([type=checkbox]):not([type=radio]) { flex: 1; min-width: 160px; width: auto; }
 .form-inline select { width: auto; }
 .form-inline .btn { align-self: auto; }
 .owner-select { width: auto; flex-shrink: 0; }
@@ -400,6 +400,8 @@ input:focus, textarea:focus { outline: 2px solid var(--link); outline-offset: -1
 .badge-danger { color: var(--danger); border-color: var(--danger); }
 .danger-title { color: var(--danger); }
 .danger-zone { border-color: var(--danger); padding: 0 16px; }
+.danger-zone + .danger-zone { margin-top: 12px; }
+.danger-zone h3 { margin: 14px 0 0; }
 
 /* Rendered Markdown */
 .markdown { padding: 24px 32px; overflow-wrap: break-word; font-size: 15px; line-height: 1.6; }
@@ -626,3 +628,27 @@ a.stat:hover { background: var(--bg-subtle); text-decoration: none; }
 .danger-text { color: var(--danger); }
 .search-option { font-weight: 400; white-space: nowrap; }
 .search-form select { width: auto; }
+
+/* Commit statuses */
+.ci-status { display: inline-block; width: 16px; text-align: center; font-weight: 700; line-height: 1; margin-right: 6px; text-decoration: none; }
+a.ci-status:hover { text-decoration: none; }
+.ci-success::before { content: "✓"; color: #1f883d; }
+.ci-failure::before { content: "×"; color: var(--danger); font-size: 17px; }
+.ci-pending::before { content: "●"; color: #bf8700; font-size: 11px; vertical-align: 1px; }
+.ci-expected::before { content: "○"; color: var(--text-muted); }
+@media (prefers-color-scheme: dark) { .ci-success::before { color: #3fb950; } .ci-pending::before { color: #d29922; } }
+.checks { margin: 0 0 16px; }
+.check-row { justify-content: flex-start; padding: 8px 16px; }
+.check-main { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.checks-title { margin: 20px 0 8px; }
+.merge-box .checks { margin: 0; }
+
+/* Two-factor authentication */
+.code-input { font: 18px var(--mono); letter-spacing: 0.15em; max-width: 12em; }
+.qr { margin: 12px 0; }
+.qr img { background: #fff; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border); }
+.setup-steps { padding-left: 20px; display: flex; flex-direction: column; gap: 20px; }
+.setup-steps .form { margin-top: 8px; }
+.secret { word-spacing: 0.3em; }
+.recovery-box { padding: 4px 16px 12px; margin-bottom: 20px; border-color: #bf8700; }
+.recovery-codes { columns: 2; list-style: none; padding: 0; font-size: 15px; line-height: 1.8; }

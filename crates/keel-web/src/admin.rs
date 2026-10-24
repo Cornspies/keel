@@ -109,6 +109,7 @@ pub(crate) struct UserRow {
     pub verified: bool,
     pub is_admin: bool,
     pub disabled: bool,
+    pub two_factor: bool,
     pub is_self: bool,
     pub repos: i64,
     pub joined: String,
@@ -151,6 +152,7 @@ async fn users_page(
             verified: u.email_verified,
             is_admin: u.is_admin,
             disabled: u.disabled,
+            two_factor: u.totp_enabled,
             repos,
             joined: relative_time(u.created_at),
             joined_full: datetime(u.created_at),
@@ -239,6 +241,14 @@ pub async fn set_disabled(
     require_admin(&user)?;
     let t = target(&state, id).await?;
     let result = state.core.set_disabled(&user, &t, f.to == "on").await;
+    act(&state, user, result).await
+}
+
+/// For people who lost their authenticator and recovery codes.
+pub async fn disable_two_factor(State(state): State<AppState>, SignedIn(user): SignedIn, Path(id): Path<i64>) -> AppResult {
+    require_admin(&user)?;
+    let t = target(&state, id).await?;
+    let result = state.core.disable_totp(t.id).await;
     act(&state, user, result).await
 }
 

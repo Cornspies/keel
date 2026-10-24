@@ -96,6 +96,12 @@ impl Core {
             }
             r => r?,
         };
+        // The name may have redirected to a renamed repository; not any more.
+        sqlx::query("DELETE FROM repo_redirects WHERE owner_id = ?1 AND name = ?2")
+            .bind(owner.id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
         insert_default_labels(&mut tx, id).await?;
         // People watch their own repositories.
         if !owner.is_org() {
@@ -293,6 +299,99 @@ impl Core {
         Ok(())
     }
 
+    /// The repository at `owner/name`, or the one that was there before a
+    /// rename or transfer.
+    pub async fn repo_or_redirect(&self, owner: &str, name: &str) -> Result<Option<Repo>> {
+        if let Some(repo) = self.repo(owner, name).await? {
+            return Ok(Some(repo));
+        }
+        self.repo_redirect(owner, name).await
+    }
+
+    /// Where `owner/name` moved to, if it was renamed or transferred.
+    pub async fn repo_redirect(&self, owner: &str, name: &str) -> Result<Option<Repo>> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT r.repo_id FROM repo_redirects r JOIN users u ON u.id = r.owner_id
+             WHERE u.username = ?1 AND r.name = ?2",
+        )
+        .bind(owner)
+        .bind(name)
+        .fetch_optional(&self.db)
+        .await?;
+        match row {
+            Some((id,)) => self.repo_by_id(id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Renames a repository. The old name redirects to it.
+    pub async fn rename_repo(&self, repo: &Repo, new_name: &str) -> Result<Repo> {
+        let owner = self.user_by_id(repo.owner_id).await?.ok_or(Error::NotFound)?;
+        self.move_repo(repo, &owner, new_name).await
+    }
+
+    /// Moves a repository to `new_owner`: the actor themselves or an
+    /// organization they belong to (callers check that the actor
+    /// administers the repository). The old name redirects to it.
+    pub async fn transfer_repo(&self, repo: &Repo, actor: &User, new_owner: &User) -> Result<Repo> {
+        if new_owner.id == repo.owner_id {
+            return invalid(format!("{} already owns it.", new_owner.username));
+        }
+        if !self.can_create_repo_in(new_owner, actor).await? {
+            return invalid(format!("You can't move repositories to {}.", new_owner.username));
+        }
+        self.move_repo(repo, new_owner, &repo.name).await
+    }
+
+    async fn move_repo(&self, repo: &Repo, owner: &User, name: &str) -> Result<Repo> {
+        let name = name.trim();
+        validate_repo_name(name)?;
+        if owner.id == repo.owner_id && name == repo.name {
+            return Ok(repo.clone());
+        }
+        let mut tx = self.db.begin().await?;
+        let moved = sqlx::query("UPDATE repositories SET owner_id = ?2, name = ?3 WHERE id = ?1")
+            .bind(repo.id)
+            .bind(owner.id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await;
+        match moved {
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                return invalid(format!("{} already has a repository named “{name}”.", owner.username));
+            }
+            r => r?,
+        };
+        sqlx::query("DELETE FROM repo_redirects WHERE owner_id = ?1 AND name = ?2")
+            .bind(owner.id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        // A change of case only needs no redirect (names ignore case).
+        if owner.id != repo.owner_id || !name.eq_ignore_ascii_case(&repo.name) {
+            sqlx::query(
+                "INSERT INTO repo_redirects (owner_id, name, repo_id, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (owner_id, name) DO UPDATE SET repo_id = excluded.repo_id, created_at = excluded.created_at",
+            )
+            .bind(repo.owner_id)
+            .bind(&repo.name)
+            .bind(repo.id)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        }
+        if !owner.is_org() {
+            sqlx::query("INSERT OR IGNORE INTO watches (user_id, repo_id, created_at) VALUES (?1, ?2, ?3)")
+                .bind(owner.id)
+                .bind(repo.id)
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        self.repo_by_id(repo.id).await?.ok_or(Error::NotFound)
+    }
+
     pub async fn delete_repo(&self, repo: &Repo) -> Result<()> {
         let done = sqlx::query("DELETE FROM repositories WHERE id = ?1")
             .bind(repo.id)
@@ -314,6 +413,43 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn renaming_and_transferring() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let acme = core.create_org(&ada, "acme").await.unwrap();
+        let engine = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        core.create_repo(&ada, "taken", "", false).await.unwrap();
+
+        assert!(core.rename_repo(&engine, "taken").await.is_err());
+        assert!(core.rename_repo(&engine, "bad name").await.is_err());
+        let motor = core.rename_repo(&engine, "motor").await.unwrap();
+        assert_eq!((motor.id, motor.name.as_str()), (engine.id, "motor"));
+        assert_eq!(core.repo_or_redirect("ada", "engine").await.unwrap().unwrap().name, "motor");
+        assert!(core.repo("ada", "engine").await.unwrap().is_none());
+
+        // Renaming again keeps the first redirect working.
+        let turbine = core.rename_repo(&motor, "turbine").await.unwrap();
+        assert_eq!(core.repo_or_redirect("ada", "engine").await.unwrap().unwrap().id, turbine.id);
+        assert_eq!(core.repo_or_redirect("ada", "motor").await.unwrap().unwrap().id, turbine.id);
+        let cased = core.rename_repo(&turbine, "Turbine").await.unwrap();
+        assert_eq!(cased.name, "Turbine");
+
+        // Transfers: to organizations you're in, not to other people.
+        assert!(core.transfer_repo(&cased, &ada, &bob).await.is_err());
+        let moved = core.transfer_repo(&cased, &ada, &acme).await.unwrap();
+        assert_eq!((moved.owner.as_str(), moved.name.as_str()), ("acme", "Turbine"));
+        assert_eq!(core.repo_or_redirect("ada", "turbine").await.unwrap().unwrap().owner, "acme");
+        assert_eq!(core.repo_or_redirect("ada", "engine").await.unwrap().unwrap().owner, "acme");
+
+        // A new repository takes the old name over.
+        let fresh = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        assert_eq!(core.repo_or_redirect("ada", "engine").await.unwrap().unwrap().id, fresh.id);
+        core.delete_repo(&fresh).await.unwrap();
+        assert!(core.repo_or_redirect("ada", "engine").await.unwrap().is_none(), "the redirect is gone for good");
+    }
 
     #[tokio::test]
     async fn repo_lifecycle_and_access() {

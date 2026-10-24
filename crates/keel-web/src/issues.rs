@@ -36,6 +36,8 @@ pub(crate) struct IssueRow {
     pub comments: i64,
     pub labels: Vec<LabelView>,
     pub assignees: Vec<String>,
+    /// Open pull requests: the status badge of the head commit (HTML).
+    pub status: String,
 }
 
 impl IssueRow {
@@ -56,6 +58,7 @@ impl IssueRow {
             opened: relative_time(i.created_at),
             opened_full: datetime(i.created_at),
             comments: i.comment_count,
+            status: String::new(),
         }
     }
 }
@@ -446,6 +449,30 @@ pub async fn list(
     list_page(state, viewer, owner, name, q, false).await
 }
 
+/// Status badges for the head commits of open pull requests.
+async fn pull_badges(state: &AppState, repo: &Repo, issues: &[Issue], rows: &mut [IssueRow]) -> AppResult<()> {
+    let numbers: Vec<i64> = issues.iter().filter(|i| i.is_open()).map(|i| i.number).collect();
+    if numbers.is_empty() {
+        return Ok(());
+    }
+    let heads: HashMap<i64, String> = with_git(state, repo, move |g| {
+        Ok(numbers
+            .into_iter()
+            .filter_map(|n| Some((n, g.ref_tip(&keel_core::pull_ref(n))?.to_string())))
+            .collect())
+    })
+    .await?;
+    let shas: Vec<String> = heads.values().cloned().collect();
+    let statuses = state.core.statuses_of(repo.id, &shas).await?;
+    let base = format!("/{}/{}", repo.owner, repo.name);
+    for row in rows {
+        if let Some(list) = heads.get(&row.number).and_then(|sha| statuses.get(sha)) {
+            row.status = crate::statuses::badge(list, &format!("{base}/commit/{}", list[0].sha));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn list_page(
     state: AppState,
     viewer: Option<User>,
@@ -538,7 +565,13 @@ pub(crate) async fn list_page(
         show_open,
         open_count,
         closed_count,
-        rows: issues.iter().map(|i| IssueRow::new(&repo, i, &mut labels, &mut assignees)).collect(),
+        rows: {
+            let mut rows: Vec<IssueRow> = issues.iter().map(|i| IssueRow::new(&repo, i, &mut labels, &mut assignees)).collect();
+            if pulls {
+                pull_badges(&state, &repo, &issues, &mut rows).await?;
+            }
+            rows
+        },
         newer_url: (page_no > 1).then(|| url(show_open, f, Some(page_no - 1))),
         older_url: has_more.then(|| url(show_open, f, Some(page_no + 1))),
         signed_in: viewer.is_some(),

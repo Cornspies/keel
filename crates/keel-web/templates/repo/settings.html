@@ -3,12 +3,20 @@
 {% include "repo/header.html" %}
 <div class="narrow-left">
   <h2>General</h2>
-  {% if let Some(e) = general_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  {% if let Some(e) = errors.general %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings" class="form">
     <label>Description <input name="description" value="{{ repo.description }}"></label>
     <label class="check"><input type="checkbox" name="private" {% if repo.is_private %}checked{% endif %}> Private <span class="hint">Only you can see and clone it.</span></label>
     <button class="btn btn-primary">Save</button>
   </form>
+
+  <h3>Name</h3>
+  {% if let Some(e) = errors.rename %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/rename" class="form form-inline">
+    <input name="name" value="{{ repo.name }}" aria-label="Repository name" required>
+    <button class="btn">Rename</button>
+  </form>
+  <p class="hint">Links, clones and remotes using the old name keep working until another repository takes it.</p>
 
   <h2>Branch protection</h2>
   <p class="muted">Require pull requests and approvals for important branches, and refuse force pushes: <a href="/{{ repo.owner }}/{{ repo.name }}/settings/branches">manage rules</a>.</p>
@@ -31,7 +39,7 @@
     {% endfor %}
   </ul>
   {% endif %}
-  {% if let Some(e) = collaborator_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  {% if let Some(e) = errors.collaborator %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/collaborators" class="form form-inline">
     <input name="username" placeholder="Username" aria-label="Username" required>
     <select name="role" aria-label="Role">
@@ -42,10 +50,23 @@
     <button class="btn">Add or update</button>
   </form>
 
-  <h2 class="danger-title">Delete repository</h2>
+  <h2 class="danger-title">Danger zone</h2>
   <div class="box danger-zone">
+    <h3>Transfer</h3>
+    <p>Move <strong>{{ repo.owner }}/{{ repo.name }}</strong> to {% if transfer_targets.is_empty() %}another account. You can move repositories to yourself and to organizations you belong to; you have none to move it to.{% else %}your account or an organization you belong to. Its issues, pull requests, collaborators and settings come along; the old address redirects.{% endif %}</p>
+    {% if let Some(e) = errors.transfer %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+    {% if !transfer_targets.is_empty() %}
+    <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/transfer" class="form">
+      <label>New owner <select name="new_owner">{% for t in transfer_targets %}<option>{{ t }}</option>{% endfor %}</select></label>
+      <label>Type <span class="mono">{{ repo.owner }}/{{ repo.name }}</span> to confirm <input name="confirm" autocomplete="off" required></label>
+      <button class="btn btn-danger">Transfer this repository</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="box danger-zone">
+    <h3>Delete</h3>
     <p>This permanently deletes <strong>{{ repo.owner }}/{{ repo.name }}</strong> and all of its history. It cannot be undone.</p>
-    {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+    {% if let Some(e) = errors.delete %}<p class="flash flash-error">{{ e }}</p>{% endif %}
     <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/delete" class="form">
       <label>Type <span class="mono">{{ repo.owner }}/{{ repo.name }}</span> to confirm <input name="confirm" autocomplete="off" required></label>
       <button class="btn btn-danger">Delete this repository</button>

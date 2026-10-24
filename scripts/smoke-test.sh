@@ -510,6 +510,8 @@ check "file contents" is "$(curl -s "$API/repos/ada/engine/contents/config.txt" 
 check "directory listings" contains "$(curl -s "$API/repos/ada/engine/contents")" '"README.md"'
 check "branches say what's protected" is "$(curl -s "$API/repos/ada/engine/branches/main" | field '["protected"]')" True
 check "commits are paged with Link headers" contains "$(curl -s -D - -o /dev/null "$API/repos/ada/engine/commits?per_page=1")" 'rel="next"'
+check "JSON without a content type is fine" is "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RW" -d '{"body":"No header"}' "$API/repos/ada/engine/issues/$AI/comments")" 201
+check "invalid JSON is explained" contains "$(api "$RW" POST "/repos/ada/engine/issues/$AI/comments" -d '{"body":')" "Invalid JSON"
 check "unknown endpoints are JSON 404s" contains "$(curl -s "$API/nope")" '"message"'
 git -C "$W" checkout -q -b api-change main~1 2>/dev/null || git -C "$W" checkout -q -b api-change
 git -C "$W" fetch -q "$ADA_HTTP" main && git -C "$W" reset -q --hard FETCH_HEAD
@@ -546,6 +548,62 @@ check "it's gone" is "$(status "$B/zed")" 404
 check "reopen sign-ups" is "$(post "$T/ada" /admin/settings banner=)" 303
 check "the notice is gone" bash -c "! curl -s '$B/' | grep -q 'Maintenance tonight'"
 
+echo "== commit statuses"
+MAIN=$(git ls-remote "$B/ada/engine.git" refs/heads/main | cut -f1)
+check "read-only tokens can't set statuses" is "$(api_status "$RO" POST "/repos/ada/engine/statuses/$MAIN" -d '{"state":"success"}')" 403
+check "unknown states are refused" is "$(api_status "$RW" POST "/repos/ada/engine/statuses/$MAIN" -d '{"state":"great"}')" 422
+check "CI reports a build" is "$(api_status "$RW" POST "/repos/ada/engine/statuses/$MAIN" -d '{"state":"pending","context":"ci/build","target_url":"https://ci.example.com/1","description":"Building"}')" 201
+check "the combined state" is "$(curl -s "$API/repos/ada/engine/commits/main/status" | field '["state"]')" pending
+check "and its result" is "$(api_status "$RW" POST "/repos/ada/engine/statuses/$MAIN" -d '{"state":"success","context":"ci/build","target_url":"https://ci.example.com/1"}')" 201
+check "commit lists show it" contains "$(curl -s "$B/ada/engine/commits/main")" "ci-success"
+check "so do branches" contains "$(curl -s "$B/ada/engine/branches")" "ci-success"
+check "the commit lists its checks" contains "$(curl -s "$B/ada/engine/commit/$MAIN")" "https://ci.example.com/1"
+RULE=$(curl -s -b "$T/ada" "$B/ada/engine/settings/branches" | grep -o 'settings/branches/[0-9]*/delete' | head -1 | grep -o '[0-9]*')
+check "require the check on main" is "$(post "$T/ada" "/ada/engine/settings/branches/$RULE" pattern=main require_pull=on required_approvals=0 required_checks=ci/build)" 303
+git -C "$W" checkout -q -b checked main && git -C "$W" fetch -q "$ADA_HTTP" main && git -C "$W" reset -q --hard FETCH_HEAD
+echo "checked" >"$W/checked.txt" && git -C "$W" add -A && git -C "$W" commit -qm "Add checked.txt"
+git -C "$W" push -q "$ADA_HTTP" checked
+CHECKED=$(git -C "$W" rev-parse HEAD)
+check "open a pull request" is "$(api_status "$RW" POST /repos/ada/engine/pulls -d '{"title":"Checked","head":"checked","base":"main"}')" 201
+CP=$(api "$RW" GET /repos/ada/engine/pulls | field '[0]["number"]')
+check "it waits for the check" contains "$(curl -s -b "$T/ada" "$B/ada/engine/pull/$CP")" "ci/build hasn&#39;t reported"
+check "merging is refused" is "$(api_status "$RW" PUT "/repos/ada/engine/pulls/$CP/merge")" 405
+check "CI fails it" is "$(api_status "$RW" POST "/repos/ada/engine/statuses/$CHECKED" -d '{"state":"failure","context":"ci/build"}')" 201
+check "the list shows the failure" contains "$(curl -s "$B/ada/engine/pulls")" "ci-failure"
+check "the merge box too" contains "$(curl -s -b "$T/ada" "$B/ada/engine/pull/$CP")" "ci/build failed"
+check "CI passes it" is "$(api_status "$RW" POST "/repos/ada/engine/statuses/$CHECKED" -d '{"state":"success","context":"ci/build"}')" 201
+check "now it merges" is "$(api "$RW" PUT "/repos/ada/engine/pulls/$CP/merge" | field '["merged"]')" True
+
+echo "== two-factor authentication"
+signup tia "$T/tia"
+check "set it up" is "$(post "$T/tia" /settings/security/setup x=1)" 303
+SECRET=$(curl -s -b "$T/tia" "$B/settings/security" | grep -o 'class="mono secret">[A-Z2-7 ]*' | cut -d'>' -f2 | tr -d ' ')
+totp() { # totp <steps from now>: the code for $SECRET
+    python3 -c 'import base64,hmac,hashlib,struct,sys,time
+k = base64.b32decode(sys.argv[1] + "=" * (-len(sys.argv[1]) % 8))
+h = hmac.new(k, struct.pack(">Q", int(time.time()) // 30 + int(sys.argv[2])), hashlib.sha1).digest()
+o = h[19] & 15
+print("%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7fffffff) % 1000000))' "$SECRET" "${1:-0}"
+}
+check "the page shows a key" is "${#SECRET}" 32
+check "a wrong code doesn't turn it on" contains "$(curl -s -b "$T/tia" -H "$O" -d code=00000x "$B/settings/security/enable")" "isn"
+page=$(curl -s -b "$T/tia" -H "$O" -d "code=$(totp 0)" "$B/settings/security/enable")
+check "the right one does" contains "$page" "Your recovery codes"
+RCODE=$(grep -o '<li>[a-z2-7]\{5\}-[a-z2-7]\{5\}</li>' <<<"$page" | head -1 | sed 's/<[^>]*>//g')
+check "signing in asks for a code" is "$(curl -s -o /dev/null -w '%{redirect_url}' -c "$T/tia2" -H "$O" -d "login=tia&password=password-tia" "$B/login")" "$B/login/2fa?next=%2F"
+check "without one there's no session" is "$(status -b "$T/tia2" "$B/settings/account")" 303
+check "wrong codes are refused" contains "$(curl -s -b "$T/tia2" -H "$O" -d code=000000 "$B/login/2fa")" "isn"
+check "the next code signs in" is "$(curl -s -b "$T/tia2" -c "$T/tia2" -o /dev/null -w '%{http_code}' -H "$O" -d "code=$(totp 1)" "$B/login/2fa")" 303
+check "signed in" contains "$(curl -s -b "$T/tia2" "$B/settings/account")" "tia@example.com"
+curl -s -o /dev/null -c "$T/tia3" -H "$O" -d "login=tia&password=password-tia" "$B/login"
+check "so does a recovery code" is "$(curl -s -b "$T/tia3" -c "$T/tia3" -o /dev/null -w '%{http_code}' -H "$O" -d "code=$RCODE" "$B/login/2fa")" 303
+check "once" bash -c "curl -s -o /dev/null -c '$T/tia4' -H '$O' -d 'login=tia&password=password-tia' '$B/login'; curl -s -b '$T/tia4' -H '$O' -d 'code=$RCODE' '$B/login/2fa' | grep -q 'isn'"
+check "create a private repository" is "$(post "$T/tia2" /new name=box private=on)" 303
+check "git refuses the password" bash -c "! git ls-remote -q 'http://tia:password-tia@127.0.0.1:$HTTP_PORT/tia/box.git' 2>/dev/null"
+TIA=$(curl -s -b "$T/ada" "$B/admin/users?q=tia" | grep -o 'admin/users/[0-9]*/2fa' | head -1 | cut -d/ -f3)
+check "admins can turn it off" is "$(post "$T/ada" "/admin/users/$TIA/2fa" x=1)" 303
+check "then the password is enough" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=tia&password=password-tia" "$B/login")" "$B/"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -553,9 +611,30 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
-    /org/acme/settings /settings/account /settings/keys /settings/tokens; do
+    /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done
+
+echo "== renaming and transferring"
+check "rename" is "$(post "$T/ada" /ada/engine/rename name=motor)" 303
+check "old pages redirect" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/issues?state=closed")" "$B/ada/motor/issues?state=closed"
+check "old clone URLs work" git ls-remote -q "$B/ada/engine.git"
+check "and pushes" git -C "$W" push -q "$ADA_HTTP" HEAD:refs/heads/after-rename
+check "so does SSH" git ls-remote -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git"
+check "the API follows" is "$(curl -s "$API/repos/ada/engine" | field '["name"]')" motor
+check "names can't clash" contains "$(curl -s -b "$T/ada" -H "$O" -d name=secret "$B/ada/motor/rename")" "already has"
+check "rename a private one" is "$(post "$T/ada" /ada/secret/rename name=vault)" 303
+check "outsiders don't learn the new name" is "$(status -b "$T/eve2" "$B/ada/secret")" 404
+check "collaborators are redirected" is "$(status -b "$T/bob" "$B/ada/secret")" 307
+check "transfers need confirming" contains "$(curl -s -b "$T/ada" -H "$O" -d "new_owner=acme&confirm=x" "$B/ada/motor/transfer")" "exactly"
+check "not to other people" contains "$(curl -s -b "$T/ada" -H "$O" -d "new_owner=bob&confirm=ada/motor" "$B/ada/motor/transfer")" "move repositories to bob"
+check "transfer to acme" is "$(post "$T/ada" /ada/motor/transfer new_owner=acme confirm=ada/motor)" 303
+check "it's there" contains "$(curl -s "$B/acme/motor")" "acme"
+check "the oldest name still leads to it" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/pulls")" "$B/acme/motor/pulls"
+check "and keeps its pull requests" contains "$(curl -s "$B/acme/motor/pulls?state=closed")" "Checked"
+check "move it back with the API" is "$(api_status "$RW" POST /repos/acme/motor/transfer -d '{"new_owner":"ada"}')" 202
+check "and rename it" is "$(api "$RW" PATCH /repos/ada/motor -d '{"name":"engine"}' | field '["full_name"]')" ada/engine
+check "the name is its own again" is "$(status "$B/ada/engine")" 200
 
 if [ $FAILED -ne 0 ]; then
     echo "--- server log"

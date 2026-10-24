@@ -103,14 +103,7 @@ pub struct LoginForm {
 pub async fn login(State(state): State<AppState>, Form(f): Form<LoginForm>) -> AppResult {
     let next = safe_next(f.next.as_deref()).to_owned();
     match state.core.authenticate(&f.login, &f.password).await? {
-        Some(user) => {
-            let token = state.core.create_session(user.id).await?;
-            Ok((
-                [(header::SET_COOKIE, set_cookie(&state, &token))],
-                Redirect::to(&next),
-            )
-                .into_response())
-        }
+        Some(user) => crate::twofactor::sign_in(&state, &user, &next).await,
         None => html(LoginPage {
             page: Page::new(&state, None, "Sign in"),
             error: Some("Incorrect username or password.".into()),

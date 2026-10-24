@@ -164,6 +164,8 @@ pub(crate) struct CommitView {
     pub when: String,
     pub when_full: String,
     pub url: String,
+    /// The status badge (HTML), if CI reported anything.
+    pub status: String,
 }
 
 impl CommitView {
@@ -176,6 +178,7 @@ impl CommitView {
             when: relative_time(c.author.time),
             when_full: datetime(c.author.time),
             url: format!("{base}/commit/{}", c.id),
+            status: String::new(),
         }
     }
 }
@@ -399,6 +402,10 @@ async fn render_tree(
                 Some((n, r)) => (n, Some(r)),
                 None => (String::new(), None),
             };
+            let mut latest = latest.as_ref().map(|c| CommitView::new(&base, c));
+            if let Some(c) = latest.as_mut() {
+                crate::statuses::attach(&state, &repo, &mut [c]).await?;
+            }
             html(TreePage {
                 repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
                 page: Page::new(&state, viewer, title),
@@ -409,7 +416,7 @@ async fn render_tree(
                 last_commits_url: last.is_none().then(|| {
                     format!("{base}/last-commits/{}/{}", resolved.commit, encode_path(&resolved.path))
                 }),
-                latest: latest.as_ref().map(|c| CommitView::new(&base, c)),
+                latest,
                 rev: resolved.rev,
                 rev_url,
                 path: resolved.path,
@@ -727,10 +734,12 @@ pub async fn commits(
     list.truncate(COMMITS_PER_PAGE);
     let here = format!("{base}/commits/{}/{}", encode_path(&r.rev), encode_path(&r.path));
     let here = here.trim_end_matches('/').to_owned();
+    let mut commits: Vec<CommitView> = list.iter().map(|c| CommitView::new(&base, c)).collect();
+    crate::statuses::attach(&state, &repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
     html(CommitsPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Commits · {}/{}", repo.owner, repo.name)),
-        commits: list.iter().map(|c| CommitView::new(&base, c)).collect(),
+        commits,
         newer_url: (page_no > 1).then(|| format!("{here}?page={}", page_no - 1)),
         older_url: has_older.then(|| format!("{here}?page={}", page_no + 1)),
         rev: r.rev,
@@ -857,6 +866,7 @@ struct CommitPage {
     deletions: usize,
     truncated: bool,
     inline: Option<crate::pulls::InlineCtx>,
+    checks: Vec<crate::statuses::CheckView>,
 }
 
 pub async fn commit(
@@ -877,8 +887,16 @@ pub async fn commit(
     .await?;
 
     let files = file_views(&base, &detail.commit.id.to_string(), &diff);
+    let checks = state
+        .core
+        .statuses(repo.id, &detail.commit.id.to_string())
+        .await?
+        .iter()
+        .map(|s| crate::statuses::CheckView::new(s, false))
+        .collect();
 
     html(CommitPage {
+        checks,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} · {}/{}", detail.commit.summary, repo.owner, repo.name)),
         commit: CommitView::new(&base, &detail.commit),
@@ -938,10 +956,12 @@ pub async fn refs(
         protected: branch && keel_core::rule_for(&rules, &r.name).is_some(),
         name: r.name.clone(),
     };
+    let mut branches: Vec<RefView> = branches.iter().map(|b| view(b, true)).collect();
+    crate::statuses::attach(&state, &repo, &mut branches.iter_mut().map(|b| &mut b.commit).collect::<Vec<_>>()).await?;
     html(RefsPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "branches", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Branches · {}/{}", repo.owner, repo.name)),
-        branches: branches.iter().map(|b| view(b, true)).collect(),
+        branches,
         tags: tags.iter().map(|t| view(t, false)).collect(),
     })
 }
@@ -955,11 +975,21 @@ pub async fn refs(
 struct SettingsPage {
     page: Page,
     repo: RepoView,
-    error: Option<String>,
-    general_error: Option<String>,
+    errors: SettingsErrors,
     collaborators: Vec<(i64, String, &'static str)>,
-    collaborator_error: Option<String>,
     owned_by_org: bool,
+    /// Accounts the repository can be moved to: you and your organizations.
+    transfer_targets: Vec<String>,
+}
+
+/// An error message for one of the settings page's forms.
+#[derive(Default)]
+pub(crate) struct SettingsErrors {
+    pub general: Option<String>,
+    pub rename: Option<String>,
+    pub collaborator: Option<String>,
+    pub transfer: Option<String>,
+    pub delete: Option<String>,
 }
 
 /// The repository, if `user` may administer it.
@@ -971,18 +1001,7 @@ async fn writable(state: &AppState, user: &User, owner: &str, name: &str) -> App
     Ok(repo)
 }
 
-async fn settings_page(state: &AppState, user: User, repo: &Repo, error: Option<String>) -> AppResult {
-    settings_page_with(state, user, repo, error, None, None).await
-}
-
-async fn settings_page_with(
-    state: &AppState,
-    user: User,
-    repo: &Repo,
-    error: Option<String>,
-    collaborator_error: Option<String>,
-    general_error: Option<String>,
-) -> AppResult {
+async fn settings_page(state: &AppState, user: User, repo: &Repo, errors: SettingsErrors) -> AppResult {
     let default_branch = with_git(state, repo, |g| Ok(g.default_branch()?.unwrap_or_default())).await?;
     let collaborators = state
         .core
@@ -992,14 +1011,16 @@ async fn settings_page_with(
         .map(|(u, a)| (u.id, u.username, a.role_name()))
         .collect();
     let owned_by_org = state.core.user_by_id(repo.owner_id).await?.is_some_and(|o| o.is_org());
+    let mut transfer_targets = vec![user.username.clone()];
+    transfer_targets.extend(state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username));
+    transfer_targets.retain(|t| *t != repo.owner);
     html(SettingsPage {
         repo: RepoView::new(state, repo, Access::Admin, Some(&user), "settings", &default_branch).await?,
         page: Page::new(state, Some(user), format!("Settings · {}/{}", repo.owner, repo.name)),
-        error,
-        general_error,
+        errors,
         collaborators,
-        collaborator_error,
         owned_by_org,
+        transfer_targets,
     })
 }
 
@@ -1019,7 +1040,9 @@ pub async fn set_collaborator(
     let role = Access::parse_role(&f.role).ok_or_else(|| AppError::BadRequest("Unknown role".into()))?;
     match state.core.set_collaborator(&repo, &f.username, role).await {
         Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings#collaborators", repo.owner, repo.name)).into_response()),
-        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, Some(msg), None).await,
+        Err(keel_core::Error::Invalid(msg)) => {
+            settings_page(&state, user, &repo, SettingsErrors { collaborator: Some(msg), ..Default::default() }).await
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -1040,7 +1063,7 @@ pub async fn settings(
     Path((owner, name)): Path<(String, String)>,
 ) -> AppResult {
     let repo = writable(&state, &user, &owner, &name).await?;
-    settings_page(&state, user, &repo, None).await
+    settings_page(&state, user, &repo, SettingsErrors::default()).await
 }
 
 #[derive(Deserialize)]
@@ -1059,7 +1082,9 @@ pub async fn update_settings(
     let repo = writable(&state, &user, &owner, &name).await?;
     match state.core.update_repo(repo.id, &f.description, f.private.is_some()).await {
         Ok(()) => Ok(Redirect::to(&format!("/{}/{}/settings", repo.owner, repo.name)).into_response()),
-        Err(keel_core::Error::Invalid(msg)) => settings_page_with(&state, user, &repo, None, None, Some(msg)).await,
+        Err(keel_core::Error::Invalid(msg)) => {
+            settings_page(&state, user, &repo, SettingsErrors { general: Some(msg), ..Default::default() }).await
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -1079,10 +1104,59 @@ pub async fn delete(
     let full = format!("{}/{}", repo.owner, repo.name);
     if f.confirm.trim() != full {
         let msg = format!("To delete, type “{full}” exactly.");
-        return settings_page(&state, user, &repo, Some(msg)).await;
+        return settings_page(&state, user, &repo, SettingsErrors { delete: Some(msg), ..Default::default() }).await;
     }
     state.core.delete_repo(&repo).await?;
     Ok(Redirect::to(&format!("/{}", repo.owner)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RenameForm {
+    name: String,
+}
+
+pub async fn rename(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<RenameForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    match state.core.rename_repo(&repo, &f.name).await {
+        Ok(r) => Ok(Redirect::to(&format!("/{}/{}/settings", r.owner, r.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => {
+            settings_page(&state, user, &repo, SettingsErrors { rename: Some(msg), ..Default::default() }).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TransferForm {
+    new_owner: String,
+    confirm: String,
+}
+
+pub async fn transfer(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<TransferForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    let full = format!("{}/{}", repo.owner, repo.name);
+    let fail = |msg: String| SettingsErrors { transfer: Some(msg), ..Default::default() };
+    if f.confirm.trim() != full {
+        return settings_page(&state, user, &repo, fail(format!("To transfer, type “{full}” exactly."))).await;
+    }
+    let Some(target) = state.core.user_by_name(&f.new_owner).await? else {
+        return settings_page(&state, user, &repo, fail(format!("There's no account named “{}”.", f.new_owner))).await;
+    };
+    match state.core.transfer_repo(&repo, &user, &target).await {
+        Ok(r) => Ok(Redirect::to(&format!("/{}/{}", r.owner, r.name)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => settings_page(&state, user, &repo, fail(msg)).await,
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

@@ -451,8 +451,10 @@ struct PullPage {
     /// May delete the head branch after merging.
     can_delete_branch: bool,
     /// What the base branch's protection rule requires, if one applies.
-    checks: Option<MergeChecks>,
+    protection: Option<MergeChecks>,
     merge_blocked: bool,
+    /// Statuses of the head commit, and required ones not reported yet.
+    checks: Vec<crate::statuses::CheckView>,
     error: Option<String>,
 }
 
@@ -496,7 +498,8 @@ async fn show_page(
     let placed = placed_threads(changes.as_ref().map_or(&[][..], |c| &c.files), &comments);
     let conv = conversation(state, repo, access, &l.issue, viewer.as_ref(), Some(&placed)).await?;
     let can_delete_branch = can_delete_branch(state, repo, &l, viewer.as_ref()).await?;
-    let checks = if l.issue.is_open() { merge_checks(state, repo, &l).await? } else { None };
+    let protection = if l.issue.is_open() { merge_checks(state, repo, &l).await? } else { None };
+    let checks = head_checks(state, repo, &l).await?;
     html(PullPage {
         repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", "").await?,
         page: Page::new(
@@ -506,7 +509,8 @@ async fn show_page(
         ),
         can_merge: access >= Access::Write,
         can_delete_branch,
-        merge_blocked: checks.as_ref().is_some_and(|c| c.blocked.is_some()),
+        merge_blocked: protection.as_ref().is_some_and(|c| c.blocked.is_some()),
+        protection,
         checks,
         pr,
         conv,
@@ -571,6 +575,34 @@ pub async fn apply_suggestion(
         Err(keel_core::Error::Invalid(msg)) => Err(AppError::BadRequest(msg)),
         Err(e) => Err(e.into()),
     }
+}
+
+/// The statuses of the pull request's head commit, with the base branch's
+/// required checks first (including those that haven't reported).
+async fn head_checks(state: &AppState, repo: &Repo, l: &Loaded) -> AppResult<Vec<crate::statuses::CheckView>> {
+    let Some(head) = l.head else { return Ok(Vec::new()) };
+    let statuses = state.core.statuses(repo.id, &head.to_string()).await?;
+    let required: Vec<String> = match state.core.branch_rule(repo.id, &l.pull.base_ref).await? {
+        Some(rule) if l.issue.is_open() => rule.checks().into_iter().map(str::to_owned).collect(),
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for context in &required {
+        out.push(match statuses.iter().find(|s| &s.context == context) {
+            Some(s) => crate::statuses::CheckView::new(s, true),
+            None => crate::statuses::CheckView {
+                context: context.clone(),
+                state: "expected".into(),
+                description: "Waiting for this check to report".into(),
+                url: None,
+                when: String::new(),
+                when_full: String::new(),
+                required: true,
+            },
+        });
+    }
+    out.extend(statuses.iter().filter(|s| !required.contains(&s.context)).map(|s| crate::statuses::CheckView::new(s, false)));
+    Ok(out)
 }
 
 /// The base branch's protection requirements, if a rule applies.

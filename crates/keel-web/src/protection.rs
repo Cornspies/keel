@@ -23,6 +23,8 @@ struct RulesPage {
     /// The rule an error is about (0: the new-rule form).
     error_for: i64,
     base_url: String,
+    /// Status contexts reported lately, to choose required checks from.
+    contexts: String,
 }
 
 async fn admin_repo(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
@@ -41,6 +43,7 @@ fn default_rule() -> BranchRule {
         required_approvals: 1,
         dismiss_stale: true,
         allow_force_push: false,
+        required_checks: String::new(),
     }
 }
 
@@ -71,6 +74,7 @@ async fn rules_page(
         error,
         error_for,
         base_url: format!("/{}/{}/settings/branches", repo.owner, repo.name),
+        contexts: state.core.recent_contexts(repo.id).await?.join(", "),
     })
 }
 
@@ -92,6 +96,7 @@ fn rule_from_form(id: i64, body: &[u8]) -> BranchRule {
         required_approvals: field("required_approvals").and_then(|v| v.trim().parse().ok()).unwrap_or(-1),
         dismiss_stale: field("dismiss_stale").is_some(),
         allow_force_push: field("allow_force_push").is_some(),
+        required_checks: field("required_checks").unwrap_or_default(),
     }
 }
 

@@ -3,12 +3,10 @@
 use askama::Template;
 use axum::Form;
 use axum::extract::{Query, State};
-use axum::http::header;
-use axum::response::{IntoResponse, Redirect};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
-use crate::session::{Viewer, set_cookie};
+use crate::session::Viewer;
 use crate::{AppState, Page};
 
 /// A short page with a heading, a message and a link onwards.
@@ -105,10 +103,8 @@ pub async fn reset(State(state): State<AppState>, Form(f): Form<ResetForm>) -> A
         return page("The passwords don’t match.".into());
     }
     match state.core.reset_password(&f.token, &f.new).await {
-        Ok(user) => {
-            let token = state.core.create_session(user.id).await?;
-            Ok(([(header::SET_COOKIE, set_cookie(&state, &token))], Redirect::to("/")).into_response())
-        }
+        // With two-factor authentication, the second step still applies.
+        Ok(user) => crate::twofactor::sign_in(&state, &user, "/").await,
         Err(keel_core::Error::Invalid(msg)) => page(msg),
         Err(e) => Err(e.into()),
     }

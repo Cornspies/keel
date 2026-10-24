@@ -15,7 +15,7 @@
       <a class="commit-summary" href="{{ c.url }}">{{ c.summary }}</a>
       <div class="muted small"><strong>{{ c.author }}</strong> committed <time title="{{ c.when_full }}">{{ c.when }}</time></div>
     </div>
-    <a class="btn btn-small mono" href="{{ c.url }}">{{ c.short }}</a>
+    {{ c.status|safe }}<a class="btn btn-small mono" href="{{ c.url }}">{{ c.short }}</a>
   </li>
   {% endfor %}
 </ul>

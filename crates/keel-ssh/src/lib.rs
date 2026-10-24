@@ -144,7 +144,7 @@ impl Connection {
         handle: Handle,
     ) -> anyhow::Result<()> {
         let user = self.user.clone();
-        let repo = self.core.repo(&request.owner, &request.repo).await?;
+        let repo = self.core.repo_or_redirect(&request.owner, &request.repo).await?;
         let needed = if request.service.is_write() { Access::Write } else { Access::Read };
         let access = match &repo {
             Some(r) => self.core.access(r, user.as_ref()).await?,

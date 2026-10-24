@@ -4,6 +4,8 @@
     <p class="hint">In patterns, <span class="mono">*</span> matches any part of a name without slashes. A branch follows the rule for its exact name if there is one, otherwise the longest matching pattern.</p>
     <label class="check"><input type="checkbox" name="require_pull"{% if r.require_pull %} checked{% endif %}> Require a pull request <span class="hint">Pushing to the branch is refused; changes are merged through pull requests.</span></label>
     <label class="inline-number">Required approvals <input type="number" name="required_approvals" min="0" max="10" value="{{ r.required_approvals }}"> <span class="hint">from people with write access other than the author, before merging a pull request into it. Anyone with write access requesting changes also blocks merging.</span></label>
+    <label>Required checks <span class="hint">Status contexts that must succeed on the latest commit before merging, separated by commas.{% if !contexts.is_empty() %} Reported lately: <span class="mono">{{ contexts }}</span>.{% endif %}</span>
+      <input name="required_checks" value="{{ r.required_checks }}" placeholder="ci/build, lint" class="mono"></label>
     <label class="check"><input type="checkbox" name="dismiss_stale"{% if r.dismiss_stale %} checked{% endif %}> Only count reviews of the latest commits <span class="hint">New commits in a pull request need a fresh review.</span></label>
     <label class="check"><input type="checkbox" name="allow_force_push"{% if r.allow_force_push %} checked{% endif %}> Allow force pushes and deleting the branch</label>
 {% endmacro %}
@@ -19,7 +21,7 @@
     <li class="card-row rule-row">
       <details{% if error_for == r.id %} open{% endif %}>
         <summary><span class="branch">{{ r.pattern }}</span>
-          <span class="muted small">{% if r.require_pull %}pull request required{% else %}direct pushes allowed{% endif %}{% if r.required_approvals > 0 %} · {{ r.required_approvals }} approval{% if r.required_approvals != 1 %}s{% endif %}{% endif %}{% if r.allow_force_push %} · force pushes allowed{% endif %}</span>
+          <span class="muted small">{% if r.require_pull %}pull request required{% else %}direct pushes allowed{% endif %}{% if r.required_approvals > 0 %} · {{ r.required_approvals }} approval{% if r.required_approvals != 1 %}s{% endif %}{% endif %}{% if !r.required_checks.is_empty() %} · checks: {{ r.required_checks }}{% endif %}{% if r.allow_force_push %} · force pushes allowed{% endif %}</span>
         </summary>
         {% if error_for == r.id %}{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}{% endif %}
         <form method="post" action="{{ base_url }}/{{ r.id }}" class="form">

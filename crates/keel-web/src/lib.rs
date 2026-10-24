@@ -23,6 +23,8 @@ mod repo;
 mod search;
 mod session;
 mod settings;
+mod statuses;
+mod twofactor;
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -157,6 +159,12 @@ pub fn router(state: AppState) -> Router {
     let web = Router::new()
         .route("/", get(pages::home))
         .route("/login", get(pages::login_form).post(pages::login))
+        .route("/login/2fa", get(twofactor::second_form).post(twofactor::second))
+        .route("/settings/security", get(twofactor::security))
+        .route("/settings/security/setup", post(twofactor::setup))
+        .route("/settings/security/enable", post(twofactor::enable))
+        .route("/settings/security/disable", post(twofactor::disable))
+        .route("/settings/security/recovery", post(twofactor::recovery))
         .route("/register", get(pages::register_form).post(pages::register))
         .route("/logout", post(pages::logout))
         .route("/new", get(pages::new_repo_form).post(pages::new_repo))
@@ -176,6 +184,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/users/{id}/admin", post(admin::set_admin))
         .route("/admin/users/{id}/disable", post(admin::set_disabled))
         .route("/admin/users/{id}/delete", post(admin::delete_user))
+        .route("/admin/users/{id}/2fa", post(admin::disable_two_factor))
         .route("/admin/repos", get(admin::repos))
         .route("/search", get(search::global))
         .route("/notifications", get(notifications::inbox))
@@ -207,6 +216,8 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/branches", get(repo::refs))
         .route("/{owner}/{repo}/settings", get(repo::settings).post(repo::update_settings))
         .route("/{owner}/{repo}/delete", post(repo::delete))
+        .route("/{owner}/{repo}/rename", post(repo::rename))
+        .route("/{owner}/{repo}/transfer", post(repo::transfer))
         .route("/{owner}/{repo}/search", get(search::in_repo))
         .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
         .route("/{owner}/{repo}/compare", get(pulls::compare_index))
@@ -282,7 +293,17 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     if !safe && !same_origin(&req, &state.core.config.base_url) {
         return (StatusCode::FORBIDDEN, "Cross-origin request blocked").into_response();
     }
+    let path = req.uri().path().to_owned();
+    let query = req.uri().query().map(str::to_owned);
+    let session = session::token_from(req.headers()).map(str::to_owned);
     let mut res = next.run(req).await;
+    // Pages of renamed or transferred repositories move along.
+    if safe
+        && res.status() == StatusCode::NOT_FOUND
+        && let Some(to) = moved(&state, &path, query.as_deref(), session.as_deref()).await
+    {
+        res = axum::response::Redirect::temporary(&to).into_response();
+    }
     let headers = res.headers_mut();
     let defaults = [
         (
@@ -298,6 +319,31 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
         headers.entry(name).or_insert(HeaderValue::from_static(value));
     }
     res
+}
+
+/// Where `path` is now if it's under the old name of a repository the
+/// viewer can see.
+async fn moved(state: &AppState, path: &str, query: Option<&str>, session: Option<&str>) -> Option<String> {
+    let mut parts = path.trim_start_matches('/').splitn(3, '/');
+    let (owner, name, rest) = (parts.next()?, parts.next()?, parts.next());
+    let repo = state.core.repo_redirect(owner, name).await.ok()??;
+    let viewer = match session {
+        Some(token) => state.core.session_user(token).await.ok()?,
+        None => None,
+    };
+    if state.core.access(&repo, viewer.as_ref()).await.ok()? == keel_core::Access::None {
+        return None;
+    }
+    let mut to = format!("/{}/{}", repo.owner, repo.name);
+    if let Some(rest) = rest {
+        to.push('/');
+        to.push_str(rest);
+    }
+    if let Some(q) = query {
+        to.push('?');
+        to.push_str(q);
+    }
+    Some(to)
 }
 
 fn same_origin(req: &Request, base_url: &str) -> bool {

@@ -6,7 +6,8 @@
 macro_rules! user_columns {
     () => {
         "id, username, COALESCE(email, '') AS email, password_hash, is_admin, kind, created_at,
-         email_verified_at IS NOT NULL AS email_verified, email_notifications, disabled_at IS NOT NULL AS disabled"
+         email_verified_at IS NOT NULL AS email_verified, email_notifications, disabled_at IS NOT NULL AS disabled,
+         totp_secret IS NOT NULL AS totp_enabled"
     };
 }
 
@@ -27,7 +28,9 @@ mod pulls;
 mod repos;
 mod reviews;
 mod ssh_keys;
+mod statuses;
 mod tokens;
+mod totp;
 mod users;
 mod webhooks;
 
@@ -53,7 +56,9 @@ pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::Repo;
 pub use reviews::{InlineAnchor, Verdict, suggestion};
 pub use ssh_keys::{SshKey, parse_public_key};
+pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
 pub use tokens::{AccessToken, looks_like_token};
+pub use totp::{RECOVERY_CODES, SecondStep, totp_uri};
 pub use users::User;
 pub use webhooks::{Attempt, Delivery, HookOwner, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
 

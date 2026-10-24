@@ -499,6 +499,7 @@ mod tests {
             required_approvals: 0,
             dismiss_stale: false,
             allow_force_push: false,
+            required_checks: String::new(),
         })
         .await
         .unwrap();

@@ -16,7 +16,8 @@
     {% endfor %}
   </ul>
   {% endif %}
-  {% if let Some(c) = checks %}
+  {% if !checks.is_empty() %}{% include "checks.html" %}{% endif %}
+  {% if let Some(c) = protection %}
   <div class="merge-status {% if c.blocked.is_some() %}merge-blocked{% else %}merge-ok{% endif %}">
     {% if let Some(b) = c.blocked %}<strong>Merging is blocked.</strong> <span class="muted">{{ b }}</span>
     {% else if c.required > 0 %}<strong>{{ c.approvals }} approving review{% if c.approvals != 1 %}s{% endif %}.</strong> <span class="muted">{{ c.required }} required.</span>

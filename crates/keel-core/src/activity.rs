@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use keel_git::{GitRepo, Oid, RefChange, Refs};
 
-use crate::{Comment, Core, Issue, Label, Milestone, PullRequest, Repo, Result, User, pull_ref};
+use crate::{Comment, CommitStatus, Core, Issue, Label, Milestone, PullRequest, Repo, Result, User, pull_ref};
 
 /// Commits listed in a push payload.
 const PUSH_COMMITS: usize = 20;
@@ -20,6 +20,8 @@ pub enum Activity {
     Issue { issue_id: i64, actor: Option<i64>, action: IssueAction },
     /// A comment, inline comment or review was added.
     Comment { issue_id: i64, comment_id: i64 },
+    /// A commit status was set.
+    Status { repo_id: i64, status: CommitStatus, actor: i64 },
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +65,7 @@ impl Core {
             Activity::Push { repo_id, pusher, before, changes } => self.record_push(repo_id, pusher, before, changes).await,
             Activity::Issue { issue_id, actor, action } => self.record_issue(issue_id, actor, action).await,
             Activity::Comment { issue_id, comment_id } => self.record_comment(issue_id, comment_id).await,
+            Activity::Status { repo_id, status, actor } => self.record_status(repo_id, status, actor).await,
         }
     }
 
@@ -175,6 +178,32 @@ impl Core {
         payload["repository"] = self.repo_json(&repo);
         payload["sender"] = sender;
         self.enqueue_webhooks(repo.id, event, action, &payload).await
+    }
+
+    async fn record_status(&self, repo_id: i64, status: CommitStatus, actor: i64) -> Result<()> {
+        let Some(repo) = self.repo_by_id(repo_id).await? else { return Ok(()) };
+        let wanted = self.hooks_for_repo(repo_id).await?.iter().any(|h| h.active && h.wants("status"));
+        if !wanted {
+            return Ok(());
+        }
+        let sha = status.sha.clone();
+        // The branches whose tip it is, as GitHub sends.
+        let branches: Vec<String> = self
+            .git(repo_id, move |g| {
+                let id = Oid::from_str(&sha)?;
+                Ok(g.branches()?.into_iter().filter(|b| b.commit.id == id).map(|b| b.name).collect())
+            })
+            .await?;
+        let mut payload = self.status_json(&repo, &status);
+        payload["name"] = json!(format!("{}/{}", repo.owner, repo.name));
+        payload["commit"] = json!({
+            "sha": status.sha,
+            "html_url": format!("{}/{}/{}/commit/{}", self.config.base_url, repo.owner, repo.name, status.sha),
+        });
+        payload["branches"] = branches.iter().map(|b| json!({ "name": b, "commit": { "sha": status.sha } })).collect();
+        payload["repository"] = self.repo_json(&repo);
+        payload["sender"] = self.sender_json(Some(actor)).await?;
+        self.enqueue_webhooks(repo_id, "status", "", &payload).await
     }
 
     async fn record_push(&self, repo_id: i64, pusher: Option<i64>, before: Refs, changes: Vec<RefChange>) -> Result<()> {
@@ -302,6 +331,21 @@ impl Core {
             labels.iter().map(label_json).collect(),
             assignees.iter().map(|a| self.login_json(Some(a))).collect(),
         ))
+    }
+
+    pub fn status_json(&self, repo: &Repo, s: &CommitStatus) -> Value {
+        json!({
+            "id": s.id,
+            "sha": s.sha,
+            "state": s.state,
+            "context": s.context,
+            "description": s.description,
+            "target_url": if s.target_url.is_empty() { Value::Null } else { json!(s.target_url) },
+            "creator": self.login_json(s.creator.as_deref()),
+            "url": format!("{}/api/v1/repos/{}/{}/statuses/{}", self.config.base_url, repo.owner, repo.name, s.sha),
+            "created_at": time(s.created_at),
+            "updated_at": time(s.updated_at),
+        })
     }
 
     pub fn milestone_json(&self, m: &Milestone) -> Value {

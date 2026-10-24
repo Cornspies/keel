@@ -31,12 +31,35 @@ pub struct BranchRule {
     pub dismiss_stale: bool,
     /// Allow force pushes and deleting the branch.
     pub allow_force_push: bool,
+    /// Status contexts that must succeed before merging, comma-separated.
+    pub required_checks: String,
 }
 
 impl BranchRule {
     pub fn matches(&self, branch: &str) -> bool {
         glob_match(&self.pattern, branch)
     }
+
+    pub fn checks(&self) -> Vec<&str> {
+        self.required_checks.split(',').map(str::trim).filter(|c| !c.is_empty()).collect()
+    }
+}
+
+/// Normalizes a comma- or newline-separated list of contexts.
+fn normalize_checks(s: &str) -> Result<String> {
+    let mut checks: Vec<&str> = Vec::new();
+    for c in s.split([',', '\n']).map(str::trim).filter(|c| !c.is_empty()) {
+        if c.chars().count() > 100 || c.chars().any(char::is_control) {
+            return invalid("Check names are at most 100 characters.");
+        }
+        if !checks.contains(&c) {
+            checks.push(c);
+        }
+    }
+    if checks.len() > 20 {
+        return invalid("A rule can require at most 20 checks.");
+    }
+    Ok(checks.join(","))
 }
 
 /// `*` matches any run of characters other than `/`.
@@ -87,6 +110,9 @@ pub struct MergeCheck {
     pub approvals: i64,
     /// People with write access whose latest review requests changes.
     pub changes_requested: Vec<String>,
+    /// The rule's required checks and their state on the head commit
+    /// (`None`: not reported yet).
+    pub checks: Vec<(String, Option<String>)>,
 }
 
 impl MergeCheck {
@@ -96,6 +122,19 @@ impl MergeCheck {
 
     /// Why merging is blocked, if it is.
     pub fn blocked(&self) -> Option<String> {
+        let failing: Vec<String> = self
+            .checks
+            .iter()
+            .filter(|(_, state)| state.as_deref() != Some("success"))
+            .map(|(context, state)| match state.as_deref() {
+                Some("pending") => format!("{context} is pending"),
+                Some(_) => format!("{context} failed"),
+                None => format!("{context} hasn't reported"),
+            })
+            .collect();
+        if !failing.is_empty() {
+            return Some(format!("Required checks: {}.", failing.join(", ")));
+        }
         if !self.changes_requested.is_empty() {
             return Some(format!("{} requested changes.", self.changes_requested.join(", ")));
         }
@@ -111,7 +150,7 @@ impl MergeCheck {
 impl Core {
     pub async fn branch_rules(&self, repo_id: i64) -> Result<Vec<BranchRule>> {
         Ok(sqlx::query_as(
-            "SELECT id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push
+            "SELECT id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, required_checks
              FROM branch_protections WHERE repo_id = ?1 ORDER BY pattern",
         )
         .bind(repo_id)
@@ -130,14 +169,16 @@ impl Core {
         if !(0..=10).contains(&rule.required_approvals) {
             return invalid("Required approvals are 0–10.");
         }
+        let checks = normalize_checks(&rule.required_checks)?;
         if rule.id == 0 && self.branch_rules(repo_id).await?.len() >= MAX_RULES {
             return invalid(format!("A repository can have at most {MAX_RULES} rules."));
         }
         let result = if rule.id == 0 {
             sqlx::query(
                 "INSERT INTO branch_protections
-                    (repo_id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (repo_id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, created_at,
+                     required_checks)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .bind(repo_id)
             .bind(pattern)
@@ -146,12 +187,13 @@ impl Core {
             .bind(rule.dismiss_stale)
             .bind(rule.allow_force_push)
             .bind(now())
+            .bind(&checks)
             .execute(&self.db)
             .await
         } else {
             sqlx::query(
                 "UPDATE branch_protections SET pattern = ?3, require_pull = ?4, required_approvals = ?5,
-                    dismiss_stale = ?6, allow_force_push = ?7
+                    dismiss_stale = ?6, allow_force_push = ?7, required_checks = ?8
                  WHERE repo_id = ?1 AND id = ?2",
             )
             .bind(repo_id)
@@ -161,6 +203,7 @@ impl Core {
             .bind(rule.required_approvals)
             .bind(rule.dismiss_stale)
             .bind(rule.allow_force_push)
+            .bind(&checks)
             .execute(&self.db)
             .await
         };
@@ -196,7 +239,23 @@ impl Core {
         .fetch_all(&self.db)
         .await?;
         let dismiss_stale = rule.as_ref().is_some_and(|r| r.dismiss_stale);
-        let mut check = MergeCheck { rule, approvals: 0, changes_requested: Vec::new() };
+        let required: Vec<String> = rule.as_ref().map(|r| r.checks().into_iter().map(str::to_owned).collect()).unwrap_or_default();
+        let checks = if required.is_empty() {
+            Vec::new()
+        } else {
+            let statuses = match head {
+                Some(head) => self.statuses(repo.id, head).await?,
+                None => Vec::new(),
+            };
+            required
+                .into_iter()
+                .map(|context| {
+                    let state = statuses.iter().find(|s| s.context == context).map(|s| s.state.clone());
+                    (context, state)
+                })
+                .collect()
+        };
+        let mut check = MergeCheck { rule, approvals: 0, changes_requested: Vec::new(), checks };
         for (user_id, name, kind, commit) in reviews {
             if dismiss_stale && commit.as_deref() != head {
                 continue;
@@ -342,6 +401,7 @@ mod tests {
             required_approvals: 0,
             dismiss_stale: false,
             allow_force_push,
+            required_checks: String::new(),
         }
     }
 
@@ -442,6 +502,24 @@ mod tests {
         assert!(core.merge_check(&repo, &issue, &pull, Some("c2")).await.unwrap().blocked().is_some());
         core.save_branch_rule(repo.id, &BranchRule { dismiss_stale: false, ..r.clone() }).await.unwrap();
         assert_eq!(core.merge_check(&repo, &issue, &pull, Some("c2")).await.unwrap().blocked(), None);
+
+        // Required checks: on the head commit, all must succeed.
+        let head = "c".repeat(40);
+        let mut with_checks = BranchRule { required_approvals: 0, required_checks: "ci/build,\n lint, ci/build".into(), ..r.clone() };
+        core.save_branch_rule(repo.id, &with_checks).await.unwrap();
+        with_checks = core.branch_rules(repo.id).await.unwrap().remove(0);
+        assert_eq!(with_checks.checks(), ["ci/build", "lint"]);
+        let blocked = |c: MergeCheck| c.blocked().unwrap_or_default();
+        let msg = blocked(core.merge_check(&repo, &issue, &pull, Some(&head)).await.unwrap());
+        assert_eq!(msg, "Required checks: ci/build hasn't reported, lint hasn't reported.");
+        core.set_status(&repo, &ada, &head, "failure", "ci/build", "", "").await.unwrap();
+        core.set_status(&repo, &ada, &head, "pending", "lint", "", "").await.unwrap();
+        let msg = blocked(core.merge_check(&repo, &issue, &pull, Some(&head)).await.unwrap());
+        assert_eq!(msg, "Required checks: ci/build failed, lint is pending.");
+        core.set_status(&repo, &ada, &head, "success", "ci/build", "", "").await.unwrap();
+        core.set_status(&repo, &ada, &head, "success", "lint", "", "").await.unwrap();
+        assert_eq!(core.merge_check(&repo, &issue, &pull, Some(&head)).await.unwrap().blocked(), None);
+        assert!(core.merge_check(&repo, &issue, &pull, Some(&"d".repeat(40))).await.unwrap().blocked().is_some(), "per commit");
 
         core.delete_branch_rule(repo.id, r.id).await.unwrap();
         assert!(core.receive_pack_env(repo.id).await.unwrap().is_empty());

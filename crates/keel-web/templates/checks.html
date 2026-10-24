@@ -1,0 +1,12 @@
+<ul class="card-list checks" id="checks">
+  {% for c in checks %}
+  <li class="card-row check-row">
+    <span class="ci-status ci-{% if c.state == "error" %}failure{% else %}{{ c.state }}{% endif %}" aria-label="{{ c.state }}" title="{{ c.state }}"></span>
+    <div class="check-main">
+      <strong>{{ c.context }}</strong>{% if c.required %} <span class="badge">Required</span>{% endif %}
+      <span class="muted small">{{ c.description }}{% if !c.when.is_empty() %}{% if !c.description.is_empty() %} · {% endif %}<time title="{{ c.when_full }}">{{ c.when }}</time>{% endif %}</span>
+    </div>
+    {% if let Some(u) = c.url %}<a class="btn btn-small" href="{{ u }}" rel="nofollow noopener noreferrer">Details</a>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
