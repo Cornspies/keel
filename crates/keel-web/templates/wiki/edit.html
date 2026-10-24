@@ -9,7 +9,8 @@
     <input type="hidden" name="base" value="{{ base }}">
     <label>Title <input name="title" value="{{ title }}" maxlength="100" required{% if editing.is_none() %} autofocus{% endif %}></label>
     <label>Content <span class="hint">Markdown; link to other pages with <span class="mono">[[Page title]]</span> or <span class="mono">[[text|Page title]]</span>.</span>
-      <textarea name="text" rows="20" class="mono"{% if editing.is_some() %} autofocus{% endif %}>{{ text }}</textarea></label>
+      <textarea name="text" rows="20" class="mono"{% if editing.is_some() %} autofocus{% endif %}>
+{{ text }}</textarea></label>
     <label>Edit message <span class="hint">(optional)</span> <input name="message" value="{{ message }}" maxlength="200" placeholder="{% if editing.is_some() %}Update {{ title }}{% else %}Create the page{% endif %}"></label>
     <div class="row-actions">
       <button class="btn btn-primary">{% if editing.is_some() %}Save page{% else %}Create page{% endif %}</button>

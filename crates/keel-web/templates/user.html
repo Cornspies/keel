@@ -7,10 +7,22 @@
   <p class="org-list"><span class="muted">Organizations:</span> {% for o in orgs %}<a class="badge" href="/{{ o }}">{{ o }}</a> {% endfor %}</p>
   {% endif %}
 </div>
-<div class="section-head">
-  <h2>Repositories</h2>
-  {% if is_self %}<a class="btn btn-small" href="/new">New</a>{% endif %}
+<nav class="tabs profile-tabs">
+  <a href="/{{ username }}"{% if !stars_tab %} class="active"{% endif %}>Repositories <span class="count">{{ repo_count }}</span></a>
+  <a href="/{{ username }}?tab=stars"{% if stars_tab %} class="active"{% endif %}>Stars <span class="count">{{ star_count }}</span></a>
+</nav>
+{% if stars_tab %}
+{% if starred.is_empty() %}
+<p class="empty">{% if is_self %}You haven't{% else %}{{ username }} hasn't{% endif %} starred any repositories yet.{% if is_self %} Star repositories to keep track of them; <a href="/explore">explore</a> to find some.{% endif %}</p>
+{% else %}
+<ul class="card-list">{% for r in starred %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
 </div>
+{% else %}
+{% if is_self %}<div class="section-head profile-actions"><span></span><a class="btn btn-small" href="/new">New</a></div>{% endif %}
 {% if repos.is_empty() %}
 <p class="empty">No repositories yet.</p>
 {% else %}
@@ -19,5 +31,6 @@
 {% if !activity.is_empty() %}
 <h2>Recent activity</h2>
 {% let events = activity %}{% include "feed.html" %}
+{% endif %}
 {% endif %}
 {% endblock %}

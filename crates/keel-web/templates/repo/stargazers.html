@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<h2>Stargazers <span class="muted">{{ repo.stars }}</span></h2>
+{% if gazers.is_empty() %}
+<p class="empty">Nobody has starred this repository yet.</p>
+{% else %}
+<ul class="card-list">
+  {% for g in gazers %}
+  <li class="card-row"><a href="/{{ g.name }}"><strong>{{ g.name }}</strong></a> <span class="muted small">starred <time title="{{ g.when_full }}">{{ g.when }}</time></span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>
+{% endblock %}

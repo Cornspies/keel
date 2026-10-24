@@ -5,6 +5,7 @@ mod admin;
 mod api;
 mod archive;
 mod assets;
+mod edit;
 mod error;
 mod explore;
 mod feed;
@@ -27,6 +28,7 @@ mod render;
 mod repo;
 mod search;
 mod session;
+mod stars;
 mod settings;
 mod statuses;
 mod twofactor;
@@ -250,6 +252,8 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/reply", post(pulls::reply))
         .route("/{owner}/{repo}/pull/{number}/review", post(pulls::review))
         .route("/{owner}/{repo}/watch", post(notifications::watch))
+        .route("/{owner}/{repo}/star", post(stars::star))
+        .route("/{owner}/{repo}/stargazers", get(stars::stargazers))
         .route("/{owner}/{repo}/issues/{number}/subscription", post(notifications::subscribe))
         .route("/{owner}/{repo}/settings/hooks", get(hooks::repo_index).post(hooks::repo_create))
         .route("/{owner}/{repo}/settings/hooks/{id}", get(hooks::repo_show).post(hooks::repo_update))
@@ -286,6 +290,13 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/wiki/{page}/edit", get(wiki::edit_form).post(wiki::update))
         .route("/{owner}/{repo}/wiki/{page}/delete", post(wiki::delete))
         .route("/{owner}/{repo}/wiki/{page}/history", get(wiki::history))
+        .route("/{owner}/{repo}/edit/{*rest}", get(edit::edit_form).post(edit::save))
+        .route("/{owner}/{repo}/new/{*rest}", get(edit::new_form).post(edit::create))
+        .route("/{owner}/{repo}/delete/{*rest}", get(edit::delete_form).post(edit::delete))
+        .route(
+            "/{owner}/{repo}/upload/{*rest}",
+            get(edit::upload_form).post(edit::upload).layer(axum::extract::DefaultBodyLimit::max(edit::MAX_UPLOAD + 1024 * 1024)),
+        )
         .route("/{owner}/{repo}/fork", get(forks::form).post(forks::create))
         .route("/{owner}/{repo}/forks", get(forks::list))
         .route("/{owner}/{repo}/labels", get(labels::index).post(labels::create))
@@ -298,6 +309,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/issues/{number}", get(issues::show))
         .route("/{owner}/{repo}/issues/{number}/edit", get(issues::edit_form).post(issues::edit))
         .route("/{owner}/{repo}/issues/{number}/comments", post(issues::comment))
+        .route("/{owner}/{repo}/issues/{number}/reactions", post(issues::react))
         .route(
             "/{owner}/{repo}/issues/{number}/comments/{id}/edit",
             get(issues::edit_comment_form).post(issues::edit_comment),

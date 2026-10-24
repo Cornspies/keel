@@ -107,6 +107,7 @@ pub(crate) fn view(e: &Event) -> EventView {
             };
             ("wiki", html)
         }
+        "star" => ("star", format!("{who} starred {repo_link}")),
         _ => ("create", format!("{who} created repository {repo_link}")),
     };
     let commits: Vec<(String, String, String)> = d["commits"]
@@ -166,6 +167,7 @@ mod tests {
         let wiki = view(&event("wiki", r#"{"pages": [{"name": "Getting-Started", "action": "created"}]}"#));
         assert!(wiki.html.contains("created wiki page <a href=\"/ada/engine/wiki/Getting-Started\">Getting Started</a>"), "{}", wiki.html);
         let wiki = view(&event("wiki", r#"{"pages": [{"name": "A", "action": "edited"}, {"name": "B", "action": "deleted"}]}"#));
+        assert!(view(&event("star", "{}")).html.contains("starred <a href=\"/ada/engine\">ada/engine</a>"));
         assert!(wiki.html.contains("updated 2 <a href=\"/ada/engine/wiki\">wiki pages</a>"), "{}", wiki.html);
     }
 }

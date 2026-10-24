@@ -9,6 +9,7 @@
       {% if let Some(d) = item.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}
     </div>
     <article class="markdown comment-body">{{ item.body_html|safe }}</article>
+    {% let r = item.reactions %}{% include "issues/reactions.html" %}
   </div>
   {% else if item.kind == "inline" %}
   {% if let Some(t) = item.thread %}
@@ -23,7 +24,7 @@
     <span class="state-dot state-{{ item.kind }}" aria-hidden="true"></span>
     <strong>{{ item.author }}</strong> {% if item.kind == "approved" %}approved these changes{% else %}requested changes{% endif %} <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
   </div>
-  {% if !item.body_html.is_empty() %}<div class="box comment review-comment"><article class="markdown comment-body">{{ item.body_html|safe }}</article></div>{% endif %}
+  {% if !item.body_html.is_empty() %}<div class="box comment review-comment"><article class="markdown comment-body">{{ item.body_html|safe }}</article>{% let r = item.reactions %}{% include "issues/reactions.html" %}</div>{% endif %}
   {% else if item.kind == "labeled" || item.kind == "unlabeled" %}
   <div class="event" id="event-{{ item.id }}">
     <span class="state-dot state-label" aria-hidden="true"></span>

@@ -10,17 +10,21 @@ One binary, one data directory, no external services.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
   `.tar.gz`.
+- **Changing files in the browser:** edit, create, rename, upload and delete
+  files, committed to the branch or to a new one with a pull request.
 - **Releases:** notes and files for a tag, with drafts and pre-releases.
 - **Wikis:** Markdown pages edited on the web or cloned and pushed with git,
   with `[[links]]`, page history, a sidebar and a footer.
-- **Topics and Explore:** tag repositories with topics and find them by
-  topic, name or description.
+- **Topics, stars and Explore:** tag repositories with topics, star the ones
+  you like, and find them by topic, name or description, or by popularity.
 - **Activity feed** on the home page (repositories you watch) and on
   profiles.
 - **Code search** across all repositories you can see, or within one on any
   branch; substrings or regular expressions.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
-  `@name` links, labels, assignees, milestones, and filtering by all of them.
+  `@name` links, labels, assignees, milestones, and filtering by all of them;
+  reactions (👍 ❤️ 🚀 …); issue and pull request templates (GitHub's
+  `.github/ISSUE_TEMPLATE` work as they are).
 - **Code review:** pull requests from branches or forks, review requests,
   comments on lines of the diff (with replies, marked outdated once the line
   changes), suggested changes that can be applied with one click, approvals
@@ -40,8 +44,8 @@ One binary, one data directory, no external services.
   on, are assigned to or mentioned in, or whose repository you watch; with
   per-thread subscribe/unsubscribe, and optionally by email.
 - **Webhooks** for repositories and whole organizations: pushes, issues,
-  comments, pull requests, reviews, releases and wiki edits, in GitHub's payload format and signed,
-  with retries and a delivery log.
+  comments, pull requests, reviews, releases, wiki edits and stars, in
+  GitHub's payload format and signed, with retries and a delivery log.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
 - **People:** accounts with optional two-factor authentication (authenticator
@@ -166,7 +170,9 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private` |
 | `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
-| `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `created`, `watchers`, `name`) |
+| `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `stars`, `created`, `watchers`, `name`) |
+| `GET /user/starred`, `GET /users/{name}/starred`, `GET /repos/{owner}/{repo}/stargazers` | |
+| `GET`, `PUT`, `DELETE /user/starred/{owner}/{repo}` | `204` if starred (or done), `404` if not |
 | `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
 | `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
 | `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
@@ -177,6 +183,8 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET`, `POST /repos/{owner}/{repo}/issues` | `state`, `labels`, `assignee`, `milestone` |
 | `GET`, `PATCH /repos/{owner}/{repo}/issues/{n}` | `title`, `body`, `state`, `labels`, `assignees`, `milestone` |
 | `GET`, `POST /repos/{owner}/{repo}/issues/{n}/comments` | |
+| `GET`, `POST /repos/{owner}/{repo}/issues/{n}/reactions`, `DELETE …/reactions/{id}` | `content`: `+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`, `rocket`, `eyes` |
+| `GET`, `POST /repos/{owner}/{repo}/issues/comments/{id}/reactions` (or `pulls/comments`), `DELETE …/reactions/{id}` | the same |
 | `GET`, `POST /repos/{owner}/{repo}/pulls` | `title`, `body`, `head` (`branch` or `owner:branch`), `base` |
 | `GET /repos/{owner}/{repo}/pulls/{n}` | adds `approvals`, `required_approvals`, `merge_blocked_by` |
 | `POST /repos/{owner}/{repo}/pulls/{n}/reviews` | `event`: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` |
@@ -211,7 +219,8 @@ crates/
               requests, reviews and suggestions, branch protection (and the
               pre-receive hook), commit statuses, notifications, webhook
               queue and payloads, push events, site administration, Git LFS
-              storage, wikis, topics, backups
+              storage, wikis, topics, stars, reactions, issue templates,
+              commits from the browser, backups
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
@@ -378,6 +387,28 @@ edits show in the activity feed and send GitHub's `gollum` webhook.
 **Topics** are lowercase words with hyphens, at most 20 per repository. The
 Explore page lists the repositories the viewer can see, filtered by topic or
 words in the name or description, with the most used topics beside them.
+**Stars** are counted in `repositories.star_count`, kept up to date by
+triggers (also when an account is deleted), so lists sort by them without
+counting.
+
+**Changing files in the browser** makes commits like a push would, by the
+person doing it: they show in the feed, run webhooks and update pull
+requests. The editor remembers the commit it was opened at; if someone
+changed the same file since, the commit is refused (changes to other files
+are fine). Protected branches that require pull requests only offer
+committing to a new branch, which leads straight to opening the pull
+request. Line endings are kept (browsers send `\r\n`), as is the executable
+bit when editing or renaming. Uploads are up to 25 MiB per file and 100 MiB
+in all and go into git directly; push big files with Git LFS instead.
+
+**Templates** are read from the default branch where GitHub and Gitea look
+for them: `.keel/`, `.github/`, `.gitea/`, the top level or `docs/`, with
+names in any case. Several issue templates (`ISSUE_TEMPLATE/*.md`, with
+`name`, `about`, `title`, `labels` and `assignees` front matter) are offered
+to choose from; `blank_issues_enabled: false` in `ISSUE_TEMPLATE/config.yml`
+hides "Open a blank issue". Labels and assignees from a template are applied
+when the issue is opened, even by people who can't set them themselves.
+`PULL_REQUEST_TEMPLATE.md` fills in new pull requests.
 
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
@@ -512,7 +543,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~520 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
+cargo build && scripts/smoke-test.sh      # ~590 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -521,7 +552,9 @@ run automatically at startup.
 
 ## Ideas
 
-- Editing, adding and uploading files in the browser.
-- Issue and pull request templates (`.keel/` or `.github/ISSUE_TEMPLATE`).
-- Stars, and sorting Explore by them.
-- Reactions on issues, pull requests and comments.
+- Importing repositories from GitHub or Gitea together with their issues,
+  pull requests, labels and releases.
+- Searching issues and pull requests with qualifiers (`is:open label:bug
+  author:ada`), across repositories too.
+- Avatars for people and organizations.
+- Pinning repositories to profiles.

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <h2>New issue</h2>
+  <p class="muted">Pick what fits best; each starts you off with the questions the maintainers need answered.</p>
+  <ul class="card-list">
+    {% for t in templates %}
+    <li class="card-row">
+      <div>
+        <strong>{{ t.name }}</strong>
+        {% if !t.about.is_empty() %}<p class="muted small">{{ t.about }}</p>{% endif %}
+      </div>
+      <a class="btn btn-primary btn-small" href="/{{ repo.owner }}/{{ repo.name }}/issues/new?template={{ t.file|urlencode }}">Get started</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if blank_allowed %}<p class="small"><a href="/{{ repo.owner }}/{{ repo.name }}/issues/new?template=blank">Open a blank issue</a></p>{% endif %}
+</div>
+{% endblock %}

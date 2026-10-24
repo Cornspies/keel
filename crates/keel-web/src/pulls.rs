@@ -225,7 +225,9 @@ pub async fn compare(
             (default, spec)
         }
     };
-    compare_page(&state, viewer, &repo, access, base, head, String::new(), String::new(), None).await
+    // New pull requests start with the repository's template.
+    let body = state.core.pull_template(repo.id).await?.unwrap_or_default();
+    compare_page(&state, viewer, &repo, access, base, head, String::new(), body, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -702,6 +704,7 @@ pub(crate) struct InlineView {
     pub delete_url: Option<String>,
     /// Applies the change the comment suggests.
     pub apply_url: Option<String>,
+    pub reactions: crate::issues::ReactionsView,
 }
 
 /// An inline comment and its replies.
@@ -780,6 +783,7 @@ pub(crate) fn render_with_suggestions(body: &str, original: Option<&str>, render
 
 /// Groups the inline comments of a pull request into threads, oldest first.
 /// `can_apply`: the viewer may apply suggested changes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inline_threads(
     repo: &Repo,
     issue: &Issue,
@@ -788,6 +792,7 @@ pub(crate) fn inline_threads(
     access: Access,
     can_apply: bool,
     render: &dyn Fn(&str) -> String,
+    reactions: &crate::issues::Reactions,
 ) -> Vec<ThreadView> {
     let issue_base = format!("/{}/{}/issues/{}", repo.owner, repo.name, issue.number);
     let pull_base = format!("/{}/{}/pull/{}", repo.owner, repo.name, issue.number);
@@ -805,6 +810,7 @@ pub(crate) fn inline_threads(
             edit_url: editable.then(|| format!("{issue_base}/comments/{}/edit", c.id)),
             delete_url: editable.then(|| format!("{issue_base}/comments/{}/delete", c.id)),
             apply_url: applicable.then(|| format!("{pull_base}/comments/{}/apply", c.id)),
+            reactions: reactions.view(Some(c.id)),
         }
     };
     comments
@@ -930,10 +936,14 @@ pub async fn files(
     let render = |body: &str| renderer.render(body);
     let can_apply = can_apply_suggestions(&state, &repo, &l, viewer.as_ref()).await?;
     let mut outdated = 0;
-    for mut t in inline_threads(&repo, &l.issue, &comments, viewer.as_ref(), access, can_apply, &render) {
+    let reactions = crate::issues::Reactions::load(&state, &repo, &l.issue, viewer.as_ref()).await?;
+    for mut t in inline_threads(&repo, &l.issue, &comments, viewer.as_ref(), access, can_apply, &render, &reactions) {
         match place(&c.files, &t.path, &t.side, t.line, &t.blob) {
             Some((fi, hi, li)) => {
                 t.in_diff = true;
+                for c in &mut t.comments {
+                    c.reactions.back = "files";
+                }
                 c.files[fi].hunks[hi].lines[li].threads.push(t);
             }
             None => outdated += 1,

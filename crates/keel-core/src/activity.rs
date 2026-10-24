@@ -361,6 +361,7 @@ impl Core {
             "fork": r.forked_from.is_some(),
             "description": r.description,
             "topics": r.topics().collect::<Vec<_>>(),
+            "stargazers_count": r.stars,
             "html_url": url,
             "clone_url": self.config.http_clone_url(&r.owner, &r.name),
             "ssh_url": self.config.ssh_clone_url(&r.owner, &r.name),
@@ -491,6 +492,7 @@ impl Core {
             "created_at": time(issue.created_at),
             "updated_at": time(issue.updated_at),
             "closed_at": issue.closed_at.map_or(Value::Null, time),
+            "reactions": self.reactions_json(issue.id, None).await?,
         });
         if issue.is_pull {
             v["pull_request"] = json!({ "html_url": self.issue_url(repo, issue) });

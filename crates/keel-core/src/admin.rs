@@ -175,7 +175,8 @@ impl Core {
             "SELECT r.id, r.owner_id, u.username AS owner, r.name, r.description,
                 r.is_private, r.created_at, r.updated_at, r.forked_from,
                 COALESCE((SELECT group_concat(t.topic, ' ' ORDER BY t.topic) FROM repo_topics t WHERE t.repo_id = r.id), '')
-                  AS topic_names
+                  AS topic_names,
+                r.star_count AS stars
              FROM repositories r JOIN users u ON u.id = r.owner_id
              WHERE u.username || '/' || r.name LIKE ?1 ORDER BY r.updated_at DESC, r.id DESC LIMIT ?2 OFFSET ?3",
         )

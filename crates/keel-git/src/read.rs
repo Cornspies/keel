@@ -208,6 +208,23 @@ impl GitRepo {
         Ok(self.branch_names()?.into_iter().next())
     }
 
+    /// The branch HEAD names, also before it has any commits.
+    pub fn head_branch(&self) -> Option<String> {
+        let head = self.repo.find_reference("HEAD").ok()?;
+        head.symbolic_target().ok()??.strip_prefix("refs/heads/").map(str::to_owned)
+    }
+
+    /// Splits `rest` (after e.g. `/edit/` in a URL) into the longest prefix
+    /// that names a branch, its tip and the remaining path.
+    pub fn resolve_branch_path(&self, rest: &str) -> Option<(String, Oid, String)> {
+        let segments: Vec<&str> = rest.trim_matches('/').split('/').collect();
+        (1..=segments.len()).rev().find_map(|i| {
+            let branch = segments[..i].join("/");
+            let tip = self.branch_tip(&branch)?;
+            Some((branch, tip, segments[i..].join("/")))
+        })
+    }
+
     fn branch_names(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
         for branch in self.repo.branches(Some(git2::BranchType::Local))? {

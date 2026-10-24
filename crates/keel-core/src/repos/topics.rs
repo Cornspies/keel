@@ -34,6 +34,8 @@ pub enum ExploreSort {
     /// Most recently pushed first.
     #[default]
     Updated,
+    /// Most starred first.
+    Stars,
     /// Newest first.
     Created,
     /// Most watched first.
@@ -42,7 +44,7 @@ pub enum ExploreSort {
 }
 
 impl ExploreSort {
-    pub const ALL: [ExploreSort; 4] = [Self::Updated, Self::Created, Self::Watchers, Self::Name];
+    pub const ALL: [ExploreSort; 5] = [Self::Updated, Self::Stars, Self::Created, Self::Watchers, Self::Name];
 
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|v| v.as_str() == s)
@@ -51,6 +53,7 @@ impl ExploreSort {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Updated => "updated",
+            Self::Stars => "stars",
             Self::Created => "created",
             Self::Watchers => "watchers",
             Self::Name => "name",
@@ -60,6 +63,7 @@ impl ExploreSort {
     pub fn label(self) -> &'static str {
         match self {
             Self::Updated => "Recently updated",
+            Self::Stars => "Most starred",
             Self::Created => "Newest",
             Self::Watchers => "Most watched",
             Self::Name => "Name",
@@ -119,6 +123,7 @@ impl Core {
         let (viewer_id, admin) = (viewer.map_or(-1, |u| u.id), viewer.is_some_and(|u| u.is_admin));
         let sql = match q.sort {
             ExploreSort::Updated => explore_page!("r.updated_at DESC, r.id DESC"),
+            ExploreSort::Stars => explore_page!("r.star_count DESC, r.updated_at DESC, r.id DESC"),
             ExploreSort::Created => explore_page!("r.created_at DESC, r.id DESC"),
             ExploreSort::Watchers => {
                 explore_page!("(SELECT COUNT(*) FROM watches w WHERE w.repo_id = r.id) DESC, r.updated_at DESC, r.id DESC")

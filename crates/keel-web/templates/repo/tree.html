@@ -5,6 +5,15 @@
   {% include "repo/refswitch.html" %}
   {% if !path.is_empty() %}{% include "repo/crumbs.html" %}{% endif %}
   <div class="spacer"></div>
+  {% if let Some(new_url) = new_file_url %}
+  <details class="dropdown dropdown-right">
+    <summary class="btn">Add file</summary>
+    <div class="dropdown-menu">
+      <a href="{{ new_url }}">Create new file</a>
+      {% if let Some(u) = upload_url %}<a href="{{ u }}">Upload files</a>{% endif %}
+    </div>
+  </details>
+  {% endif %}
   {% include "repo/clone.html" %}
 </div>
 <div class="box">

@@ -19,6 +19,18 @@
       <span class="btn btn-small count-button" title="Watchers" aria-label="Watchers: {{ repo.watchers }}">{{ repo.watchers }}</span>
     </div>
     <div class="fork-button">
+      {% match repo.starred %}
+      {% when Some(starred) %}
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/star" class="inline">
+        <input type="hidden" name="to" value="{% if *starred %}off{% else %}on{% endif %}">
+        <button class="btn btn-small{% if *starred %} starred{% endif %}" title="{% if *starred %}Remove from your starred repositories{% else %}Add to your starred repositories{% endif %}"><span aria-hidden="true">{% if *starred %}★{% else %}☆{% endif %}</span> {% if *starred %}Starred{% else %}Star{% endif %}</button>
+      </form>
+      {% when None %}
+      <a class="btn btn-small" href="/login"><span aria-hidden="true">☆</span> Star</a>
+      {% endmatch %}
+      <a class="btn btn-small count-button" href="/{{ repo.owner }}/{{ repo.name }}/stargazers" title="Stargazers" aria-label="Stars: {{ repo.stars }}">{{ repo.stars }}</a>
+    </div>
+    <div class="fork-button">
       <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/fork">Fork</a>
       <a class="btn btn-small count-button" href="/{{ repo.owner }}/{{ repo.name }}/forks" title="Forks" aria-label="Forks: {{ repo.fork_count }}">{{ repo.fork_count }}</a>
     </div>

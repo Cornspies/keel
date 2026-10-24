@@ -25,7 +25,8 @@
       <input type="hidden" name="base" value="{{ base }}">
       <input type="hidden" name="head" value="{{ head_label }}">
       <label>Title <input name="title" value="{{ title }}" maxlength="256" required></label>
-      <label>Description <textarea name="body" rows="8" placeholder="What does this change and why? Markdown is supported.">{{ body }}</textarea></label>
+      <label>Description <textarea name="body" rows="8" placeholder="What does this change and why? Markdown is supported.">
+{{ body }}</textarea></label>
       <button class="btn btn-primary">Create pull request</button>
     </form>
   </div>

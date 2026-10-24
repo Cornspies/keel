@@ -1,0 +1,19 @@
+{% if r.can_react || !r.groups.is_empty() %}
+<div class="reactions" id="{{ r.id }}">
+  {% if r.can_react %}
+  <form method="post" action="{{ r.url }}" class="reaction-form" data-reactions="{{ r.id }}">
+    {% if let Some(c) = r.comment %}<input type="hidden" name="comment" value="{{ c }}">{% endif %}
+    {% if !r.back.is_empty() %}<input type="hidden" name="back" value="{{ r.back }}">{% endif %}
+    {% for g in r.groups %}<button name="content" value="{{ g.content }}" class="reaction{% if g.mine %} reaction-mine{% endif %}" title="{{ g.describe() }}" aria-pressed="{{ g.mine }}">{{ g.emoji }} <span>{{ g.count }}</span></button>{% endfor %}
+    <details class="dropdown reaction-picker">
+      <summary class="reaction reaction-add" title="Add a reaction" aria-label="Add a reaction">☺<span aria-hidden="true">+</span></summary>
+      <div class="dropdown-menu reaction-menu">
+        {% for (content, emoji) in r.choices %}<button name="content" value="{{ content }}" class="reaction-choice" title="{{ content }}" aria-label="React with {{ content }}">{{ emoji }}</button>{% endfor %}
+      </div>
+    </details>
+  </form>
+  {% else %}
+  {% for g in r.groups %}<span class="reaction" title="{{ g.describe() }}">{{ g.emoji }} <span>{{ g.count }}</span></span>{% endfor %}
+  {% endif %}
+</div>
+{% endif %}

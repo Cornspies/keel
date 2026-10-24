@@ -369,6 +369,9 @@ git -C "$W" push -q -f "http://ada:password-ada@127.0.0.1:$HTTP_PORT/acme/tool.g
 check "pushes to its repositories reach it" received push '"full_name":"acme/tool"'
 check "wiki edits are delivered" is "$(post "$T/ada" /ada/engine/wiki title=Home "text=Welcome to the [[Getting Started]] guide.")" 303
 check "as gollum events" received gollum '"page_name":"Home"'
+check "stars are delivered" is "$(post "$T/bob" /ada/engine/star to=on)" 303
+check "as star events" received star '"action":"created"'
+check "unstar" is "$(post "$T/bob" /ada/engine/star to=off)" 303
 kill "$HOOK_PID" 2>/dev/null
 
 echo "== notifications"
@@ -844,6 +847,77 @@ check "delete a page" is "$(post "$T/ada" /ada/engine/wiki/Setup/delete x=1)" 30
 check "it's gone" is "$(status "$B/ada/engine/wiki/Setup")" 404
 check "from clones too" bash -c "git -C '$T/wiki' pull -q && [ ! -e '$T/wiki/Setup.md' ]"
 
+echo "== changing files in the browser"
+check "create a repository" is "$(post "$T/ada" /new name=tracker)" 303
+check "empty repositories offer adding files" contains "$(curl -s -b "$T/ada" "$B/ada/tracker")" '/ada/tracker/new/main'
+check "create the first file" is "$(post "$T/ada" /ada/tracker/new/main path=README.md "text=# Tracker" summary=)" 303
+check "it's committed" is "$(curl -s "$B/ada/tracker/raw/main/README.md")" "# Tracker"
+check "with a default message" contains "$(curl -s "$B/ada/tracker/commits/main")" "Create README.md"
+check "files offer editing" contains "$(curl -s -b "$T/ada" "$B/ada/tracker/blob/main/README.md")" '/ada/tracker/edit/main/README.md'
+check "but not to readers" bash -c "! curl -s -b '$T/eve2' '$B/ada/tracker/blob/main/README.md' | grep -q '/edit/main'"
+check "readers can't edit" is "$(status -b "$T/eve2" "$B/ada/tracker/edit/main/README.md")" 403
+TB1=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
+check "edit it" is "$(post "$T/ada" /ada/tracker/edit/main/README.md path=README.md "text="$'# Tracker\r\nAll the issues\r\n' "base=$TB1" "summary=Describe it")" 303
+check "browsers' line endings are fixed" is "$(curl -s "$B/ada/tracker/raw/main/README.md" | od -c | grep -c '\\r')" 0
+check "edits based on old versions are refused" contains "$(curl -s -b "$T/ada" -H "$O" -d path=README.md -d text=x -d "base=$TB1" "$B/ada/tracker/edit/main/README.md")" "Someone changed"
+TB2=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
+check "rename it" is "$(post "$T/ada" /ada/tracker/edit/main/README.md path=docs/README.md "text=# Tracker" "base=$TB2")" 303
+check "it moved" is "$(curl -s "$B/ada/tracker/raw/main/docs/README.md")" "# Tracker"
+check "files and folders don't mix" contains "$(curl -s -b "$T/ada" -H "$O" -d path=docs -d text=x "$B/ada/tracker/new/main")" "is a folder"
+check "add issue templates" is "$(post "$T/ada" /ada/tracker/new/main path=.github/ISSUE_TEMPLATE/bug.md "text="$'---\nname: Bug report\nabout: Something is broken\ntitle: "[Bug] "\nlabels: bug\n---\nWhat happened?\n')" 303
+check "two of them" is "$(post "$T/ada" /ada/tracker/new/main path=.github/ISSUE_TEMPLATE/idea.md "text="$'---\nname: Idea\n---\nWhat would help?')" 303
+check "and a pull request template" is "$(post "$T/ada" /ada/tracker/new/main path=.github/pull_request_template.md "text=## What changed")" 303
+check "upload files" is "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/ada" -H "$O" -F "files=@$T/large.txt;filename=data.txt" -F "files=@$T/large.txt;filename=copy.txt" -F summary="Add data" "$B/ada/tracker/upload/main/assets")" 303
+check "they're there" is "$(curl -s "$B/ada/tracker/raw/main/assets/data.txt")" large
+check "folders offer adding files" contains "$(curl -s -b "$T/ada" "$B/ada/tracker/tree/main/assets")" '/ada/tracker/upload/main/assets'
+check "delete a file" is "$(post "$T/ada" /ada/tracker/delete/main/assets/copy.txt summary=)" 303
+check "it's gone" is "$(status "$B/ada/tracker/raw/main/assets/copy.txt")" 404
+check "web commits show in the feed" feed_has 'pushed 1 commit to <a href="/ada/tracker/tree/main">main</a>'
+check "protected branches need a pull request" contains "$(curl -s -b "$T/ada" -H "$O" -d path=README.md -d text=x -d target=direct "$B/ada/engine/edit/main/README.md")" "protected"
+check "so commit to a new branch" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d path=README.md -d text=Edited -d target=branch -d new_branch=ada-readme "$B/ada/engine/edit/main/README.md")" "$B/ada/engine/compare/main...ada-readme"
+check "which starts a pull request" contains "$(curl -s -b "$T/ada" "$B/ada/engine/compare/main...ada-readme")" "Create pull request"
+TB3=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
+check "on any branch" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d path=docs/README.md -d text=Fixed -d "base=$TB3" -d target=branch -d new_branch=fix "$B/ada/tracker/edit/main/docs/README.md")" "$B/ada/tracker/compare/main...fix"
+check "pull requests start with the template" contains "$(curl -s -b "$T/ada" "$B/ada/tracker/compare/main...fix")" "## What changed"
+
+echo "== issue templates"
+check "choose a template" contains "$(curl -s -b "$T/bob" "$B/ada/tracker/issues/new")" "Something is broken"
+check "or none" contains "$(curl -s -b "$T/bob" "$B/ada/tracker/issues/new")" "Open a blank issue"
+check "templates fill in the form" contains "$(curl -s -b "$T/bob" "$B/ada/tracker/issues/new?template=bug.md")" "What happened?"
+check "open an issue from one" is "$(post "$T/bob" /ada/tracker/issues "title=[Bug] Crash" "body=It crashed" template=bug.md)" 303
+check "it gets the template's labels" contains "$(curl -s "$B/ada/tracker/issues/1")" '>bug</a>'
+check "blank issues" contains "$(curl -s -b "$T/bob" "$B/ada/tracker/issues/new?template=blank")" 'name="title" value=""'
+
+echo "== stars and reactions"
+check "star a repository" is "$(post "$T/bob" /ada/engine/star to=on)" 303
+check "the header counts stars" contains "$(curl -s "$B/ada/engine")" 'aria-label="Stars: 1"'
+check "stargazers" contains "$(curl -s "$B/ada/engine/stargazers")" '<strong>bob</strong>'
+check "profiles list stars" contains "$(curl -s "$B/bob?tab=stars")" 'href="/ada/engine"'
+check "starring shows in the feed" contains "$(curl -s "$B/bob")" 'starred <a href="/ada/engine">'
+check "explore sorts by stars" is "$(curl -s "$B/explore?sort=stars" | grep -o 'class="repo-link" href="[^"]*"' | head -1)" 'class="repo-link" href="/ada/engine"'
+check "star with the API" is "$(api_status "$RW" PUT /user/starred/ada/tracker)" 204
+check "check a star" is "$(api_status "$RW" GET /user/starred/ada/tracker)" 204
+check "your stars" is "$(api "$RW" GET /user/starred | field '[0]["full_name"]')" ada/tracker
+check "stargazers in the API" is "$(curl -s "$API/repos/ada/engine/stargazers" | field '[0]["login"]')" bob
+check "star counts in the API" is "$(curl -s "$API/repos/ada/engine" | field '["stargazers_count"]')" 1
+check "unstar with the API" is "$(api_status "$RW" DELETE /user/starred/ada/tracker)" 204
+check "not starred any more" is "$(api_status "$RW" GET /user/starred/ada/tracker)" 404
+RI=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/bob" -H "$O" -d "title=React to me&body=Hi" "$B/ada/engine/issues" | grep -o '[0-9]*$')
+check "react to an issue" is "$(post "$T/ada" "/ada/engine/issues/$RI/reactions" content=+1)" 303
+check "reactions show" contains "$(curl -s "$B/ada/engine/issues/$RI")" "ada reacted with 👍"
+check "reacting again takes it back" is "$(post "$T/ada" "/ada/engine/issues/$RI/reactions" content=+1)" 303
+check "it's gone" bash -c "! curl -s '$B/ada/engine/issues/$RI' | grep -q 'reacted with'"
+RC=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/bob" -H "$O" -d "body=Me too" "$B/ada/engine/issues/$RI/comments" | grep -o '[0-9]*$')
+check "readers react to comments" is "$(post "$T/eve2" "/ada/engine/issues/$RI/reactions" content=heart "comment=$RC")" 303
+check "unknown reactions are refused" is "$(post "$T/ada" "/ada/engine/issues/$RI/reactions" content=party)" 400
+check "react with the API" is "$(api_status "$RW" POST "/repos/ada/engine/issues/$RI/reactions" -d '{"content":"rocket"}')" 201
+check "twice is the same" is "$(api_status "$RW" POST "/repos/ada/engine/issues/$RI/reactions" -d '{"content":"rocket"}')" 200
+check "issues count reactions" is "$(curl -s "$API/repos/ada/engine/issues/$RI" | field '["reactions"]["rocket"]')" 1
+check "comment reactions in the API" is "$(curl -s "$API/repos/ada/engine/issues/comments/$RC/reactions" | field '[0]["user"]["login"]')" eve
+check "and on comments" is "$(curl -s "$API/repos/ada/engine/issues/$RI/comments" | field '[0]["reactions"]["heart"]')" 1
+RR=$(curl -s "$API/repos/ada/engine/issues/$RI/reactions" | field '[0]["id"]')
+check "delete your reaction" is "$(api_status "$RW" DELETE "/repos/ada/engine/issues/$RI/reactions/$RR")" 204
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -852,7 +926,9 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     "/search?q=engine" "/ada/engine/search?q=engine" \
     /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
     /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens \
-    /explore "/explore?sort=name&page=2" /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
+    /explore "/explore?sort=name&page=2" /ada/engine/stargazers "/ada?tab=stars" /ada/tracker/issues/new /ada/tracker/new/main/docs \
+    /ada/tracker/upload/main /ada/tracker/edit/main/docs/README.md /ada/tracker/delete/main/docs/README.md \
+    /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done
 

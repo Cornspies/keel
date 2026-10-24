@@ -22,7 +22,7 @@ pub use read::{
     Blob, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, Resolved, Signature,
     TreeEntry,
 };
-pub use edit::replace_line;
+pub use edit::{FileChange, replace_line};
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
 pub use mirror::{Remote, ls_remote, mirror_fetch, mirror_push, parse_lfs_pointer};
@@ -31,6 +31,11 @@ pub use store::{backup, create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 
 pub use git2::Oid;
+
+/// Whether `name` can be a branch name.
+pub fn valid_branch_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && name.len() <= 200 && valid_ref_name(&format!("refs/heads/{name}"))
+}
 
 /// Whether `name` is a valid full ref name, like `refs/tags/v1.0`.
 pub fn valid_ref_name(name: &str) -> bool {

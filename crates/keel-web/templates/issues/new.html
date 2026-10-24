@@ -2,11 +2,14 @@
 {% block content %}
 {% include "repo/header.html" %}
 <div class="narrow-left">
-  <h2>New issue</h2>
+  <h2>New issue{% if !template_name.is_empty() %} <span class="muted">· {{ template_name }}</span>{% endif %}</h2>
+  {% if can_choose %}<p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/issues/new">Choose a different template</a></p>{% endif %}
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/issues" class="form">
+    {% if !template.is_empty() %}<input type="hidden" name="template" value="{{ template }}">{% endif %}
     <label>Title <input name="title" value="{{ title }}" maxlength="256" required autofocus></label>
-    <label>Description <textarea name="body" rows="12" placeholder="Markdown is supported. Reference issues with #123 and people with @name.">{{ body }}</textarea></label>
+    <label>Description <textarea name="body" rows="12" placeholder="Markdown is supported. Reference issues with #123 and people with @name.">
+{{ body }}</textarea></label>
     <button class="btn btn-primary">Open issue</button>
   </form>
 </div>

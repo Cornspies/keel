@@ -23,6 +23,7 @@ pub const WEBHOOK_EVENTS: &[(&str, &str)] = &[
     ("status", "Commit statuses set by CI and other services"),
     ("release", "Releases published, edited or deleted"),
     ("gollum", "Wiki pages created or edited"),
+    ("star", "Repositories starred or unstarred"),
 ];
 
 /// Retry delays after each failed attempt; after the last one the delivery

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <h2>Upload files <span class="muted">to</span> <span class="mono">{% if dir.is_empty() %}/{% else %}{{ dir }}/{% endif %}</span> <span class="muted">in</span> <span class="branch">{{ commit.branch }}</span></h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="{{ action }}" class="form" enctype="multipart/form-data">
+    <label>Files <span class="hint">Up to {{ max_file }} each; files with the same name are replaced.</span>
+      <input type="file" name="files" multiple required></label>
+    {% include "repo/commit_box.html" %}
+    <div class="row-actions">
+      <button class="btn btn-primary">Commit changes</button>
+      <a class="btn" href="{{ cancel_url }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

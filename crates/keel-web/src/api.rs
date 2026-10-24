@@ -34,6 +34,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/version", get(version))
         .route("/api/v1/user", get(me))
         .route("/api/v1/user/repos", get(my_repos).post(create_my_repo))
+        .route("/api/v1/user/starred", get(my_starred))
+        .route("/api/v1/user/starred/{owner}/{repo}", get(is_starred).put(star).delete(unstar))
+        .route("/api/v1/users/{name}/starred", get(user_starred))
+        .route("/api/v1/repos/{owner}/{repo}/stargazers", get(stargazers))
+        .route("/api/v1/repos/{owner}/{repo}/issues/{number}/reactions", get(issue_reactions).post(add_issue_reaction))
+        .route("/api/v1/repos/{owner}/{repo}/issues/{number}/reactions/{id}", axum::routing::delete(delete_issue_reaction))
+        .route("/api/v1/repos/{owner}/{repo}/issues/comments/{comment}/reactions", get(comment_reactions).post(add_comment_reaction))
+        .route("/api/v1/repos/{owner}/{repo}/issues/comments/{comment}/reactions/{id}", axum::routing::delete(delete_comment_reaction))
+        .route("/api/v1/repos/{owner}/{repo}/pulls/comments/{comment}/reactions", get(comment_reactions).post(add_comment_reaction))
+        .route("/api/v1/repos/{owner}/{repo}/pulls/comments/{comment}/reactions/{id}", axum::routing::delete(delete_comment_reaction))
         .route("/api/v1/users/{name}", get(user))
         .route("/api/v1/users/{name}/repos", get(user_repos))
         .route("/api/v1/orgs/{org}/repos", get(user_repos).post(create_org_repo))
@@ -1124,7 +1134,12 @@ async fn comments(
     let i = find_issue(&state, &r, number).await?;
     let all: Vec<_> = state.core.comments(i.id).await?.into_iter().filter(|c| c.kind == "comment").collect();
     let (list, more) = page_of(all, &paging);
-    let items = list.iter().map(|c| state.core.comment_json(&r, &i, c)).collect();
+    let mut items = Vec::with_capacity(list.len());
+    for c in &list {
+        let mut v = state.core.comment_json(&r, &i, c);
+        v["reactions"] = state.core.reactions_json(i.id, Some(c.id)).await?;
+        items.push(v);
+    }
     Ok(paged(&state, &uri, &paging, items, more))
 }
 
@@ -1145,6 +1160,191 @@ async fn create_comment(
     let id = state.core.add_comment(&i, user, &body.body).await?;
     let c = state.core.comment(i.id, id).await?.ok_or_else(not_found_error)?;
     Ok((StatusCode::CREATED, Json(state.core.comment_json(&r, &i, &c))).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Reactions
+// ---------------------------------------------------------------------------
+
+/// The issue (and comment) reactions are about.
+async fn reaction_subject(
+    state: &AppState,
+    caller: &Caller,
+    owner: &str,
+    name: &str,
+    number: Option<i64>,
+    comment: Option<i64>,
+) -> ApiResult<Issue> {
+    let (r, _) = find_repo(state, caller, owner, name).await?;
+    let number = match (number, comment) {
+        (Some(n), _) => n,
+        (None, Some(c)) => state.core.comment_issue_number(r.id, c).await?.ok_or_else(not_found_error)?,
+        (None, None) => return Err(not_found_error()),
+    };
+    find_issue(state, &r, number).await
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ReactionQuery {
+    /// Only this kind of reaction.
+    content: Option<String>,
+    #[serde(flatten)]
+    paging: Paging,
+}
+
+async fn list_reactions(state: &AppState, issue: &Issue, comment: Option<i64>, q: &ReactionQuery, uri: &axum::http::Uri) -> ApiResult {
+    let all: Vec<_> = state
+        .core
+        .reactions(issue.id)
+        .await?
+        .into_iter()
+        .filter(|r| r.comment_id == comment && q.content.as_ref().is_none_or(|c| *c == r.content))
+        .collect();
+    let (list, more) = page_of(all, &q.paging);
+    let items = list.iter().map(|r| state.core.reaction_json(r)).collect();
+    Ok(paged(state, uri, &q.paging, items, more))
+}
+
+#[derive(Deserialize)]
+pub struct NewReaction {
+    content: String,
+}
+
+async fn add_reaction(state: &AppState, caller: &Caller, issue: &Issue, comment: Option<i64>, body: NewReaction) -> ApiResult {
+    let user = caller.writer()?;
+    let (reaction, created) = state.core.add_reaction(issue, comment, user, &body.content).await?;
+    let status = if created { StatusCode::CREATED } else { StatusCode::OK };
+    Ok((status, Json(state.core.reaction_json(&reaction))).into_response())
+}
+
+async fn issue_reactions(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Q(q): Q<ReactionQuery>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let issue = reaction_subject(&state, &caller, &owner, &name, Some(number), None).await?;
+    list_reactions(&state, &issue, None, &q, &uri).await
+}
+
+async fn add_issue_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Body(body): Body<NewReaction>,
+) -> ApiResult {
+    let issue = reaction_subject(&state, &caller, &owner, &name, Some(number), None).await?;
+    add_reaction(&state, &caller, &issue, None, body).await
+}
+
+async fn delete_issue_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number, id)): Path<(String, String, i64, i64)>,
+) -> ApiResult<StatusCode> {
+    let issue = reaction_subject(&state, &caller, &owner, &name, Some(number), None).await?;
+    state.core.delete_reaction(&issue, None, caller.writer()?, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn comment_reactions(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, comment)): Path<(String, String, i64)>,
+    Q(q): Q<ReactionQuery>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let issue = reaction_subject(&state, &caller, &owner, &name, None, Some(comment)).await?;
+    list_reactions(&state, &issue, Some(comment), &q, &uri).await
+}
+
+async fn add_comment_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, comment)): Path<(String, String, i64)>,
+    Body(body): Body<NewReaction>,
+) -> ApiResult {
+    let issue = reaction_subject(&state, &caller, &owner, &name, None, Some(comment)).await?;
+    add_reaction(&state, &caller, &issue, Some(comment), body).await
+}
+
+async fn delete_comment_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, comment, id)): Path<(String, String, i64, i64)>,
+) -> ApiResult<StatusCode> {
+    let issue = reaction_subject(&state, &caller, &owner, &name, None, Some(comment)).await?;
+    state.core.delete_reaction(&issue, Some(comment), caller.writer()?, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Stars
+// ---------------------------------------------------------------------------
+
+async fn starred_list(state: &AppState, user_id: i64, viewer: Option<&User>, paging: &Paging, uri: &axum::http::Uri) -> ApiResult {
+    let mut repos = state.core.starred_repos(user_id, viewer, paging.offset(), paging.per_page() + 1).await?;
+    let more = repos.len() as i64 > paging.per_page();
+    repos.truncate(paging.per_page() as usize);
+    let mut out = Vec::with_capacity(repos.len());
+    for r in &repos {
+        out.push(repo_value(state, r).await?);
+    }
+    Ok(paged(state, uri, paging, out, more))
+}
+
+async fn my_starred(State(state): State<AppState>, caller: Caller, Q(paging): Q<Paging>, OriginalUri(uri): OriginalUri) -> ApiResult {
+    let user = caller.user()?;
+    starred_list(&state, user.id, Some(user), &paging, &uri).await
+}
+
+async fn user_starred(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(name): Path<String>,
+    Q(paging): Q<Paging>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let user = state.core.user_by_name(&name).await?.ok_or_else(not_found_error)?;
+    starred_list(&state, user.id, caller.user.as_ref(), &paging, &uri).await
+}
+
+/// `204` if the caller starred the repository, `404` if not.
+async fn is_starred(State(state): State<AppState>, caller: Caller, Path((owner, name)): Path<(String, String)>) -> ApiResult<StatusCode> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    match state.core.is_starred(caller.user()?.id, r.id).await? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(not_found_error()),
+    }
+}
+
+async fn star(State(state): State<AppState>, caller: Caller, Path((owner, name)): Path<(String, String)>) -> ApiResult<StatusCode> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    state.core.set_star(caller.writer()?, &r, true).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unstar(State(state): State<AppState>, caller: Caller, Path((owner, name)): Path<(String, String)>) -> ApiResult<StatusCode> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    state.core.set_star(caller.writer()?, &r, false).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stargazers(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Q(paging): Q<Paging>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let mut gazers = state.core.stargazers(r.id, paging.offset(), paging.per_page() + 1).await?;
+    let more = gazers.len() as i64 > paging.per_page();
+    gazers.truncate(paging.per_page() as usize);
+    let items = gazers.iter().map(|g| state.core.user_json(&g.user)).collect();
+    Ok(paged(&state, &uri, &paging, items, more))
 }
 
 // ---------------------------------------------------------------------------

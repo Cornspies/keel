@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="edit-file">
+  <h2>{% if editing %}Edit file{% else %}New file{% endif %} <span class="muted">in</span> <span class="branch">{{ commit.branch }}</span></h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="{{ action }}" class="form">
+    {% if crlf %}<input type="hidden" name="crlf" value="1">{% endif %}
+    <label>{% if editing %}Path <span class="hint">Change it to rename or move the file.</span>{% else %}Name <span class="hint">Add folders with “/”.</span>{% endif %}
+      <input name="path" value="{{ path }}" class="mono" required maxlength="1024"{% if !editing %} autofocus{% endif %}></label>
+    <label>Contents <textarea name="text" rows="24" class="mono code-editor" spellcheck="false"{% if editing %} autofocus{% endif %}>
+{{ text }}</textarea></label>
+    {% include "repo/commit_box.html" %}
+    <div class="row-actions">
+      <button class="btn btn-primary">Commit changes</button>
+      <a class="btn" href="{{ cancel_url }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

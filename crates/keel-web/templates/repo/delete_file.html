@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left wide">
+  <h2>Delete <span class="mono">{{ path }}</span></h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <p class="muted">The file stays in the history and can be brought back.</p>
+  <form method="post" action="{{ action }}" class="form">
+    {% include "repo/commit_box.html" %}
+    <div class="row-actions">
+      <button class="btn btn-danger">Delete file</button>
+      <a class="btn" href="{{ cancel_url }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

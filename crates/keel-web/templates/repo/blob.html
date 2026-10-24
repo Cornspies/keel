@@ -14,6 +14,8 @@
       {% if plain %}<a class="btn btn-small" href="?">Preview</a>{% else %}<a class="btn btn-small" href="?plain=1">Source</a>{% endif %}
     {% endif %}
     <a class="btn btn-small" href="{{ raw_url }}">Raw</a>
+    {% if let Some(u) = edit_url %}<a class="btn btn-small" href="{{ u }}" title="Edit this file">Edit</a>{% endif %}
+    {% if let Some(u) = delete_url %}<a class="btn btn-small btn-danger" href="{{ u }}" title="Delete this file">Delete</a>{% endif %}
   </div>
   {% match content %}
   {% when BlobContent::Lines(lines) %}

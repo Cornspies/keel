@@ -4,7 +4,7 @@
 <div class="box empty-repo">
   <h2>This repository is empty</h2>
   {% if repo.can_write %}
-  <p>Push an existing repository:</p>
+  <p>Get started by <a href="/{{ repo.owner }}/{{ repo.name }}/new/{{ head }}">creating a new file</a> or <a href="/{{ repo.owner }}/{{ repo.name }}/upload/{{ head }}">uploading files</a>. Or push an existing repository:</p>
   <pre class="cmd">git remote add origin {% if let Some(ssh) = repo.ssh_url %}{{ ssh }}{% else %}{{ repo.http_url }}{% endif %}
 git push -u origin main</pre>
   <p>Or start a new one:</p>

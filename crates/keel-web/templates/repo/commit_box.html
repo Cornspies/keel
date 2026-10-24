@@ -1,0 +1,10 @@
+<fieldset class="commit-box">
+  <legend>Commit changes</legend>
+  <input type="hidden" name="base" value="{{ commit.base }}">
+  <label>Message <input name="summary" value="{{ commit.summary }}" placeholder="{{ commit.placeholder }}" maxlength="200"></label>
+  <label>Description <span class="hint">(optional)</span> <textarea name="description" rows="3">
+{{ commit.description }}</textarea></label>
+  <label class="check"><input type="radio" name="target" value="direct"{% if !commit.to_new_branch %} checked{% endif %}{% if commit.protected %} disabled{% endif %}> Commit directly to <span class="branch">{{ commit.branch }}</span>{% if commit.protected %} <span class="hint">— protected: changes go through pull requests</span>{% endif %}</label>
+  <label class="check"><input type="radio" name="target" value="branch"{% if commit.to_new_branch %} checked{% endif %}> Commit to a new branch and start a pull request</label>
+  <label class="new-branch">New branch <input name="new_branch" value="{{ commit.new_branch }}" class="mono" maxlength="200" aria-label="New branch name"></label>
+</fieldset>

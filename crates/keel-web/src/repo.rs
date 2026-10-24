@@ -115,6 +115,9 @@ pub(crate) struct RepoView {
     pub watchers: i64,
     /// Whether the viewer watches it (`None` when signed out).
     pub watching: Option<bool>,
+    pub stars: i64,
+    /// Whether the viewer starred it (`None` when signed out).
+    pub starred: Option<bool>,
     pub mirror: Option<MirrorView>,
     /// Published releases.
     pub releases: i64,
@@ -168,6 +171,11 @@ impl RepoView {
             watchers: state.core.watcher_count(repo.id).await?,
             watching: match viewer {
                 Some(v) => Some(state.core.is_watching(v.id, repo.id).await?),
+                None => None,
+            },
+            stars: repo.stars,
+            starred: match viewer {
+                Some(v) => Some(state.core.is_starred(v.id, repo.id).await?),
                 None => None,
             },
             open_issues: counts.open_issues,
@@ -287,6 +295,9 @@ struct TreePage {
     readme_name: String,
     readme: Option<Arc<String>>,
     refs: RefNames,
+    /// Where to add files here, for people who can.
+    new_file_url: Option<String>,
+    upload_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -294,6 +305,20 @@ struct TreePage {
 struct EmptyPage {
     page: Page,
     repo: RepoView,
+    /// The branch the first commit goes to.
+    head: String,
+}
+
+async fn empty_page(state: &AppState, repo: &Repo, access: Access, viewer: Option<User>, tab: &'static str) -> AppResult {
+    let head = with_git(state, repo, |g| Ok(g.head_branch().unwrap_or_else(|| "main".into()))).await?;
+    let mut view = RepoView::new(state, repo, access, viewer.as_ref(), tab, "").await?;
+    // Mirrors are changed where they come from.
+    view.can_write &= view.mirror.is_none();
+    html(EmptyPage {
+        repo: view,
+        page: Page::new(state, viewer, format!("{}/{}", repo.owner, repo.name)),
+        head: encode_path(&head),
+    })
 }
 
 // Built once per request and immediately consumed; boxing buys nothing.
@@ -391,10 +416,7 @@ async fn render_tree(
     .await?;
 
     match data {
-        TreeData::Empty => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", "").await?,
-            page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
-        }),
+        TreeData::Empty => empty_page(&state, &repo, access, viewer, "code").await,
         TreeData::File(r) => Ok(Redirect::to(&format!(
             "{base}/blob/{}/{}",
             encode_path(&r.rev),
@@ -436,8 +458,13 @@ async fn render_tree(
             if let Some(c) = latest.as_mut() {
                 crate::statuses::attach(&state, &repo, &mut [c]).await?;
             }
+            let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
+            let here = (view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == resolved.rev))
+                .then(|| format!("{rev_url}{}", if resolved.path.is_empty() { String::new() } else { format!("/{}", encode_path(&resolved.path)) }));
             html(TreePage {
-                repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
+                new_file_url: here.as_ref().map(|h| format!("{base}/new/{h}")),
+                upload_url: here.map(|h| format!("{base}/upload/{h}")),
+                repo: view,
                 page: Page::new(&state, viewer, title),
                 crumbs: crumbs(&base, &resolved.rev, &resolved.path),
                 history_url: format!("{base}/commits/{rev_url}/{}", encode_path(&resolved.path)),
@@ -558,6 +585,9 @@ struct BlobPage {
     refs: RefNames,
     /// Who locked the file with Git LFS.
     locked_by: Option<String>,
+    /// For people who can change the file (on a branch).
+    edit_url: Option<String>,
+    delete_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -655,9 +685,14 @@ pub async fn blob(
     let locked_by = state.core.lfs_locks(repo.id, Some(&r.path), None, 0, 1).await?.into_iter().next().map(|l| l.owner);
     let rev_url = encode_path(&r.rev);
     let path_url = encode_path(&r.path);
+    let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
+    let changeable = view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == r.rev);
+    let editable = changeable && size <= 1024 * 1024 && matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_));
     html(BlobPage {
+        edit_url: editable.then(|| format!("{base}/edit/{rev_url}/{path_url}")),
+        delete_url: changeable.then(|| format!("{base}/delete/{rev_url}/{path_url}")),
         locked_by,
-        repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
+        repo: view,
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
         crumbs: crumbs(&base, &r.rev, &r.path),
         size: shown_size,
@@ -786,10 +821,7 @@ pub async fn commits_default(
     let branch = with_git(&state, &repo, |g| Ok(g.default_branch()?)).await?;
     match branch {
         Some(b) => Ok(Redirect::to(&format!("/{}/{}/commits/{}", repo.owner, repo.name, encode_path(&b))).into_response()),
-        None => html(EmptyPage {
-            repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", "").await?,
-            page: Page::new(&state, viewer, format!("{}/{}", repo.owner, repo.name)),
-        }),
+        None => empty_page(&state, &repo, access, viewer, "commits").await,
     }
 }
 

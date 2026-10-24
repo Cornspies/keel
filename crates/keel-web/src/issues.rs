@@ -7,7 +7,7 @@ use askama::Template;
 use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{Access, Issue, IssueFilter, Label, Repo, User};
+use keel_core::{Access, Issue, IssueFilter, Label, ReactionGroup, Repo, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
@@ -72,6 +72,55 @@ pub(crate) fn issue_url(repo: &Repo, issue: &Issue) -> String {
     format!("/{}/{}/{kind}/{}", repo.owner, repo.name, issue.number)
 }
 
+/// Reactions to the description or a comment, and how to add more.
+pub(crate) struct ReactionsView {
+    /// Element id, so a script can swap in the updated reactions.
+    pub id: String,
+    pub url: String,
+    /// The comment reacted to; `None` for the description.
+    pub comment: Option<i64>,
+    pub groups: Vec<ReactionGroup>,
+    /// Signed in (and so able to read the repository).
+    pub can_react: bool,
+    pub choices: &'static [(&'static str, &'static str)],
+    /// Where to go back to: `files` for the files tab of a pull request.
+    pub back: &'static str,
+}
+
+/// Reactions of an issue and its comments, by comment (`None`: the
+/// issue), for building [`ReactionsView`]s.
+pub(crate) struct Reactions {
+    url: String,
+    groups: HashMap<Option<i64>, Vec<ReactionGroup>>,
+    can_react: bool,
+}
+
+impl Reactions {
+    pub(crate) async fn load(state: &AppState, repo: &Repo, issue: &Issue, viewer: Option<&User>) -> AppResult<Self> {
+        let all = state.core.reactions(issue.id).await?;
+        Ok(Self {
+            url: format!("/{}/{}/issues/{}/reactions", repo.owner, repo.name, issue.number),
+            groups: keel_core::group_reactions(&all, viewer.map(|v| v.id)),
+            can_react: viewer.is_some(),
+        })
+    }
+
+    pub(crate) fn view(&self, comment: Option<i64>) -> ReactionsView {
+        ReactionsView {
+            id: match comment {
+                Some(id) => format!("reactions-{id}"),
+                None => "reactions-description".into(),
+            },
+            url: self.url.clone(),
+            comment,
+            groups: self.groups.get(&comment).cloned().unwrap_or_default(),
+            can_react: self.can_react,
+            choices: &keel_core::REACTIONS,
+            back: "",
+        }
+    }
+}
+
 /// One entry of the conversation: the description, a comment, a review,
 /// a thread of inline comments or an event.
 pub(crate) struct TimelineItem {
@@ -95,6 +144,7 @@ pub(crate) struct TimelineItem {
     pub target: String,
     /// For milestone events: the milestone's issues.
     pub target_url: String,
+    pub reactions: ReactionsView,
 }
 
 /// Someone asked to review a pull request, or who reviewed it.
@@ -190,6 +240,7 @@ pub(crate) async fn conversation(
     let render = |body: &str| renderer.render(body);
     let writer = access >= Access::Write;
     let is_author = viewer.is_some_and(|v| issue.is_author(v));
+    let reactions = Reactions::load(state, repo, issue, viewer).await?;
 
     let all_labels = state.core.labels(repo.id).await?;
     let label_view = |name: &str| match all_labels.iter().find(|l| l.name == name) {
@@ -222,10 +273,11 @@ pub(crate) async fn conversation(
         label: None,
         target: String::new(),
         target_url: String::new(),
+        reactions: reactions.view(None),
     }];
     let comments = state.core.comments(issue.id).await?;
     let can_apply = crate::pulls::viewer_can_apply(state, repo, issue, viewer).await?;
-    let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, can_apply, &render)
+    let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, can_apply, &render, &reactions)
         .into_iter()
         .map(|mut t| {
             t.outdated = placed.is_some_and(|p| !p.contains(&t.id));
@@ -258,6 +310,7 @@ pub(crate) async fn conversation(
             } else {
                 String::new()
             },
+            reactions: reactions.view(Some(c.id)),
             target: c.body,
             kind: c.kind,
         });
@@ -618,21 +671,97 @@ struct NewIssuePage {
     error: Option<String>,
     title: String,
     body: String,
+    /// The template the issue starts from (its file), if chosen.
+    template: String,
+    template_name: String,
+    /// Other templates can be chosen instead.
+    can_choose: bool,
+}
+
+#[derive(Template)]
+#[template(path = "issues/choose.html")]
+struct ChoosePage {
+    page: Page,
+    repo: RepoView,
+    templates: Vec<keel_core::IssueTemplate>,
+    blank_allowed: bool,
+}
+
+#[derive(Deserialize)]
+pub struct NewIssueQuery {
+    /// A template's file, or `blank`.
+    template: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
 }
 
 pub async fn new_form(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<NewIssueQuery>,
 ) -> AppResult {
     let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    let templates = state.core.issue_templates(repo.id).await?;
+    let chosen = match q.template.as_deref() {
+        Some("blank") if templates.blank_allowed || !templates.choose => None,
+        Some(file) => templates.find(file),
+        None if !templates.choose => templates.templates.first(),
+        None => None,
+    };
+    let blank = q.template.as_deref() == Some("blank") && (templates.blank_allowed || !templates.choose);
+    if templates.choose && chosen.is_none() && !blank {
+        return html(ChoosePage {
+            repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
+            page: Page::new(&state, Some(user), format!("New issue · {}/{}", repo.owner, repo.name)),
+            templates: templates.templates,
+            blank_allowed: templates.blank_allowed,
+        });
+    }
+    let (title, body) = match chosen {
+        Some(t) => (t.title.clone(), t.body.clone()),
+        None => Default::default(),
+    };
     html(NewIssuePage {
         repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
         page: Page::new(&state, Some(user), format!("New issue · {}/{}", repo.owner, repo.name)),
         error: None,
-        title: String::new(),
-        body: String::new(),
+        title: q.title.unwrap_or(title),
+        body: q.body.unwrap_or(body),
+        template: chosen.map(|t| t.file.clone()).unwrap_or_default(),
+        template_name: chosen.filter(|_| templates.choose).map(|t| t.name.clone()).unwrap_or_default(),
+        can_choose: templates.choose,
     })
+}
+
+/// Labels and assignees a template asks for, of those that exist.
+async fn apply_template(state: &AppState, repo: &Repo, issue: &Issue, user: &User, file: &str) -> AppResult<()> {
+    let templates = state.core.issue_templates(repo.id).await?;
+    let Some(t) = templates.find(file) else { return Ok(()) };
+    if !t.labels.is_empty() {
+        let ids: Vec<i64> = state
+            .core
+            .labels(repo.id)
+            .await?
+            .into_iter()
+            .filter(|l| t.labels.iter().any(|n| n.eq_ignore_ascii_case(&l.name)))
+            .map(|l| l.id)
+            .collect();
+        if !ids.is_empty() {
+            state.core.set_issue_labels(issue, user, &ids).await?;
+        }
+    }
+    let mut ids = Vec::new();
+    for name in &t.assignees {
+        if let Some(u) = state.core.user_by_name(name).await? {
+            ids.push(u.id);
+        }
+    }
+    if !ids.is_empty() {
+        // Only people who can be assigned are.
+        state.core.set_assignees(repo, issue, user, &ids).await?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -640,6 +769,8 @@ pub struct IssueForm {
     title: String,
     #[serde(default)]
     body: String,
+    #[serde(default)]
+    template: String,
 }
 
 pub async fn create(
@@ -650,13 +781,21 @@ pub async fn create(
 ) -> AppResult {
     let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
     match state.core.create_issue(repo.id, &user, &f.title, &f.body).await {
-        Ok(issue) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Ok(issue) => {
+            if !f.template.is_empty() {
+                apply_template(&state, &repo, &issue, &user, &f.template).await?;
+            }
+            Ok(Redirect::to(&issue_url(&repo, &issue)).into_response())
+        }
         Err(keel_core::Error::Invalid(msg)) => html(NewIssuePage {
             repo: RepoView::new(&state, &repo, access, Some(&user), "issues", "").await?,
             page: Page::new(&state, Some(user), format!("New issue · {}/{}", repo.owner, repo.name)),
             error: Some(msg),
             title: f.title,
             body: f.body,
+            template: f.template,
+            template_name: String::new(),
+            can_choose: false,
         }),
         Err(e) => Err(e.into()),
     }
@@ -753,6 +892,33 @@ pub async fn comment(
         state.core.set_issue_open(&issue, &user, open).await?;
     }
     Ok(Redirect::to(&format!("{}{anchor}", issue_url(&repo, &issue))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ReactionForm {
+    content: String,
+    comment: Option<i64>,
+    #[serde(default)]
+    back: String,
+}
+
+/// Adds the viewer's reaction to an issue, pull request or comment, or
+/// takes it back.
+pub async fn react(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Form(f): Form<ReactionForm>,
+) -> AppResult {
+    let (repo, _) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    state.core.toggle_reaction(&issue, f.comment, &user, &f.content).await?;
+    let anchor = match f.comment {
+        Some(id) => format!("#comment-{id}"),
+        None => "#description".into(),
+    };
+    let page = if f.back == "files" && issue.is_pull { "/files" } else { "" };
+    Ok(Redirect::to(&format!("{}{page}{anchor}", issue_url(&repo, &issue))).into_response())
 }
 
 #[derive(Template)]

@@ -20,6 +20,7 @@ pub(crate) struct RepoCard {
     pub is_private: bool,
     pub updated: String,
     pub topics: Vec<String>,
+    pub stars: i64,
 }
 
 impl From<&Repo> for RepoCard {
@@ -31,6 +32,7 @@ impl From<&Repo> for RepoCard {
             is_private: r.is_private,
             updated: relative_time(r.updated_at),
             topics: r.topics().map(str::to_owned).collect(),
+            stars: r.stars,
         }
     }
 }
@@ -325,6 +327,21 @@ struct UserPage {
     repos: Vec<RepoCard>,
     orgs: Vec<String>,
     activity: Vec<crate::feed::EventView>,
+    /// Showing what they starred rather than their repositories.
+    stars_tab: bool,
+    repo_count: usize,
+    star_count: i64,
+    starred: Vec<RepoCard>,
+    newer_url: Option<String>,
+    older_url: Option<String>,
+}
+
+const STARRED_PAGE: i64 = 30;
+
+#[derive(Deserialize)]
+pub struct ProfileQuery {
+    tab: Option<String>,
+    page: Option<i64>,
 }
 
 #[derive(Template)]
@@ -344,6 +361,7 @@ pub async fn user(
     State(state): State<AppState>,
     Viewer(viewer): Viewer,
     Path(owner): Path<String>,
+    Query(q): Query<ProfileQuery>,
 ) -> AppResult {
     let user = state.core.user_by_name(&owner).await?.ok_or(AppError::NotFound)?;
     if user.username != owner {
@@ -364,8 +382,25 @@ pub async fn user(
         });
     }
     let orgs = state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username).collect();
-    let activity = state.core.user_events(user.id, viewer.as_ref(), None, 20).await?.iter().map(crate::feed::view).collect();
+    let stars_tab = q.tab.as_deref() == Some("stars");
+    let page_no = q.page.unwrap_or(1).max(1);
+    let (activity, starred, more) = if stars_tab {
+        let mut starred = state.core.starred_repos(user.id, viewer.as_ref(), (page_no - 1) * STARRED_PAGE, STARRED_PAGE + 1).await?;
+        let more = starred.len() as i64 > STARRED_PAGE;
+        starred.truncate(STARRED_PAGE as usize);
+        (Vec::new(), cards(&starred), more)
+    } else {
+        let activity = state.core.user_events(user.id, viewer.as_ref(), None, 20).await?.iter().map(crate::feed::view).collect();
+        (activity, Vec::new(), false)
+    };
+    let tab_url = format!("/{}?tab=stars", user.username);
     html(UserPage {
+        star_count: state.core.starred_count(user.id, viewer.as_ref()).await?,
+        repo_count: repos.len(),
+        newer_url: (stars_tab && page_no > 1).then(|| format!("{tab_url}&page={}", page_no - 1)),
+        older_url: more.then(|| format!("{tab_url}&page={}", page_no + 1)),
+        stars_tab,
+        starred,
         activity,
         is_self: viewer.as_ref().is_some_and(|v| v.id == user.id),
         page: Page::new(&state, viewer, user.username.clone()),

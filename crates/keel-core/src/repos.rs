@@ -18,6 +18,7 @@ pub struct Repo {
     pub forked_from: Option<i64>,
     /// Topics, separated by spaces; see [`topics`](Self::topics).
     pub topic_names: String,
+    pub stars: i64,
 }
 
 impl Repo {
@@ -32,7 +33,8 @@ macro_rules! repo_select {
         "SELECT r.id, r.owner_id, u.username AS owner, r.name, r.description,
             r.is_private, r.created_at, r.updated_at, r.forked_from,
             COALESCE((SELECT group_concat(t.topic, ' ' ORDER BY t.topic) FROM repo_topics t WHERE t.repo_id = r.id), '')
-              AS topic_names
+              AS topic_names,
+            r.star_count AS stars
          FROM repositories r JOIN users u ON u.id = r.owner_id "
     };
 }
@@ -47,7 +49,9 @@ macro_rules! visible_to {
     };
 }
 
+mod stars;
 mod topics;
+pub use stars::Stargazer;
 pub use topics::{ExploreQuery, ExploreSort, MAX_TOPICS, parse_topics};
 
 impl Core {
@@ -158,6 +162,7 @@ impl Core {
             updated_at: now,
             forked_from: fork_of.map(|r| r.id),
             topic_names: String::new(),
+            stars: 0,
         })
     }
 

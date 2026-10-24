@@ -76,6 +76,17 @@ impl GitRepo {
     }
 }
 
+/// A file to write or delete in a commit.
+#[derive(Clone, Copy, Debug)]
+pub struct FileChange<'a> {
+    pub path: &'a str,
+    /// The new contents; `None` deletes the file.
+    pub content: Option<&'a [u8]>,
+    /// Keep the mode (e.g. executable) of this file in the parent: the
+    /// path itself, or where a renamed file was.
+    pub mode_of: Option<&'a str>,
+}
+
 impl GitRepo {
     /// Commits `changes` (`Some(contents)` writes a file, `None` deletes
     /// it) on top of `branch`, which must still point at `tip`, or not
@@ -88,24 +99,56 @@ impl GitRepo {
         message: &str,
         who: &Identity<'_>,
     ) -> Result<Oid> {
-        let parent = tip.map(|t| self.repo.find_commit(t)).transpose()?;
+        let changes: Vec<FileChange<'_>> =
+            changes.iter().map(|(path, content)| FileChange { path, content: *content, mode_of: Some(path) }).collect();
+        self.commit_changes(branch, tip, tip, &changes, message, who)
+    }
+
+    /// Commits `changes` on top of `parent` (none: a first commit) as the
+    /// new tip of `branch`, which must still point at `old_tip`, or not
+    /// exist yet if that's `None`. Returns the new commit.
+    pub fn commit_changes(
+        &self,
+        branch: &str,
+        parent: Option<Oid>,
+        old_tip: Option<Oid>,
+        changes: &[FileChange<'_>],
+        message: &str,
+        who: &Identity<'_>,
+    ) -> Result<Oid> {
+        let parent = parent.map(|t| self.repo.find_commit(t)).transpose()?;
         let base = match &parent {
             Some(p) => p.tree()?,
             None => self.repo.find_tree(self.repo.treebuilder(None)?.write()?)?,
         };
+        let mode = |path: Option<&str>| {
+            let entry = path.and_then(|p| base.get_path(std::path::Path::new(p)).ok());
+            match entry.map(|e| e.filemode()) {
+                Some(m) if m == i32::from(git2::FileMode::BlobExecutable) => git2::FileMode::BlobExecutable,
+                _ => git2::FileMode::Blob,
+            }
+        };
         let mut update = git2::build::TreeUpdateBuilder::new();
-        for (path, content) in changes {
-            match content {
-                Some(data) => update.upsert(*path, self.repo.blob(data)?, git2::FileMode::Blob),
-                None => update.remove(*path),
+        for c in changes {
+            match c.content {
+                Some(data) => update.upsert(c.path, self.repo.blob(data)?, mode(c.mode_of)),
+                None => update.remove(c.path),
             };
         }
         let tree = self.repo.find_tree(update.create_updated(&self.repo, &base)?)?;
+        // A file can't also be a directory: libgit2 would quietly keep both
+        // entries, or replace one with the other.
+        for c in changes.iter().filter(|c| c.content.is_some()) {
+            let ok = matches!(tree.get_path(std::path::Path::new(c.path)), Ok(e) if e.kind() == Some(git2::ObjectType::Blob));
+            if !ok {
+                return Err(Error::Other(format!("{} can't be both a file and a folder", c.path)));
+            }
+        }
         let sig = git2::Signature::now(who.name, who.email)?;
         let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
         let commit = self.repo.commit(None, &sig, &sig, message, &tree, &parents)?;
         // Compare-and-swap; the zero id means "must not exist yet".
-        self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(tip.unwrap_or(Oid::ZERO_SHA1)))?;
+        self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(old_tip.unwrap_or(Oid::ZERO_SHA1)))?;
         Ok(commit)
     }
 }
@@ -141,6 +184,30 @@ mod tests {
         assert_eq!(repo.branch_tip("main"), Some(second));
         assert!(repo.blob(second, "Home.md").unwrap().is_none());
         assert_eq!(repo.blob(second, "Start.md").unwrap().unwrap().data, b"go");
+
+        // Executable files stay executable, also when renamed; a new branch
+        // starts from another one's commit.
+        let tree = repo.repo.find_commit(second).unwrap().tree().unwrap();
+        let mut b = repo.repo.treebuilder(Some(&tree)).unwrap();
+        b.insert("run.sh", repo.repo.blob(b"echo").unwrap(), 0o100755).unwrap();
+        let tree = repo.repo.find_tree(b.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("Ada", "ada@example.com").unwrap();
+        let parent = repo.repo.find_commit(second).unwrap();
+        let third = repo.repo.commit(Some("refs/heads/main"), &sig, &sig, "Script", &tree, &[&parent]).unwrap();
+        let rename = [
+            FileChange { path: "run.sh", content: None, mode_of: None },
+            FileChange { path: "bin/run.sh", content: Some(b"echo hi"), mode_of: Some("run.sh") },
+        ];
+        let fourth = repo.commit_changes("topic", Some(third), None, &rename, "Move", &who).unwrap();
+        assert_eq!(repo.branch_tip("topic"), Some(fourth));
+        assert_eq!(repo.branch_tip("main"), Some(third));
+        let tree = repo.repo.find_commit(fourth).unwrap().tree().unwrap();
+        assert_eq!(tree.get_path(std::path::Path::new("bin/run.sh")).unwrap().filemode(), 0o100755);
+        // Files and folders don't mix.
+        let clash = [FileChange { path: "bin/run.sh/x", content: Some(b""), mode_of: None }];
+        assert!(repo.commit_changes("topic", Some(fourth), Some(fourth), &clash, "Clash", &who).is_err());
+        let clash = [FileChange { path: "bin", content: Some(b""), mode_of: None }];
+        assert!(repo.commit_changes("topic", Some(fourth), Some(fourth), &clash, "Clash", &who).is_err());
         assert!(repo.commit_files("main", Some(first), &[("y.md", Some(b""))], "Stale", &who).is_err());
     }
 

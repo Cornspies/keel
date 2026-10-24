@@ -113,3 +113,27 @@ for (const form of document.querySelectorAll("form[data-autosubmit]")) {
     form.submit();
   });
 }
+
+// Reactions: toggle without leaving the spot on the page. The server
+// answers with the updated page; only the reactions are swapped in.
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest(".reaction-form");
+  if (!form || !event.submitter) return;
+  event.preventDefault();
+  const body = new URLSearchParams(new FormData(form, event.submitter));
+  form.closest("details.dropdown[open]")?.removeAttribute("open");
+  form.querySelector("details[open]")?.removeAttribute("open");
+  fetch(form.action, { method: "POST", body })
+    .then((r) => (r.ok ? r.text() : Promise.reject()))
+    .then((html) => {
+      const page = new DOMParser().parseFromString(html, "text/html");
+      const fresh = page.getElementById(form.dataset.reactions);
+      if (fresh) document.getElementById(form.dataset.reactions)?.replaceWith(fresh);
+    })
+    .catch(() => {
+      // Without the clicked button, a plain submit wouldn't say which reaction.
+      const { name, value } = event.submitter;
+      form.append(Object.assign(document.createElement("input"), { type: "hidden", name, value }));
+      form.submit();
+    });
+});
