@@ -11,6 +11,8 @@ mod explore;
 mod feed;
 mod forks;
 mod githttp;
+mod import;
+mod issue_search;
 mod issues;
 mod labels;
 mod lastcommit;
@@ -20,6 +22,7 @@ mod orgs;
 mod hooks;
 mod pages;
 mod password;
+mod profile;
 mod protection;
 mod milestones;
 mod pulls;
@@ -201,10 +204,22 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/repos", get(admin::repos))
         .route("/search", get(search::global))
         .route("/explore", get(explore::index))
+        .route("/new/import", get(import::form).post(import::create))
+        .route("/issues", get(issue_search::issues))
+        .route("/pulls", get(issue_search::pulls))
         .route("/notifications", get(notifications::inbox))
         .route("/notifications/read", post(notifications::mark_all_read))
         .route("/notifications/{id}/read", post(notifications::mark_read))
         .route("/settings", get(settings::index))
+        .route("/settings/profile", get(profile::edit))
+        .route("/settings/profile/avatar", post(profile::upload_avatar))
+        .route("/settings/profile/avatar/delete", post(profile::remove_avatar))
+        .route("/settings/profile/pins", post(profile::pins))
+        .route("/org/{org}/settings/profile", get(profile::edit_org))
+        .route("/org/{org}/settings/profile/avatar", post(profile::upload_org_avatar))
+        .route("/org/{org}/settings/profile/avatar/delete", post(profile::remove_org_avatar))
+        .route("/org/{org}/settings/profile/pins", post(profile::org_pins))
+        .route("/avatars/{name}", get(profile::avatar))
         .route("/settings/account", get(settings::account))
         .route("/settings/account/email", post(settings::change_email))
         .route("/settings/account/password", post(settings::change_password))

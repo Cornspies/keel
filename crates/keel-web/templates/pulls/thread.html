@@ -13,7 +13,7 @@
   {% for c in t.comments %}
   <div class="thread-comment" id="comment-{{ c.id }}">
     <div class="comment-head">
-      <span><strong><a href="/{{ c.author }}">{{ c.author }}</a></strong> <a class="muted" href="#comment-{{ c.id }}"><time title="{{ c.when_full }}">{{ c.when }}</time></a>{% if c.edited %} <span class="muted">· edited</span>{% endif %}</span>
+      <span><img class="avatar" src="{{ c.avatar_url }}" width="20" height="20" alt=""><strong><a href="{{ c.author_url }}">{{ c.author }}</a></strong> <a class="muted" href="#comment-{{ c.id }}"><time title="{{ c.when_full }}">{{ c.when }}</time></a>{% if c.edited %} <span class="muted">· edited</span>{% endif %}</span>
       <span class="spacer"></span>
       {% if let Some(u) = c.edit_url %}<a class="btn btn-small" href="{{ u }}">Edit</a>{% endif %}
       {% if let Some(d) = c.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}

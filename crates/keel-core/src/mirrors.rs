@@ -16,7 +16,7 @@ use crate::{Core, Error, Repo, Result, User, invalid, is_private_ip, now};
 /// How often a mirror can sync: (seconds, label).
 pub const MIRROR_INTERVALS: &[(i64, &str)] =
     &[(3600, "every hour"), (4 * 3600, "every 4 hours"), (8 * 3600, "every 8 hours"), (86_400, "every day")];
-const FETCH_LIMIT: Duration = Duration::from_secs(600);
+pub(crate) const FETCH_LIMIT: Duration = Duration::from_secs(600);
 const MAX_PUSH_MIRRORS: i64 = 10;
 /// Delays before retrying a failed push.
 const PUSH_RETRY_SECS: &[i64] = &[60, 300, 1800, 7200, 21_600];
@@ -166,7 +166,7 @@ impl Core {
 
     /// The addresses `url` may be fetched from (all of its host's, which
     /// must be public unless private addresses are allowed).
-    async fn check_mirror_host(&self, url: &MirrorUrl) -> Result<Vec<IpAddr>> {
+    pub(crate) async fn check_mirror_host(&self, url: &MirrorUrl) -> Result<Vec<IpAddr>> {
         let addrs: Vec<IpAddr> = match url.host.parse::<IpAddr>() {
             Ok(ip) => vec![ip],
             Err(_) => tokio::net::lookup_host((url.host.as_str(), url.port))
@@ -357,7 +357,7 @@ impl Core {
 
     /// Runs `f` (git, blocking) against a remote after checking its host,
     /// pinned to a checked address. Errors are for people to read.
-    async fn with_remote<T: Send + 'static>(
+    pub(crate) async fn with_remote<T: Send + 'static>(
         &self,
         remote: &MirrorRemote,
         f: impl FnOnce(&keel_git::Remote<'_>) -> keel_git::Result<T> + Send + 'static,

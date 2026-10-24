@@ -43,6 +43,13 @@
   </div>
   {% if let Some(e) = m.error %}<p class="flash flash-error small">Last sync failed: {{ e }}</p>{% endif %}
   {% endif %}
+  {% if let Some(i) = repo.import %}
+  {% if i.running %}
+  <p class="flash small import-note" data-refresh="5">Importing from <a href="{{ i.url }}" rel="nofollow noopener noreferrer">{{ i.url }}</a>…{% if !i.progress.is_empty() %} {{ i.progress }}.{% endif %} This page reloads by itself.</p>
+  {% else if let Some(e) = i.error %}
+  <p class="flash flash-error small import-note">{% if e.starts_with("Imported") %}{{ e }}{% else %}Importing from <a href="{{ i.url }}" rel="nofollow noopener noreferrer">{{ i.service }}</a> failed: {{ e }}{% endif %}</p>
+  {% endif %}
+  {% endif %}
   {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
   {% if !repo.topics.is_empty() %}<p class="topics">{% for t in repo.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
   <nav class="tabs">

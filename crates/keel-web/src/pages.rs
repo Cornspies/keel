@@ -334,6 +334,8 @@ struct UserPage {
     starred: Vec<RepoCard>,
     newer_url: Option<String>,
     older_url: Option<String>,
+    pinned: Vec<RepoCard>,
+    avatar_version: i64,
 }
 
 const STARRED_PAGE: i64 = 30;
@@ -355,6 +357,8 @@ struct OrgPage {
     is_owner: bool,
     repos: Vec<RepoCard>,
     members: Vec<(String, &'static str)>,
+    pinned: Vec<RepoCard>,
+    avatar_version: i64,
 }
 
 pub async fn user(
@@ -372,6 +376,8 @@ pub async fn user(
         let members = state.core.org_members(user.id).await?;
         let role = viewer.as_ref().and_then(|v| members.iter().find(|(m, _)| m.id == v.id).map(|(_, r)| *r));
         return html(OrgPage {
+            pinned: crate::profile::pinned_cards(&state, &user, viewer.as_ref()).await?,
+            avatar_version: user.avatar_version,
             is_member: role.is_some(),
             is_owner: role == Some(OrgRole::Owner) || viewer.as_ref().is_some_and(|v| v.is_admin),
             page: Page::new(&state, viewer, user.username.clone()),
@@ -395,6 +401,8 @@ pub async fn user(
     };
     let tab_url = format!("/{}?tab=stars", user.username);
     html(UserPage {
+        pinned: if stars_tab { Vec::new() } else { crate::profile::pinned_cards(&state, &user, viewer.as_ref()).await? },
+        avatar_version: user.avatar_version,
         star_count: state.core.starred_count(user.id, viewer.as_ref()).await?,
         repo_count: repos.len(),
         newer_url: (stars_tab && page_no > 1).then(|| format!("{tab_url}&page={}", page_no - 1)),

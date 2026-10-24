@@ -24,7 +24,8 @@ One binary, one data directory, no external services.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
   `@name` links, labels, assignees, milestones, and filtering by all of them;
   reactions (👍 ❤️ 🚀 …); issue and pull request templates (GitHub's
-  `.github/ISSUE_TEMPLATE` work as they are).
+  `.github/ISSUE_TEMPLATE` work as they are); search with GitHub's
+  qualifiers (`is:open label:bug author:@me`), also across repositories.
 - **Code review:** pull requests from branches or forks, review requests,
   comments on lines of the diff (with replies, marked outdated once the line
   changes), suggested changes that can be applied with one click, approvals
@@ -51,6 +52,11 @@ One binary, one data directory, no external services.
 - **People:** accounts with optional two-factor authentication (authenticator
   apps and recovery codes), organizations (owners and members),
   per-repository collaborators (read/write/admin), private repositories.
+- **Importing** from GitHub, Gitea or Forgejo: the code with Git LFS files,
+  issues and pull requests (numbers kept), comments and reviews, labels,
+  milestones, releases with their files, and the wiki.
+- **Profiles** with avatars (uploaded, or generated patterns) and pinned
+  repositories, for people and organizations.
 - **Renaming and transferring** repositories (to you or your organizations);
   old links, clones and remotes keep working.
 - **Administration:** a page for site administrators with statistics,
@@ -173,6 +179,9 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `stars`, `created`, `watchers`, `name`) |
 | `GET /user/starred`, `GET /users/{name}/starred`, `GET /repos/{owner}/{repo}/stargazers` | |
 | `GET`, `PUT`, `DELETE /user/starred/{owner}/{repo}` | `204` if starred (or done), `404` if not |
+| `GET /search/issues` | `q` (as on the web), `sort` (`created`, `updated`, `comments`), `order` |
+| `POST /repos/migrate` | like Gitea's: `clone_addr`, `auth_token`, `repo_owner`, `repo_name`, `private`, `issues`, `releases`, `wiki` |
+| `GET /repos/{owner}/{repo}/import` | `status` (`queued`, `running`, `done`, `failed`), `progress`, `error` |
 | `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
 | `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
 | `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
@@ -220,13 +229,15 @@ crates/
               pre-receive hook), commit statuses, notifications, webhook
               queue and payloads, push events, site administration, Git LFS
               storage, wikis, topics, stars, reactions, issue templates,
-              commits from the browser, backups
+              commits from the browser, issue search, avatars, pins,
+              imports, backups
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
   keel-hooks  webhook delivery worker (reqwest)
   keel-mail   SMTP sender for the mail outbox (lettre)
-  keel-mirror pull and push mirror worker, and its Git LFS client
+  keel-mirror pull and push mirror worker, its Git LFS client, and
+              importing from GitHub and Gitea
   keel-web    axum router: server-rendered pages (askama templates), the
               JSON API, smart HTTP git protocol, the Git LFS server, background
               cache warming and search indexing, assets (compiled into the
@@ -410,6 +421,29 @@ hides "Open a blank issue". Labels and assignees from a template are applied
 when the issue is opened, even by people who can't set them themselves.
 `PULL_REQUEST_TEMPLATE.md` fills in new pull requests.
 
+**Searching issues** parses GitHub's qualifiers (`is:`, `label:`/`-label:`,
+`author:`, `assignee:`, `review-requested:`, `involves:`, `milestone:`, `no:`,
+`repo:`, `user:`, `sort:`; `@me` is you; other words are looked for in titles
+and descriptions) into one static SQL query that only ever sees repositories
+the viewer can read. `/issues` and `/pulls` show what involves you across
+repositories.
+
+**Imports** run in the background, one at a time, through the same guarded
+network access as mirrors (no private addresses unless allowed; git is
+pinned to the checked address). git brings branches, tags and pull requests'
+heads (`refs/pull/<n>/head`, where keel keeps them too), then Git LFS files;
+the API brings the rest. Imported issues, comments and releases keep their
+dates and are shown with their author's name, linked to their profile on the
+source, never to a local account with the same name; nothing notifies
+anyone. Line comments on pull requests become comments quoting the line.
+The access token is forgotten when the import ends; an import interrupted by
+a restart is marked as failed.
+
+**Avatars** are served from `/avatars/<name>` with an ETag: an uploaded PNG,
+JPEG, GIF or WebP (checked by its first bytes, at most 1 MiB, kept in
+`data/avatars` and in backups), or else a pattern made from the name. There
+is no Gravatar: it would tell another service who uses this server.
+
 **Branch protection** applies to everyone, administrators included. A rule
 for an exact branch name wins over patterns; among patterns the longest
 matching one applies. Merging checks the rule's required approvals: only
@@ -543,7 +577,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo build && scripts/smoke-test.sh      # ~590 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
+cargo build && scripts/smoke-test.sh      # ~640 end-to-end checks (needs git, ssh, curl, python3, openssl, sqlite3; git-lfs optional)
 RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 ```
 
@@ -552,9 +586,8 @@ run automatically at startup.
 
 ## Ideas
 
-- Importing repositories from GitHub or Gitea together with their issues,
-  pull requests, labels and releases.
-- Searching issues and pull requests with qualifiers (`is:open label:bug
-  author:ada`), across repositories too.
-- Avatars for people and organizations.
-- Pinning repositories to profiles.
+- Draft pull requests, and merging automatically once checks pass and
+  reviews are in.
+- Repository templates ("Use this template").
+- Contributors and commit activity graphs.
+- A light/dark theme switch (besides following the system).

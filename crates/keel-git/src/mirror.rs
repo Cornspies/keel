@@ -99,11 +99,26 @@ fn run(mut cmd: Command, limit: Duration) -> Result<String> {
 /// tags (deleting those gone there; other refs are left alone), and points
 /// HEAD at the remote's default branch.
 pub fn mirror_fetch(path: &Path, remote: &Remote<'_>, limit: Duration) -> Result<()> {
+    fetch_refs(path, remote, limit, &["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"])
+}
+
+/// Like [`mirror_fetch`], also fetching the heads of pull requests
+/// (`refs/pull/<n>/head` on GitHub and Gitea), for importing them.
+pub fn import_fetch(path: &Path, remote: &Remote<'_>, limit: Duration) -> Result<()> {
+    fetch_refs(
+        path,
+        remote,
+        limit,
+        &["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*", "+refs/pull/*/head:refs/pull/*/head"],
+    )
+}
+
+fn fetch_refs(path: &Path, remote: &Remote<'_>, limit: Duration, refspecs: &[&str]) -> Result<()> {
     let mut fetch = git(path, remote);
     fetch
         .args(["fetch", "--prune", "--quiet", "--no-write-fetch-head", "--no-auto-gc", "--"])
         .arg(remote.url)
-        .args(["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]);
+        .args(refspecs);
     run(fetch, limit)?;
 
     let mut head = git(path, remote);

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+{% let q = res.q.as_str() %}
+{% include "issues/search_form.html" %}
+<p class="filter-note"><a href="{{ action }}">Clear the search</a></p>
+{% include "issues/results.html" %}
+{% endblock %}

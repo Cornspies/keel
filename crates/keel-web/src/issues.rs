@@ -38,10 +38,12 @@ pub(crate) struct IssueRow {
     pub assignees: Vec<String>,
     /// Open pull requests: the status badge of the head commit (HTML).
     pub status: String,
+    /// `owner/name`, in lists across repositories.
+    pub repo: String,
 }
 
 impl IssueRow {
-    fn new(repo: &Repo, i: &Issue, labels: &mut HashMap<i64, Vec<Label>>, assignees: &mut HashMap<i64, Vec<String>>) -> Self {
+    pub(crate) fn new(repo: &Repo, i: &Issue, labels: &mut HashMap<i64, Vec<Label>>, assignees: &mut HashMap<i64, Vec<String>>) -> Self {
         Self {
             labels: labels
                 .remove(&i.id)
@@ -54,17 +56,41 @@ impl IssueRow {
             number: i.number,
             title: i.title.clone(),
             state: i.state.clone(),
-            author: author_name(&i.author),
+            author: author_name(&i.author, &i.original_author),
             opened: relative_time(i.created_at),
             opened_full: datetime(i.created_at),
             comments: i.comment_count,
             status: String::new(),
+            repo: String::new(),
         }
     }
 }
 
-fn author_name(author: &Option<String>) -> String {
-    author.clone().unwrap_or_else(|| "ghost".into())
+/// Who wrote something: someone with an account here, someone whose words
+/// were imported (no account here; their profile where it came from), or a
+/// deleted account ("ghost").
+pub(crate) struct Person {
+    pub name: String,
+    pub url: String,
+    pub avatar: String,
+}
+
+pub(crate) fn person(author: &Option<String>, original: &Option<String>) -> Person {
+    match (author, original) {
+        (Some(name), _) => Person { url: format!("/{name}"), avatar: format!("/avatars/{name}"), name: name.clone() },
+        (None, Some(profile)) => {
+            let name = profile.trim_end_matches('/').rsplit('/').next().unwrap_or("ghost").to_owned();
+            let host = profile.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or_default();
+            // A pattern for the name there, never a local account's picture.
+            let avatar = format!("/avatars/{}", encode_path(&format!("{name}@{host}")));
+            Person { name, url: profile.clone(), avatar }
+        }
+        (None, None) => Person { name: "ghost".into(), url: "/ghost".into(), avatar: "/avatars/ghost".into() },
+    }
+}
+
+fn author_name(author: &Option<String>, original: &Option<String>) -> String {
+    person(author, original).name
 }
 
 pub(crate) fn issue_url(repo: &Repo, issue: &Issue) -> String {
@@ -128,6 +154,10 @@ pub(crate) struct TimelineItem {
     /// `description` or a comment kind (see [`keel_core::Comment`]).
     pub kind: String,
     pub author: String,
+    pub author_url: String,
+    pub avatar_url: String,
+    /// Written where the repository was imported from.
+    pub imported: bool,
     pub when: String,
     pub when_full: String,
     pub body_html: String,
@@ -254,10 +284,14 @@ pub(crate) async fn conversation(
         },
     };
 
+    let who = person(&issue.author, &issue.original_author);
     let mut timeline = vec![TimelineItem {
         id: 0,
         kind: "description".into(),
-        author: author_name(&issue.author),
+        author: author_name(&issue.author, &issue.original_author),
+        author_url: who.url,
+        avatar_url: who.avatar,
+        imported: issue.original_author.is_some(),
         when: relative_time(issue.created_at),
         when_full: datetime(issue.created_at),
         body_html: if issue.body.trim().is_empty() {
@@ -290,9 +324,13 @@ pub(crate) async fn conversation(
         }
         let mine = viewer.is_some_and(|v| c.author_id == Some(v.id));
         let editable = c.is_editable() && (mine || writer);
+        let who = person(&c.author, &c.original_author);
         timeline.push(TimelineItem {
             id: c.id,
-            author: author_name(&c.author),
+            author: who.name,
+            author_url: who.url,
+            avatar_url: who.avatar,
+            imported: c.original_author.is_some(),
             when: relative_time(c.created_at),
             when_full: datetime(c.created_at),
             body_html: match c.kind.as_str() {
@@ -392,7 +430,7 @@ pub(crate) async fn conversation(
         number: issue.number,
         title: issue.title.clone(),
         state: issue.state.clone(),
-        author: author_name(&issue.author),
+        author: author_name(&issue.author, &issue.original_author),
         opened: relative_time(issue.created_at),
         comment_count: issue.comment_count,
         timeline,
@@ -451,10 +489,14 @@ struct ListPage {
     review_filter: Option<(String, bool)>,
     /// The active filters, described, and a link to clear them.
     filter_note: Option<(String, String)>,
+    /// The list's address (also for searching it).
+    here: String,
 }
 
 #[derive(Deserialize)]
 pub struct ListQuery {
+    /// A search with qualifiers, instead of the filters.
+    q: Option<String>,
     state: Option<String>,
     page: Option<i64>,
     label: Option<String>,
@@ -537,6 +579,9 @@ pub(crate) async fn list_page(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let show_open = q.state.as_deref() != Some("closed");
     let page_no = q.page.unwrap_or(1).max(1);
+    if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        return crate::issue_search::repo_page(&state, viewer, &repo, access, text, pulls, page_no).await;
+    }
     fn nonempty(v: &Option<String>) -> Option<&str> {
         v.as_deref().map(str::trim).filter(|v| !v.is_empty())
     }
@@ -656,6 +701,7 @@ pub(crate) async fn list_page(
             .collect(),
         review_filter,
         filter_note,
+        here,
     })
 }
 

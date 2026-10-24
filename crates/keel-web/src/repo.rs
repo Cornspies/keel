@@ -124,7 +124,18 @@ pub(crate) struct RepoView {
     pub topics: Vec<String>,
     /// Show the wiki tab (there is a wiki, or the viewer can start one).
     pub wiki_tab: bool,
+    /// An import that's running, or ended recently with problems.
+    pub import: Option<ImportView>,
 }
+
+pub(crate) struct ImportView {
+    pub url: String,
+    pub service: &'static str,
+    pub running: bool,
+    pub progress: String,
+    pub error: Option<String>,
+}
+
 
 /// What the header says about a mirror.
 pub(crate) struct MirrorView {
@@ -161,7 +172,16 @@ impl RepoView {
             error: m.last_error.filter(|_| access >= Access::Write),
             url: m.url,
         });
+        let import = state.core.import(repo.id).await?.filter(|i| i.worth_showing());
         Ok(Self {
+            import: import.map(|i| ImportView {
+                running: i.in_progress(),
+                service: i.service().name(),
+                // The error is for those who can do something about it.
+                error: i.error.clone().filter(|_| access >= Access::Write),
+                progress: i.progress,
+                url: i.url,
+            }),
             releases: state.core.release_count(repo.id).await?,
             topics: repo.topics().map(str::to_owned).collect(),
             wiki_tab: access >= Access::Write || state.core.has_wiki(repo.id),

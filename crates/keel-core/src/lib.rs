@@ -7,18 +7,20 @@ macro_rules! user_columns {
     () => {
         "id, username, COALESCE(email, '') AS email, password_hash, is_admin, kind, created_at,
          email_verified_at IS NOT NULL AS email_verified, email_notifications, disabled_at IS NOT NULL AS disabled,
-         totp_secret IS NOT NULL AS totp_enabled"
+         totp_secret IS NOT NULL AS totp_enabled, avatar_type, avatar_version"
     };
 }
 
 mod activity;
 mod admin;
 mod auth;
+mod avatars;
 mod backup;
 mod cache;
 mod config;
 mod events;
 mod file_edits;
+mod imports;
 mod issue_templates;
 mod issues;
 mod labels;
@@ -69,14 +71,19 @@ pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for
 pub use events::Event;
 pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
-pub use repos::{ExploreQuery, ExploreSort, MAX_TOPICS, Repo, Stargazer, parse_topics};
+pub use repos::{ExploreQuery, ExploreSort, IssueHit, IssueQuery, IssueSort, MAX_PINS, MAX_TOPICS, Repo, Stargazer, StateFilter, parse_topics};
 pub use reviews::{InlineAnchor, Verdict, suggestion};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
 pub use tokens::{AccessToken, looks_like_token};
 pub use totp::{RECOVERY_CODES, SecondStep, totp_uri};
 pub use users::User;
+pub use avatars::{MAX_AVATAR, identicon, image_type};
 pub use file_edits::{FileEdit, FileWrite, clean_path};
+pub use imports::{
+    Import, ImportOptions, ImportService, ImportSource, ImportedComment, ImportedIssue, ImportedLabel, ImportedMilestone,
+    ImportedPull, ImportedRelease, import_source, label_color,
+};
 pub use issue_templates::{IssueTemplate, IssueTemplates, parse_issue_template};
 pub use reactions::{REACTIONS, Reaction, ReactionGroup, group_reactions, reaction_kind};
 pub use wiki::{GitSession, GitTarget, SPECIAL as WIKI_SPECIAL, WikiAction, WikiContent, WikiEdit, WikiPage, page_name, page_title};
@@ -139,6 +146,8 @@ pub struct Core {
     mail_wakeup: Arc<tokio::sync::Notify>,
     /// Signalled when a mirror should sync.
     mirror_wakeup: Arc<tokio::sync::Notify>,
+    /// Signalled when an import is queued.
+    import_wakeup: Arc<tokio::sync::Notify>,
     /// Instance settings from the admin page, read on every page view.
     settings: Arc<std::sync::RwLock<SiteSettings>>,
     /// Signs short-lived tokens (Git LFS).
@@ -172,6 +181,7 @@ impl Core {
             hook_wakeup: Arc::default(),
             mail_wakeup: Arc::default(),
             mirror_wakeup: Arc::default(),
+            import_wakeup: Arc::default(),
             settings: Arc::default(),
             token_secret,
             metrics: Arc::default(),

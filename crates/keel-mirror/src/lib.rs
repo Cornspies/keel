@@ -1,10 +1,12 @@
 //! Keeps mirrors in sync: pulls into pull mirrors on their schedule, and
 //! pushes to push mirrors after changes, with their Git LFS files both ways.
+//! Also imports repositories from GitHub and Gitea.
 //!
 //! git does the fetching and pushing (see `keel_core::mirrors`); this crate
 //! schedules the work and is the LFS client, through the same guarded HTTP
 //! client as webhooks.
 
+mod import;
 mod lfs;
 
 use std::time::Duration;
@@ -41,9 +43,10 @@ fn message(e: keel_core::Error) -> String {
     }
 }
 
-/// Starts the worker (needs a Tokio runtime).
+/// Starts the workers (needs a Tokio runtime).
 pub fn start(core: Core) {
     let client = client(core.config.webhook_allow_private);
+    start_imports(core.clone(), client.clone());
     tokio::spawn(async move {
         let wakeup = core.mirror_wakeup();
         loop {
@@ -74,6 +77,30 @@ pub fn start(core: Core) {
             tokio::select! {
                 _ = wakeup.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            }
+        }
+    });
+}
+
+/// Imports one at a time (they can take a while), apart from mirrors.
+fn start_imports(core: Core, client: reqwest::Client) {
+    tokio::spawn(async move {
+        if let Err(e) = core.fail_interrupted_imports().await {
+            tracing::warn!("imports: {e}");
+        }
+        let wakeup = core.import_wakeup();
+        loop {
+            match core.claim_import().await {
+                Ok(Some(repo_id)) => {
+                    import::run(&core, &client, repo_id).await;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("import queue: {e}"),
+            }
+            tokio::select! {
+                _ = wakeup.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
             }
         }
     });

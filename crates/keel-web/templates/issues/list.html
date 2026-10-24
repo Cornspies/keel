@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
+{% let action = here.as_str() %}{% let q = "" %}
+{% include "issues/search_form.html" %}
 <div class="toolbar">
   <nav class="state-tabs">
     <a href="{{ open_url }}"{% if show_open %} class="active"{% endif %}><span class="state-dot state-open" aria-hidden="true"></span>{{ open_count }} Open</a>
@@ -42,19 +44,7 @@
 {% if rows.is_empty() %}
 <p class="empty">{% if show_open %}No open {% if pulls %}pull requests{% else %}issues{% endif %}.{% else %}Nothing closed yet.{% endif %}</p>
 {% else %}
-<ul class="card-list issue-list">
-  {% for r in rows %}
-  <li class="card-row">
-    <span class="state-icon state-{{ r.state }}" title="{{ r.state }}" aria-label="{{ r.state }}"></span>
-    <div class="issue-main">
-      <a class="issue-title" href="{{ r.url }}">{{ r.title }}</a>{% if !r.status.is_empty() %} {{ r.status|safe }}{% endif %}
-      {% for l in r.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}
-      <div class="muted small">#{{ r.number }} opened <time title="{{ r.opened_full }}">{{ r.opened }}</time> by {{ r.author }}{% if !r.assignees.is_empty() %} · assigned to {{ r.assignees.join(", ") }}{% endif %}</div>
-    </div>
-    {% if r.comments > 0 %}<a class="muted small nowrap" href="{{ r.url }}">{{ r.comments }} {% if r.comments == 1 %}comment{% else %}comments{% endif %}</a>{% endif %}
-  </li>
-  {% endfor %}
-</ul>
+{% include "issues/rows.html" %}
 {% endif %}
 <div class="pager">
   {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}

@@ -1,7 +1,7 @@
 <ul class="feed">
   {% for e in events %}
   <li class="feed-item" id="event-{{ e.id }}">
-    <span class="feed-icon feed-{{ e.kind }}" aria-hidden="true"></span>
+    <a class="feed-who" href="/{{ e.actor }}" tabindex="-1" aria-hidden="true"><img class="avatar" src="/avatars/{{ e.actor }}" width="32" height="32" alt=""><span class="feed-icon feed-{{ e.kind }}"></span></a>
     <div class="feed-main">
       <div>{{ e.html|safe }} <time class="muted small" title="{{ e.when_full }}">{{ e.when }}</time></div>
       {% if !e.commits.is_empty() %}

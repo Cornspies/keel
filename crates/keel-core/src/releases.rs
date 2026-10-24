@@ -52,7 +52,10 @@ pub enum ReleaseAction {
 
 macro_rules! release_select {
     () => {
-        "SELECT r.id, r.repo_id, r.tag, r.target, r.title, r.notes, r.draft, r.prerelease, u.username AS author,
+        "SELECT r.id, r.repo_id, r.tag, r.target, r.title, r.notes, r.draft, r.prerelease,
+            -- Imported releases: the last part of the author's profile URL.
+            COALESCE(u.username, replace(r.original_author, rtrim(r.original_author, replace(r.original_author, '/', '')), ''))
+              AS author,
             r.created_at, r.published_at
          FROM releases r LEFT JOIN users u ON u.id = r.author_id "
     };

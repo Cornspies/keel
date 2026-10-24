@@ -26,6 +26,9 @@ pub struct Issue {
     pub created_at: i64,
     pub updated_at: i64,
     pub closed_at: Option<i64>,
+    /// Imported: the author's profile where it came from.
+    #[sqlx(default)]
+    pub original_author: Option<String>,
 }
 
 impl Issue {
@@ -63,6 +66,9 @@ pub struct Comment {
     pub hunk: Option<String>,
     /// The inline comment this one replies to.
     pub reply_to: Option<i64>,
+    /// Imported: the author's profile where it came from.
+    #[sqlx(default)]
+    pub original_author: Option<String>,
 }
 
 impl Comment {
@@ -94,7 +100,7 @@ pub struct IssueCounts {
 macro_rules! issue_select {
     () => {
         "SELECT i.id, i.repo_id, i.number, i.author_id, u.username AS author, i.title, i.body,
-            i.is_pull, i.state, i.comment_count, i.created_at, i.updated_at, i.closed_at
+            i.is_pull, i.state, i.comment_count, i.created_at, i.updated_at, i.closed_at, i.original_author
          FROM issues i LEFT JOIN users u ON u.id = i.author_id "
     };
 }
@@ -112,7 +118,8 @@ macro_rules! filtered {
 macro_rules! comment_select {
     () => {
         "SELECT c.id, c.issue_id, c.author_id, u.username AS author, c.kind, c.body,
-            c.created_at, c.updated_at, c.path, c.side, c.line, c.commit_id, c.blob_id, c.hunk, c.reply_to
+            c.created_at, c.updated_at, c.path, c.side, c.line, c.commit_id, c.blob_id, c.hunk, c.reply_to,
+            c.original_author
          FROM comments c LEFT JOIN users u ON u.id = c.author_id "
     };
 }

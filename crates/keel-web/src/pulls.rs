@@ -696,6 +696,8 @@ pub(crate) struct InlineCtx {
 pub(crate) struct InlineView {
     pub id: i64,
     pub author: String,
+    pub author_url: String,
+    pub avatar_url: String,
     pub when: String,
     pub when_full: String,
     pub body_html: String,
@@ -800,9 +802,12 @@ pub(crate) fn inline_threads(
         let mine = viewer.is_some_and(|v| c.author_id == Some(v.id));
         let editable = mine || access >= Access::Write;
         let applicable = can_apply && c.side.as_deref() == Some("new") && keel_core::suggestion(&c.body).is_some();
+        let who = crate::issues::person(&c.author, &c.original_author);
         InlineView {
             id: c.id,
-            author: c.author.clone().unwrap_or_else(|| "ghost".into()),
+            author: who.name,
+            author_url: who.url,
+            avatar_url: who.avatar,
             when: relative_time(c.created_at),
             when_full: datetime(c.created_at),
             body_html: render_with_suggestions(&c.body, original, render),

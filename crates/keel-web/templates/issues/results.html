@@ -1,0 +1,16 @@
+<div class="toolbar">
+  <nav class="state-tabs">
+    <a href="{{ res.open_url }}"{% if res.open_active %} class="active"{% endif %}><span class="state-dot state-open" aria-hidden="true"></span>{{ res.open_count }} Open</a>
+    <a href="{{ res.closed_url }}"{% if res.closed_active %} class="active"{% endif %}><span class="state-dot state-closed" aria-hidden="true"></span>{{ res.closed_count }} Closed</a>
+  </nav>
+  <span class="muted small">{{ res.total }} result{% if res.total != 1 %}s{% endif %}</span>
+</div>
+{% if res.rows.is_empty() %}
+<p class="empty">Nothing matches “{{ res.q }}”.</p>
+{% else %}
+{% let rows = res.rows %}{% include "issues/rows.html" %}
+{% endif %}
+<div class="pager">
+  {% if let Some(u) = res.newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+  {% if let Some(u) = res.older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+</div>

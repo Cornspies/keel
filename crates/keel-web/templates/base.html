@@ -17,6 +17,8 @@
     <nav class="topnav">
       <a href="/explore">Explore</a>
       {% if let Some(user) = page.viewer %}
+        <a href="/issues" class="nav-wide">Issues</a>
+        <a href="/pulls" class="nav-wide">Pull requests</a>
         <details class="dropdown dropdown-right">
           <summary class="btn btn-small">New</summary>
           <div class="dropdown-menu">
@@ -25,7 +27,7 @@
           </div>
         </details>
         <a class="inbox-link{% if page.unread > 0 %} has-unread{% endif %}" href="/notifications" title="Notifications" aria-label="Notifications{% if page.unread > 0 %} ({{ page.unread }} unread){% endif %}"><span class="bell" aria-hidden="true"></span>{% if page.unread > 0 %}<span class="unread-count">{{ page.unread }}</span>{% endif %}</a>
-        <a href="/{{ user.username }}">{{ user.username }}</a>
+        <a href="/{{ user.username }}"><img class="avatar" src="/avatars/{{ user.username }}?v={{ user.avatar_version }}" width="20" height="20" alt="">{{ user.username }}</a>
         {% if user.is_admin %}<a href="/admin">Admin</a>{% endif %}
         <a href="/settings">Settings</a>
         <form method="post" action="/logout" class="inline"><button class="linkish">Sign out</button></form>

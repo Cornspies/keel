@@ -1,0 +1,32 @@
+{% extends "settings/layout.html" %}
+{% block settings %}
+<h1>{% if let Some(o) = org %}<a href="/{{ o }}">{{ o }}</a> profile{% else %}Profile{% endif %}</h1>
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+{% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
+
+<h2>Picture</h2>
+<div class="avatar-edit">
+  <img class="avatar avatar-large" src="/avatars/{{ name }}?v={{ avatar_version }}" width="96" height="96" alt="">
+  <div>
+    <form method="post" action="{{ base }}/avatar" enctype="multipart/form-data" class="form form-inline">
+      <input type="file" name="avatar" accept="image/png,image/jpeg,image/gif,image/webp" required aria-label="Image">
+      <button class="btn">Upload</button>
+    </form>
+    <p class="hint">A square PNG, JPEG, GIF or WebP image, up to 1 MiB.{% if !has_avatar %} Until then, a pattern made from the name is shown.{% endif %}</p>
+    {% if has_avatar %}<form method="post" action="{{ base }}/avatar/delete"><button class="btn btn-small btn-danger">Remove picture</button></form>{% endif %}
+  </div>
+</div>
+
+<h2>Pinned repositories</h2>
+<p class="hint">Shown at the top of <a href="/{{ name }}">the profile</a>, up to {{ max_pins }}; private ones only to those who can see them.</p>
+{% if choices.is_empty() %}
+<p class="empty">No repositories to pin yet.</p>
+{% else %}
+<form method="post" action="{{ base }}/pins" class="form">
+  <div class="pin-choices">
+    {% for c in choices %}<label class="check"><input type="checkbox" name="repo" value="{{ c.id }}"{% if c.pinned %} checked{% endif %}> {{ c.name }}{% if c.is_private %} <span class="badge">Private</span>{% endif %}</label>{% endfor %}
+  </div>
+  <button class="btn btn-primary">Save pins</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -169,7 +169,7 @@ impl Core {
         self.wiki_path(repo_id).is_dir()
     }
 
-    async fn ensure_wiki(&self, repo_id: i64) -> Result<()> {
+    pub(crate) async fn ensure_wiki(&self, repo_id: i64) -> Result<()> {
         let path = self.wiki_path(repo_id);
         tokio::task::spawn_blocking(move || match keel_git::create_bare(&path, WIKI_BRANCH) {
             // Someone else just created it.
@@ -367,7 +367,7 @@ impl Core {
 
     /// Maintenance, the activity feed and `gollum` webhooks after the wiki
     /// changed. Failures are logged: the change itself happened.
-    async fn after_wiki_change(&self, repo: &Repo, actor: Option<i64>, changes: Vec<WikiChange>) {
+    pub(crate) async fn after_wiki_change(&self, repo: &Repo, actor: Option<i64>, changes: Vec<WikiChange>) {
         let path = self.wiki_path(repo.id);
         tokio::spawn(async move {
             if let Ok(Err(e)) = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&path)).await {

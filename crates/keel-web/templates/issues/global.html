@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{% if pulls %}Pull requests{% else %}Issues{% endif %}</h1>
+{% if !tabs.is_empty() %}
+<nav class="tabs profile-tabs">
+  {% for (label, url, active) in tabs %}<a href="{{ url }}"{% if *active %} class="active"{% endif %}>{{ label }}</a>{% endfor %}
+</nav>
+{% endif %}
+{% let q = res.q.as_str() %}
+{% include "issues/search_form.html" %}
+{% include "issues/results.html" %}
+{% endblock %}

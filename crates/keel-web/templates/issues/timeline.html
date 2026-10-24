@@ -3,7 +3,7 @@
   {% if item.kind == "comment" || item.kind == "description" %}
   <div class="box comment" id="{% if item.kind == "description" %}description{% else %}comment-{{ item.id }}{% endif %}">
     <div class="box-head comment-head">
-      <span><strong><a href="/{{ item.author }}">{{ item.author }}</a></strong> <span class="muted">{% if item.kind == "description" %}opened{% else %}commented{% endif %} <a class="muted" href="#{% if item.kind == "description" %}description{% else %}comment-{{ item.id }}{% endif %}"><time title="{{ item.when_full }}">{{ item.when }}</time></a>{% if item.edited %} · edited{% endif %}</span></span>
+      <span><a href="{{ item.author_url }}" tabindex="-1" aria-hidden="true"><img class="avatar" src="{{ item.avatar_url }}" width="20" height="20" alt=""></a><strong><a href="{{ item.author_url }}"{% if item.imported %} rel="nofollow noopener noreferrer"{% endif %}>{{ item.author }}</a></strong>{% if item.imported %} <span class="badge" title="Imported along with the repository; {{ item.author }} has no account here">imported</span>{% endif %} <span class="muted">{% if item.kind == "description" %}opened{% else %}commented{% endif %} <a class="muted" href="#{% if item.kind == "description" %}description{% else %}comment-{{ item.id }}{% endif %}"><time title="{{ item.when_full }}">{{ item.when }}</time></a>{% if item.edited %} · edited{% endif %}</span></span>
       <span class="spacer"></span>
       {% if item.can_edit %}<a class="btn btn-small" href="{{ item.edit_url }}">Edit</a>{% endif %}
       {% if let Some(d) = item.delete_url %}<form method="post" action="{{ d }}" class="inline"><button class="btn btn-small btn-danger">Delete</button></form>{% endif %}

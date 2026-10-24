@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="narrow">
+  <h1>Import a repository</h1>
+  <p class="muted">From GitHub, Gitea or Forgejo (like Codeberg): the code with all branches and tags, Git LFS files, and what you choose below. It keeps running in the background; the repository shows how far it got.</p>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/new/import" class="form">
+    <label>Repository to import <input name="url" value="{{ url }}" placeholder="https://github.com/owner/name" required autofocus></label>
+    <label>Access token <span class="hint">(optional) Needed for private repositories, and on GitHub for anything but small ones: without one, GitHub allows only 60 requests an hour. It's only used for this import.</span>
+      <input name="token" type="password" autocomplete="off"></label>
+    <label>Name here
+      <span class="prefixed">
+        {% if owners.len() > 1 %}
+        <select name="owner" aria-label="Owner" class="owner-select">
+          {% for o in owners %}<option value="{{ o }}"{% if *o == owner %} selected{% endif %}>{{ o }}</option>{% endfor %}
+        </select>
+        {% else %}
+        <span class="prefix">{{ owner }}</span><input type="hidden" name="owner" value="{{ owner }}">
+        {% endif %}
+        <span class="prefix">/</span>
+        <input name="name" value="{{ name }}" maxlength="100" pattern="[A-Za-z0-9._\-]*" placeholder="the same as there">
+      </span>
+    </label>
+    <label>Description <span class="hint">(optional)</span> <input name="description" value="{{ description }}"></label>
+    <label class="check"><input type="checkbox" name="private"{% if is_private %} checked{% endif %}> Private</label>
+    <fieldset class="commit-box">
+      <legend>Also import</legend>
+      <label class="check"><input type="checkbox" name="issues"{% if issues %} checked{% endif %}> Issues and pull requests <span class="hint">with labels, milestones, comments and reviews; numbers stay the same</span></label>
+      <label class="check"><input type="checkbox" name="releases"{% if releases %} checked{% endif %}> Releases <span class="hint">with their files</span></label>
+      <label class="check"><input type="checkbox" name="wiki"{% if wiki %} checked{% endif %}> Wiki</label>
+    </fieldset>
+    <p class="hint">People who wrote issues and comments there are shown with their names and linked to their profiles there; nobody gets notified.</p>
+    <button class="btn btn-primary">Start importing</button>
+  </form>
+</div>
+{% endblock %}

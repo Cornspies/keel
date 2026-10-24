@@ -1,0 +1,14 @@
+<form method="get" action="{{ action }}" class="form form-inline issue-search" role="search">
+  <input type="search" name="q" value="{{ q }}" placeholder="is:open label:bug author:@me crash" aria-label="Search with qualifiers like is:open, label:, author:">
+  <button class="btn">Search</button>
+  <details class="dropdown dropdown-right search-help">
+    <summary class="btn btn-small" aria-label="Search help">?</summary>
+    <div class="dropdown-menu dropdown-wide small">
+      <p><span class="mono">is:open</span>, <span class="mono">is:closed</span>, <span class="mono">is:merged</span>, <span class="mono">is:issue</span>, <span class="mono">is:pr</span></p>
+      <p><span class="mono">label:bug</span>, <span class="mono">-label:wontfix</span>, <span class="mono">no:label</span>, <span class="mono">milestone:"v1.0"</span></p>
+      <p><span class="mono">author:</span>, <span class="mono">assignee:</span>, <span class="mono">review-requested:</span>, <span class="mono">involves:</span> with a name or <span class="mono">@me</span></p>
+      <p><span class="mono">repo:owner/name</span>, <span class="mono">user:name</span>, <span class="mono">sort:updated</span>, <span class="mono">sort:comments</span>, <span class="mono">sort:created-asc</span></p>
+      <p class="muted">Other words are looked for in titles and descriptions.</p>
+    </div>
+  </details>
+</form>

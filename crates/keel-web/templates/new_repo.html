@@ -2,6 +2,7 @@
 {% block content %}
 <div class="narrow">
   <h1>New repository</h1>
+  <p class="muted">Moving a project from GitHub or Gitea? <a href="/new/import">Import it</a> with its issues, pull requests and releases.</p>
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/new" class="form">
     <label>Name

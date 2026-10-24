@@ -376,6 +376,7 @@ impl Core {
             "login": u.username,
             "type": if u.is_org() { "Organization" } else { "User" },
             "html_url": format!("{}/{}", self.config.base_url, u.username),
+            "avatar_url": format!("{}/avatars/{}?v={}", self.config.base_url, u.username, u.avatar_version),
         })
     }
 
@@ -388,7 +389,11 @@ impl Core {
 
     fn login_json(&self, name: Option<&str>) -> Value {
         match name {
-            Some(name) => json!({ "login": name, "html_url": format!("{}/{name}", self.config.base_url) }),
+            Some(name) => json!({
+                "login": name,
+                "html_url": format!("{}/{name}", self.config.base_url),
+                "avatar_url": format!("{}/avatars/{name}", self.config.base_url),
+            }),
             None => json!({ "login": "ghost" }),
         }
     }

@@ -49,8 +49,12 @@ macro_rules! visible_to {
     };
 }
 
+mod issue_search;
+mod pins;
 mod stars;
 mod topics;
+pub use issue_search::{IssueHit, IssueQuery, IssueSort, StateFilter};
+pub use pins::MAX_PINS;
 pub use stars::Stargazer;
 pub use topics::{ExploreQuery, ExploreSort, MAX_TOPICS, parse_topics};
 

@@ -85,6 +85,7 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     }
     let lfs_objects = copy_files(&data_dir.join("lfs"), &out.join("lfs"))?;
     let release_files = copy_files(&data_dir.join("releases"), &out.join("releases"))?;
+    copy_files(&data_dir.join("avatars"), &out.join("avatars"))?;
 
     Ok(BackupReport { repos, wikis, skipped, lfs_objects, release_files, bytes: dir_size(out)?, took: started.elapsed() })
 }

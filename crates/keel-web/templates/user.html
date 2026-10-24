@@ -1,11 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="profile">
-  <h1>{{ username }}</h1>
-  <p class="muted">Joined {{ joined }}</p>
-  {% if !orgs.is_empty() %}
-  <p class="org-list"><span class="muted">Organizations:</span> {% for o in orgs %}<a class="badge" href="/{{ o }}">{{ o }}</a> {% endfor %}</p>
-  {% endif %}
+<div class="profile profile-head">
+  <img class="avatar avatar-large" src="/avatars/{{ username }}?v={{ avatar_version }}" width="96" height="96" alt="">
+  <div>
+    <h1>{{ username }}</h1>
+    <p class="muted">Joined {{ joined }}{% if is_self %} · <a href="/settings/profile">Edit profile</a>{% endif %}</p>
+    {% if !orgs.is_empty() %}
+    <p class="org-list"><span class="muted">Organizations:</span> {% for o in orgs %}<a class="badge" href="/{{ o }}"><img class="avatar" src="/avatars/{{ o }}" width="14" height="14" alt=""> {{ o }}</a> {% endfor %}</p>
+    {% endif %}
+  </div>
 </div>
 <nav class="tabs profile-tabs">
   <a href="/{{ username }}"{% if !stars_tab %} class="active"{% endif %}>Repositories <span class="count">{{ repo_count }}</span></a>
@@ -22,6 +25,10 @@
   {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
 </div>
 {% else %}
+{% if !pinned.is_empty() %}
+<h2 class="pinned-title">Pinned</h2>
+<ul class="pinned">{% for r in pinned %}<li class="box pinned-card">{% include "pinned_card.html" %}</li>{% endfor %}</ul>
+{% endif %}
 {% if is_self %}<div class="section-head profile-actions"><span></span><a class="btn btn-small" href="/new">New</a></div>{% endif %}
 {% if repos.is_empty() %}
 <p class="empty">No repositories yet.</p>

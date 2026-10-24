@@ -918,6 +918,126 @@ check "and on comments" is "$(curl -s "$API/repos/ada/engine/issues/$RI/comments
 RR=$(curl -s "$API/repos/ada/engine/issues/$RI/reactions" | field '[0]["id"]')
 check "delete your reaction" is "$(api_status "$RW" DELETE "/repos/ada/engine/issues/$RI/reactions/$RR")" 204
 
+echo "== issue search"
+check "search a repository's issues" contains "$(curl -s "$B/ada/engine/issues?q=hook")" "Hook me"
+check "with qualifiers" contains "$(curl -s "$B/ada/engine/issues?q=is:open+author:bob+hook")" "Hook me"
+check "that narrow it down" contains "$(curl -s "$B/ada/engine/issues?q=author:ada+hook")" "Nothing matches"
+check "across repositories" contains "$(curl -s "$B/issues?q=is:issue+hook")" 'issue-repo" href="/ada/engine"'
+check "your issues" contains "$(curl -s -b "$T/bob" "$B/issues")" "Hook me"
+check "search issues with the API" is "$(curl -s "$API/search/issues?q=hook+repo:ada/engine" | field '["items"][0]["title"]')" "Hook me"
+check "private issues stay private" is "$(curl -s "$API/search/issues?q=repo:ada/secret" | field '["total_count"]')" 0
+
+echo "== avatars and pins"
+check "a generated avatar" is "$(curl -s -o /dev/null -w '%{content_type}' "$B/avatars/ada")" "image/svg+xml"
+printf '\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1' >"$T/a.png"
+check "upload a picture" is "$(curl -s -o /dev/null -w '%{http_code}' -b "$T/ada" -H "$O" -F "avatar=@$T/a.png;type=image/png" "$B/settings/profile/avatar")" 303
+check "it's served" is "$(curl -s "$B/avatars/ada" | cmp - "$T/a.png" && echo same)" same
+ETAG=$(curl -s -D - -o /dev/null "$B/avatars/ada" | grep -i '^etag' | cut -d' ' -f2 | tr -d '\r')
+check "and cached" is "$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $ETAG" "$B/avatars/ada")" 304
+check "only images" contains "$(curl -s -b "$T/ada" -H "$O" -F "avatar=@$T/large.txt" "$B/settings/profile/avatar")" "must be PNG"
+check "remove it" is "$(post "$T/ada" /settings/profile/avatar/delete x=1)" 303
+check "the pattern is back" is "$(curl -s -o /dev/null -w '%{content_type}' "$B/avatars/ada")" "image/svg+xml"
+EID=$(curl -s "$API/repos/ada/engine" | field '["id"]')
+SID=$(curl -s -b "$T/ada" "$B/settings/profile" | grep -o 'value="[0-9]*"> secret' | grep -o '[0-9]*')
+check "pin repositories" is "$(post "$T/ada" /settings/profile/pins "repo=$SID" "repo=$EID")" 303
+check "the profile shows them" contains "$(curl -s -b "$T/ada" "$B/ada")" 'pinned-card"><a class="repo-link" href="/ada/secret"'
+check "private ones only to those who can see them" bash -c "curl -s -b '$T/eve2' '$B/ada' | grep -q 'pinned-card\"><a class=\"repo-link\" href=\"/ada/engine\"' && ! curl -s -b '$T/eve2' '$B/ada' | grep -q 'href=\"/ada/secret\"'"
+check "at most six" contains "$(curl -s -b "$T/ada" -H "$O" -d "repo=1&repo=2&repo=3&repo=4&repo=5&repo=6&repo=7" "$B/settings/profile/pins")" "At most 6"
+check "organizations have pictures too" is "$(status -b "$T/ada" "$B/org/acme/settings/profile")" 200
+
+echo "== importing"
+GITEA_PORT=$((HTTP_PORT + 5))
+SRC_MAIN=$(git ls-remote "$B/ada/engine.git" refs/heads/main | cut -f1)
+python3 - "$GITEA_PORT" "$HTTP_PORT" "$SRC_MAIN" <<'PY' &
+import http.client, http.server, json, sys
+port, keel, sha = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+web = f"http://127.0.0.1:{port}"
+user = lambda login: {"login": login, "html_url": f"{web}/{login}"}
+t = "2024-01-02T03:04:05Z"
+api = {
+    "labels": [{"name": "bug", "color": "ee0701", "description": "Broken"}, {"name": "perf", "color": "0075ca", "description": ""}],
+    "milestones": [{"title": "v2", "description": "", "state": "open", "due_on": None, "created_at": t}],
+    "pulls": [{"number": 2, "title": "Faster start", "body": "Speeds it up", "state": "closed", "user": user("octo"),
+               "created_at": t, "updated_at": t, "closed_at": t, "merged_at": t, "merge_commit_sha": sha,
+               "base": {"ref": "main"}, "head": {"ref": "fast", "sha": sha}, "labels": [{"name": "perf"}]}],
+    "issues": [{"number": 1, "title": "Crash on start", "body": "It crashes", "state": "open", "user": user("octo"),
+                "created_at": t, "updated_at": t, "labels": [{"name": "bug"}], "milestone": {"title": "v2"}, "pull_request": None}],
+    "issues/comments": [{"issue_url": f"{web}/octo/engine/issues/1", "body": "Same here", "user": user("hubot"), "created_at": t}],
+    "pulls/2/reviews": [{"state": "APPROVED", "body": "Nice", "user": user("hubot"), "submitted_at": t, "commit_id": sha}],
+    "releases": [{"tag_name": "v1.0", "name": "Imported release", "body": "Notes", "draft": False, "prerelease": False,
+                  "author": user("octo"), "created_at": t, "published_at": t,
+                  "assets": [{"id": 1, "name": "notes.txt", "size": 5, "content_type": "text/plain",
+                              "browser_download_url": f"{web}/dl/notes.txt"}]}],
+}
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def reply(self, code, body, kind="application/json"):
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def proxy(self):
+        # git (and Git LFS) go to keel's ada/engine.
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        path = self.path.replace("/octo/engine", "/ada/engine", 1)
+        c = http.client.HTTPConnection("127.0.0.1", keel)
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
+        c.request(self.command, path, body=body, headers=headers)
+        r = c.getresponse()
+        data = r.read()
+        self.send_response(r.status)
+        for k, v in r.getheaders():
+            if k.lower() not in ("transfer-encoding", "content-length", "connection"):
+                self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        prefix = "/api/v1/repos/octo/engine/"
+        if path.startswith(prefix):
+            key = path[len(prefix):]
+            first = "page=1" in query or "page=" not in query
+            return self.reply(200, json.dumps(api.get(key, []) if first else []).encode())
+        if path == "/dl/notes.txt":
+            return self.reply(200, b"hello", "text/plain")
+        self.proxy()
+    do_POST = proxy
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+GITEA_PID=$!
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$GITEA_PORT/api/v1/repos/octo/engine/labels" && break; sleep 0.1; done
+check "the import page" contains "$(curl -s -b "$T/ada" "$B/new/import")" "Import a repository"
+check "only from real addresses" contains "$(curl -s -b "$T/ada" -H "$O" -d "url=not a url" "$B/new/import")" "flash-error"
+check "start an import" is "$(post "$T/ada" /new/import "url=http://127.0.0.1:$GITEA_PORT/octo/engine" name=imported issues=on releases=on wiki=on)" 303
+imported() { for _ in $(seq 1 300); do s=$(curl -s "$API/repos/ada/imported/import" | field '["status"]' 2>/dev/null); [ "$s" = done ] || [ "$s" = failed ] && break; sleep 0.1; done; curl -s -H "Authorization: Bearer $RW" "$API/repos/ada/imported/import"; }
+IMPORT=$(imported)
+check "it finishes" is "$(field '["status"]' <<<"$IMPORT")" done
+check "without problems" is "$(field '["error"]' <<<"$IMPORT")" None
+check "with the branches" is "$(git ls-remote "$B/ada/imported.git" refs/heads/main | cut -f1)" "$SRC_MAIN"
+check "and Git LFS files" lfs_arrived imported
+IISSUE=$(curl -s "$B/ada/imported/issues/1")
+check "issues keep their numbers" contains "$IISSUE" "Crash on start"
+check "authors link to where they are" contains "$IISSUE" "href=\"http://127.0.0.1:$GITEA_PORT/octo\""
+check "comments come along" contains "$IISSUE" "Same here"
+check "marked as imported" contains "$IISSUE" ">imported</span>"
+check "with labels" contains "$IISSUE" '>bug</a>'
+check "and milestones" contains "$IISSUE" "v2"
+IPULL=$(curl -s "$B/ada/imported/pull/2")
+check "pull requests too" contains "$IPULL" "Faster start"
+check "merged ones stay merged" contains "$IPULL" "state-merged"
+check "with reviews" contains "$IPULL" "approved these changes"
+check "releases" contains "$(curl -s "$B/ada/imported/releases")" "Imported release"
+check "with their files" is "$(curl -s "$B/ada/imported/releases/download/v1.0/notes.txt")" hello
+check "and the wiki" contains "$(curl -s "$B/ada/imported/wiki")" "Welcome to the"
+check "new issues continue the numbering" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d "title=After the import" "$B/ada/imported/issues")" "$B/ada/imported/issues/3"
+check "nobody was notified" bash -c "! curl -s -b '$T/ada' '$B/notifications' | grep -q 'Crash on start'"
+check "imports with the API" is "$(api_status "$RW" POST /repos/migrate -d "{\"clone_addr\":\"http://127.0.0.1:$GITEA_PORT/octo/engine\",\"repo_name\":\"imported2\",\"issues\":false,\"releases\":false,\"wiki\":false}")" 201
+kill "$GITEA_PID" 2>/dev/null
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -928,6 +1048,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens \
     /explore "/explore?sort=name&page=2" /ada/engine/stargazers "/ada?tab=stars" /ada/tracker/issues/new /ada/tracker/new/main/docs \
     /ada/tracker/upload/main /ada/tracker/edit/main/docs/README.md /ada/tracker/delete/main/docs/README.md \
+    /issues /pulls "/pulls?q=is:pr" "/ada/engine/pulls?q=is:closed" /settings/profile /new/import /ada/imported /ada/imported/pulls?q=is:merged \
     /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done

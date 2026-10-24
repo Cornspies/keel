@@ -58,7 +58,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/statuses/{sha}", get(statuses).post(create_status))
         .route("/api/v1/repos/{owner}/{repo}/transfer", post(transfer))
         .route("/api/v1/repos/{owner}/{repo}/topics", get(topics).put(set_topics))
+        .route("/api/v1/repos/migrate", post(migrate))
+        .route("/api/v1/repos/{owner}/{repo}/import", get(import_status))
         .route("/api/v1/search/repositories", get(search_repos))
+        .route("/api/v1/search/issues", get(search_issues))
         .route("/api/v1/repos/{owner}/{repo}/releases", get(list_releases).post(create_release))
         .route("/api/v1/repos/{owner}/{repo}/releases/latest", get(latest_release))
         .route("/api/v1/repos/{owner}/{repo}/releases/tags/{*tag}", get(release_by_tag))
@@ -456,6 +459,63 @@ async fn create_org_repo(
     let user = caller.writer()?;
     let org = state.core.user_by_name(&org).await?.filter(User::is_org).ok_or_else(not_found_error)?;
     create_repo_in(&state, user, &org, body).await
+}
+
+/// Like Gitea's `POST /repos/migrate`: imports a repository from GitHub or
+/// Gitea in the background.
+#[derive(Deserialize)]
+pub struct Migrate {
+    clone_addr: String,
+    #[serde(default)]
+    auth_token: String,
+    /// You (the default) or an organization you can create repositories in.
+    repo_owner: Option<String>,
+    repo_name: Option<String>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    private: bool,
+    #[serde(default = "yes")]
+    issues: bool,
+    #[serde(default = "yes")]
+    releases: bool,
+    #[serde(default = "yes")]
+    wiki: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn migrate(State(state): State<AppState>, caller: Caller, Body(body): Body<Migrate>) -> ApiResult {
+    let user = caller.writer()?;
+    let owner = match body.repo_owner.as_deref() {
+        Some(name) if !name.eq_ignore_ascii_case(&user.username) => state.core.user_by_name(name).await?.ok_or_else(not_found_error)?,
+        _ => user.clone(),
+    };
+    if !state.core.can_create_repo_in(&owner, user).await? {
+        return Err(error(StatusCode::FORBIDDEN, format!("You can't create repositories in {}", owner.username)));
+    }
+    let source = keel_core::import_source(&body.clone_addr)?;
+    let name = body.repo_name.clone().unwrap_or_else(|| source.name.clone());
+    let options = keel_core::ImportOptions { issues: body.issues, releases: body.releases, wiki: body.wiki };
+    let r = state.core.create_import(&owner, user, &name, &body.description, body.private, &source, &body.auth_token, options).await?;
+    state.core.set_watching(user.id, r.id, true).await?;
+    Ok((StatusCode::CREATED, Json(repo_value(&state, &r).await?)).into_response())
+}
+
+/// How an import is going: `queued`, `running`, `done` or `failed`.
+async fn import_status(State(state): State<AppState>, caller: Caller, Path((owner, name)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    let i = state.core.import(r.id).await?.ok_or_else(not_found_error)?;
+    Ok(Json(json!({
+        "status": i.status,
+        "progress": i.progress,
+        "source": i.url,
+        "error": i.error.filter(|_| access >= Access::Write),
+        "started_at": json_time(i.created_at),
+        "finished_at": i.finished_at.map_or(Value::Null, json_time),
+    })))
 }
 
 async fn repo(
@@ -1160,6 +1220,46 @@ async fn create_comment(
     let id = state.core.add_comment(&i, user, &body.body).await?;
     let c = state.core.comment(i.id, id).await?.ok_or_else(not_found_error)?;
     Ok((StatusCode::CREATED, Json(state.core.comment_json(&r, &i, &c))).into_response())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct IssueSearch {
+    /// Qualifiers and words, as on the web.
+    q: String,
+    /// `created` (default), `updated` or `comments`.
+    sort: Option<String>,
+    /// `desc` (default) or `asc`.
+    order: Option<String>,
+    #[serde(flatten)]
+    paging: Paging,
+}
+
+/// Like GitHub's `GET /search/issues`, over everything the caller can read.
+async fn search_issues(State(state): State<AppState>, caller: Caller, Q(s): Q<IssueSearch>) -> ApiResult<Json<Value>> {
+    let viewer = caller.user.as_ref();
+    let mut q = keel_core::IssueQuery::parse(&s.q, viewer.map(|v| v.username.as_str()));
+    if let Some(sort) = &s.sort {
+        let order = s.order.as_deref().unwrap_or("desc");
+        q.sort = keel_core::IssueSort::parse(&format!("{sort}-{order}"))
+            .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, "sort is created, updated or comments; order asc or desc"))?;
+    }
+    let (hits, total) = state.core.search_issues(viewer, None, &q, s.paging.offset(), s.paging.per_page()).await?;
+    let mut repos: std::collections::HashMap<i64, Repo> = Default::default();
+    let mut items = Vec::with_capacity(hits.len());
+    for h in &hits {
+        if !repos.contains_key(&h.issue.repo_id)
+            && let Some(r) = state.core.repo_by_id(h.issue.repo_id).await?
+        {
+            repos.insert(r.id, r);
+        }
+        if let Some(r) = repos.get(&h.issue.repo_id) {
+            let mut v = state.core.issue_json(r, &h.issue).await?;
+            v["repository_url"] = json!(format!("{}/api/v1/repos/{}/{}", state.core.config.base_url, r.owner, r.name));
+            items.push(v);
+        }
+    }
+    Ok(Json(json!({ "total_count": total, "incomplete_results": false, "items": items })))
 }
 
 // ---------------------------------------------------------------------------

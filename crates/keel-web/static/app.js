@@ -137,3 +137,7 @@ document.addEventListener("submit", (event) => {
       form.submit();
     });
 });
+
+// Pages that show work in progress (like an import) reload until it's done.
+const refresh = document.querySelector("[data-refresh]");
+if (refresh) setTimeout(() => location.reload(), Number(refresh.dataset.refresh) * 1000);

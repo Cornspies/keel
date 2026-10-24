@@ -1,0 +1,13 @@
+<ul class="card-list issue-list">
+  {% for r in rows %}
+  <li class="card-row">
+    <span class="state-icon state-{{ r.state }}" title="{{ r.state }}" aria-label="{{ r.state }}"></span>
+    <div class="issue-main">
+      {% if !r.repo.is_empty() %}<a class="muted issue-repo" href="/{{ r.repo }}">{{ r.repo }}</a> {% endif %}<a class="issue-title" href="{{ r.url }}">{{ r.title }}</a>{% if !r.status.is_empty() %} {{ r.status|safe }}{% endif %}
+      {% for l in r.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}
+      <div class="muted small">#{{ r.number }} opened <time title="{{ r.opened_full }}">{{ r.opened }}</time> by {{ r.author }}{% if !r.assignees.is_empty() %} · assigned to {{ r.assignees.join(", ") }}{% endif %}</div>
+    </div>
+    {% if r.comments > 0 %}<a class="muted small nowrap" href="{{ r.url }}">{{ r.comments }} {% if r.comments == 1 %}comment{% else %}comments{% endif %}</a>{% endif %}
+  </li>
+  {% endfor %}
+</ul>

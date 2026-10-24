@@ -18,6 +18,8 @@ pub(crate) struct EventView {
     /// Comments: the start of what was said.
     pub excerpt: String,
     pub id: i64,
+    /// Who did it ("ghost" for deleted accounts).
+    pub actor: String,
 }
 
 fn link(url: &str, text: &str) -> String {
@@ -130,6 +132,7 @@ pub(crate) fn view(e: &Event) -> EventView {
         commits,
         excerpt: d["excerpt"].as_str().unwrap_or_default().to_owned(),
         id: e.id,
+        actor,
     }
 }
 

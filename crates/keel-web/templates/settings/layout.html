@@ -1,14 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="settings">
+  {% if nav != "org" %}
   <nav class="side-nav" aria-label="Settings">
     <div class="menu-title">Settings</div>
+    <a href="/settings/profile"{% if nav == "profile" %} class="active"{% endif %}>Profile</a>
     <a href="/settings/account"{% if nav == "account" %} class="active"{% endif %}>Account</a>
     <a href="/settings/security"{% if nav == "security" %} class="active"{% endif %}>Two-factor auth</a>
     <a href="/settings/notifications"{% if nav == "notifications" %} class="active"{% endif %}>Notifications</a>
     <a href="/settings/keys"{% if nav == "keys" %} class="active"{% endif %}>SSH keys</a>
     <a href="/settings/tokens"{% if nav == "tokens" %} class="active"{% endif %}>Access tokens</a>
   </nav>
+  {% endif %}
   <div class="settings-main">
   {% block settings %}{% endblock %}
   </div>

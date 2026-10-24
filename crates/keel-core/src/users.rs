@@ -25,6 +25,10 @@ pub struct User {
     pub disabled: bool,
     /// Signing in needs a code from an authenticator app too.
     pub totp_enabled: bool,
+    /// The uploaded avatar's content type; `None` for a generated one.
+    pub avatar_type: Option<String>,
+    /// Changes with every new avatar, to bust caches.
+    pub avatar_version: i64,
 }
 
 impl User {
@@ -229,7 +233,8 @@ impl Core {
         Ok(sqlx::query_as::<_, User>(
             "SELECT u.id, u.username, COALESCE(u.email, '') AS email, u.password_hash, u.is_admin,
                 u.kind, u.created_at, u.email_verified_at IS NOT NULL AS email_verified, u.email_notifications,
-                u.disabled_at IS NOT NULL AS disabled, u.totp_secret IS NOT NULL AS totp_enabled
+                u.disabled_at IS NOT NULL AS disabled, u.totp_secret IS NOT NULL AS totp_enabled,
+                u.avatar_type, u.avatar_version
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.disabled_at IS NULL",
         )
