@@ -83,11 +83,14 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     }
 
     // 3. The SSH host key (so clients don't see a changed key after a
-    // restore) and large files.
-    let key = data_dir.join("ssh_host_ed25519_key");
-    if key.is_file() {
-        std::fs::copy(&key, out.join("ssh_host_ed25519_key"))?;
-        private(&out.join("ssh_host_ed25519_key"), 0o600)?;
+    // restore), the commit signing key (so commits keel signed stay
+    // verified) and large files.
+    for name in ["ssh_host_ed25519_key", crate::signing::KEY_FILE] {
+        let key = data_dir.join(name);
+        if key.is_file() {
+            std::fs::copy(&key, out.join(name))?;
+            private(&out.join(name), 0o600)?;
+        }
     }
     let lfs_objects = copy_files(&data_dir.join("lfs"), &out.join("lfs"))?;
     let release_files = copy_files(&data_dir.join("releases"), &out.join("releases"))?;
@@ -197,6 +200,7 @@ mod tests {
         assert_eq!(restored.issue(r.id, 1).await.unwrap().unwrap().title, "Kept");
         assert!(keel_git::GitRepo::open(&restored.repo_path(&r)).is_ok());
         assert!(restored.authenticate("ada", "password1").await.unwrap().is_some());
+        assert_eq!(restored.signing_public_key(), core.signing_public_key(), "the same signing key");
         assert_eq!(restored.wiki_page(r.id, "Home", None).await.unwrap().unwrap().text, "Hi");
     }
 }

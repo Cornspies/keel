@@ -303,7 +303,7 @@ impl Core {
         };
         let suggester = comment.author.clone().unwrap_or_else(|| "ghost".into());
         let message = format!("Apply suggestion from code review\n\nSuggested by @{suggester} in #{}.", issue.number);
-        let (name, email) = (user.username.clone(), user.email.clone());
+        let (name, email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let branch = pull.head_ref.clone();
         let before = self.ref_snapshot(head_repo.id).await?;
         let edited = self
@@ -312,7 +312,7 @@ impl Core {
                     return Ok(Err("The branch of this pull request no longer exists."));
                 };
                 let mut outdated = false;
-                let who = Identity { name: &name, email: &email };
+                let who = Identity::new(&name, &email).signed_by(&*signer);
                 let result = g.commit_file_edit(&branch, tip, &path, &message, &who, |text, id| {
                     let text = std::str::from_utf8(text).ok().filter(|_| id.to_string() == blob);
                     match text.and_then(|t| replace_line(t, line as usize, &replacement)) {

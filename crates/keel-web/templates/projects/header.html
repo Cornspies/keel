@@ -1,0 +1,8 @@
+{% if let Some(repo) = home.repo %}
+{% include "repo/header.html" %}
+{% else if let Some((org, avatar_version)) = home.org %}
+<div class="section-head">
+  <h1 class="org-boards-title"><a href="/{{ org }}"><img class="avatar" src="/avatars/{{ org }}?v={{ avatar_version }}" width="32" height="32" alt=""> {{ org }}</a> <span class="muted">/</span> <a href="{{ home.url }}">Projects</a></h1>
+</div>
+<p class="muted small">Boards of the organization, with issues and pull requests from any of its repositories. Only its members see them.</p>
+{% endif %}

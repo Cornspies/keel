@@ -173,8 +173,12 @@ pub(crate) struct TimelineItem {
     /// For `assigned`/`unassigned`, `review_requested`/`review_request_removed`:
     /// who; for `milestoned`/`demilestoned`: the milestone.
     pub target: String,
-    /// For milestone events: the milestone's issues.
+    /// For milestone events: the milestone's issues; for board events, the
+    /// board.
     pub target_url: String,
+    /// For board events: the column, and the one it moved from.
+    pub column: String,
+    pub from_column: String,
     pub reactions: ReactionsView,
 }
 
@@ -201,7 +205,9 @@ pub(crate) struct Conversation {
     /// Open boards it's on: title, column and URL.
     pub projects: Vec<(String, String, String)>,
     /// Open boards it could be added to: number and title.
-    pub project_choices: Vec<(i64, String)>,
+    /// Boards to add it to: the form value (`12`, or `org:12` for the
+    /// organization's), and the name.
+    pub project_choices: Vec<(String, String)>,
     /// The repository is archived, so nobody can comment.
     pub archived: bool,
     /// Author or a writer.
@@ -234,7 +240,9 @@ pub(crate) struct Conversation {
 pub(crate) struct Renderer {
     blob: String,
     raw: String,
-    repo_url: String,
+    /// `None` outside a repository (organization boards): `#123` stays
+    /// text.
+    repo_url: Option<String>,
 }
 
 impl Renderer {
@@ -244,13 +252,21 @@ impl Renderer {
         Ok(Self {
             blob: format!("{repo_url}/blob/{}", encode_path(&branch)),
             raw: format!("{repo_url}/raw/{}", encode_path(&branch)),
-            repo_url,
+            repo_url: Some(repo_url),
         })
+    }
+
+    /// For Markdown that doesn't belong to a repository.
+    pub(crate) fn plain() -> Self {
+        Self { blob: String::new(), raw: String::new(), repo_url: None }
     }
 
     pub(crate) fn render(&self, body: &str) -> String {
         let links = LinkBase { blob: &self.blob, raw: &self.raw, dir: "" };
-        markdown_with_refs(body, &links, &self.repo_url)
+        match &self.repo_url {
+            Some(repo_url) => markdown_with_refs(body, &links, repo_url),
+            None => crate::render::markdown(body, &links),
+        }
     }
 }
 
@@ -317,8 +333,16 @@ pub(crate) async fn conversation(
         label: None,
         target: String::new(),
         target_url: String::new(),
+        column: String::new(),
+        from_column: String::new(),
         reactions: reactions.view(None),
     }];
+    // The organization's boards are for its members.
+    let org = state.core.user_by_id(repo.owner_id).await?.filter(keel_core::User::is_org);
+    let org_boards = match &org {
+        Some(org) => state.core.org_board_access(org, viewer).await?,
+        None => Access::None,
+    };
     let comments = state.core.comments(issue.id).await?;
     let can_apply = crate::pulls::viewer_can_apply(state, repo, issue, viewer).await?;
     let mut threads: HashMap<i64, ThreadView> = inline_threads(repo, issue, &comments, viewer, access, can_apply, &render, &reactions)
@@ -332,9 +356,23 @@ pub(crate) async fn conversation(
         if c.kind == "inline" && c.reply_to.is_some() {
             continue; // Shown in its thread.
         }
+        let board = matches!(c.kind.as_str(), "added_to_project" | "moved_columns_in_project" | "removed_from_project")
+            .then(|| serde_json::from_str::<serde_json::Value>(&c.body).unwrap_or_default());
+        let board_org = board.as_ref().and_then(|b| b["org"].as_str().map(str::to_owned));
+        if board_org.is_some() && org_boards < Access::Read {
+            continue;
+        }
         let mine = viewer.is_some_and(|v| c.author_id == Some(v.id));
         let editable = c.is_editable() && (mine || writer);
         let who = person(&c.author, &c.original_author);
+        let text = |key: &str| board.as_ref().and_then(|b| b[key].as_str()).unwrap_or_default().to_owned();
+        let board_url = board.as_ref().map(|b| {
+            let number = b["number"].as_i64().unwrap_or_default();
+            match &board_org {
+                Some(org) => format!("/org/{org}/projects/{number}"),
+                None => format!("/{}/{}/projects/{number}", repo.owner, repo.name),
+            }
+        });
         timeline.push(TimelineItem {
             id: c.id,
             author: who.name,
@@ -356,10 +394,12 @@ pub(crate) async fn conversation(
             target_url: if matches!(c.kind.as_str(), "milestoned" | "demilestoned") {
                 milestone_url(repo, &c.body, issue.is_pull)
             } else {
-                String::new()
+                board_url.unwrap_or_default()
             },
             reactions: reactions.view(Some(c.id)),
-            target: c.body,
+            column: text("column"),
+            from_column: text("from"),
+            target: if board.is_some() { text("project") } else { c.body },
             kind: c.kind,
         });
     }
@@ -421,17 +461,40 @@ pub(crate) async fn conversation(
     } else {
         Vec::new()
     };
-    let cards = state.core.issue_cards(issue.id).await?;
+    let mut cards = state.core.issue_cards(issue.id).await?;
+    cards.retain(|c| c.org_id.is_none() || org_boards >= Access::Read);
+    let on = |org_id: Option<i64>, number: i64| cards.iter().any(|c| c.org_id == org_id && c.number == number);
     let project_choices = if writer {
-        let mut open = state.core.projects(repo.id, true).await?;
-        open.retain(|p| !cards.iter().any(|c| c.number == p.number));
-        open.into_iter().map(|p| (p.number, p.title)).collect()
+        let mut choices: Vec<(String, String)> = state
+            .core
+            .projects(keel_core::ProjectOwner::Repo(repo.id), true)
+            .await?
+            .into_iter()
+            .filter(|p| !on(None, p.number))
+            .map(|p| (p.number.to_string(), p.title))
+            .collect();
+        if let Some(org) = org.as_ref().filter(|_| org_boards >= Access::Write) {
+            let theirs = state.core.projects(keel_core::ProjectOwner::Org(org.id), true).await?;
+            choices.extend(
+                theirs
+                    .into_iter()
+                    .filter(|p| !on(Some(org.id), p.number))
+                    .map(|p| (format!("org:{}", p.number), format!("{} ({})", p.title, org.username))),
+            );
+        }
+        choices
     } else {
         Vec::new()
     };
     let projects = cards
         .into_iter()
-        .map(|c| (c.title, c.column, format!("/{}/{}/projects/{}", repo.owner, repo.name, c.number)))
+        .map(|c| {
+            let url = match &c.org {
+                Some(org) => format!("/org/{org}/projects/{}", c.number),
+                None => format!("/{}/{}/projects/{}", repo.owner, repo.name, c.number),
+            };
+            (c.title, c.column, url)
+        })
         .collect();
     let milestone = state.core.issue_milestone(issue).await?;
     let milestone_choices = if writer {

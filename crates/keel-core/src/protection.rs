@@ -7,14 +7,26 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
+use keel_git::Oid;
+
 use crate::reviews::Verdict;
-use crate::{Access, Core, Issue, PullRequest, Repo, Result, invalid, now, pull_ref};
+use crate::{Access, Config, Core, Issue, MailConfig, PullRequest, Repo, Result, Verification, invalid, now, pull_ref};
 
 const MAX_RULES: usize = 50;
 
 /// Environment variables the hook gets from the server.
 const RULES_ENV: &str = "KEEL_PROTECTION";
 const EXE_ENV: &str = "KEEL_EXE";
+/// For rules requiring verified commits: the data directory, whose
+/// database the hook reads keys from.
+const DATA_ENV: &str = "KEEL_DATA_DIR";
+/// Set when the server sends no mail, so unverified emails count (see
+/// `commit_authors`).
+const TRUST_EMAILS_ENV: &str = "KEEL_TRUST_EMAILS";
+/// Most commits one push may bring to a branch requiring verified ones.
+const MAX_VERIFY: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BranchRule {
@@ -32,6 +44,10 @@ pub struct BranchRule {
     pub allow_force_push: bool,
     /// Status contexts that must succeed before merging, comma-separated.
     pub required_checks: String,
+    /// Every commit the branch gets must be verified (see `signatures`).
+    /// Commits keel makes are, as it signs them.
+    #[serde(default)]
+    pub require_signed: bool,
 }
 
 impl BranchRule {
@@ -179,7 +195,8 @@ impl MergeCheck {
 impl Core {
     pub async fn branch_rules(&self, repo_id: i64) -> Result<Vec<BranchRule>> {
         Ok(sqlx::query_as(
-            "SELECT id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, required_checks
+            "SELECT id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, required_checks,
+                require_signed
              FROM branch_protections WHERE repo_id = ?1 ORDER BY pattern",
         )
         .bind(repo_id)
@@ -206,8 +223,8 @@ impl Core {
             sqlx::query(
                 "INSERT INTO branch_protections
                     (repo_id, pattern, require_pull, required_approvals, dismiss_stale, allow_force_push, created_at,
-                     required_checks)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     required_checks, require_signed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .bind(repo_id)
             .bind(pattern)
@@ -217,12 +234,13 @@ impl Core {
             .bind(rule.allow_force_push)
             .bind(now())
             .bind(&checks)
+            .bind(rule.require_signed)
             .execute(&self.db)
             .await
         } else {
             sqlx::query(
                 "UPDATE branch_protections SET pattern = ?3, require_pull = ?4, required_approvals = ?5,
-                    dismiss_stale = ?6, allow_force_push = ?7, required_checks = ?8
+                    dismiss_stale = ?6, allow_force_push = ?7, required_checks = ?8, require_signed = ?9
                  WHERE repo_id = ?1 AND id = ?2",
             )
             .bind(repo_id)
@@ -233,6 +251,7 @@ impl Core {
             .bind(rule.dismiss_stale)
             .bind(rule.allow_force_push)
             .bind(&checks)
+            .bind(rule.require_signed)
             .execute(&self.db)
             .await
         };
@@ -320,14 +339,35 @@ impl Core {
         }
         let exe = std::env::current_exe().map_err(anyhow::Error::from)?;
         let hooks = self.config.hooks_dir();
-        Ok(vec![
+        let mut env = vec![
             (RULES_ENV.into(), serde_json::to_string(&rules).map_err(anyhow::Error::from)?),
             (EXE_ENV.into(), exe.to_string_lossy().into_owned()),
             // `-c core.hooksPath=…` as environment (git 2.31+).
             ("GIT_CONFIG_COUNT".into(), "1".into()),
             ("GIT_CONFIG_KEY_0".into(), "core.hooksPath".into()),
             ("GIT_CONFIG_VALUE_0".into(), hooks.to_string_lossy().into_owned()),
-        ])
+        ];
+        if rules.iter().any(|r| r.require_signed) {
+            env.push((DATA_ENV.into(), self.config.data_dir.to_string_lossy().into_owned()));
+            if !self.mail_enabled() {
+                env.push((TRUST_EMAILS_ENV.into(), "1".into()));
+            }
+        }
+        Ok(env)
+    }
+
+    /// Why `branch` (requiring verified commits) can't get the commits
+    /// from `base` to `head`, if it can't: the first ones that aren't
+    /// verified.
+    pub(crate) async fn unverified(&self, repo_id: i64, branch: &str, base: Oid, head: Oid) -> Result<Option<String>> {
+        let ids = self.git(repo_id, move |g| g.commit_ids_between(base, head, MAX_VERIFY + 1)).await?;
+        let signed = self.git(repo_id, {
+            let ids = ids.clone();
+            move |g| g.signed_commits(&ids)
+        })
+        .await?;
+        let found = self.verify_signed(signed).await?;
+        Ok(unverified_message(branch, &ids, &found))
     }
 }
 
@@ -397,6 +437,9 @@ pub fn pre_receive() -> i32 {
     };
     let zero = |id: &str| id.bytes().all(|b| b == b'0');
     let mut refused = false;
+    // Branches requiring verified commits that get new ones: name, old
+    // and new tip.
+    let mut to_verify: Vec<(String, Option<String>, String)> = Vec::new();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { return 1 };
         let mut parts = line.split(' ');
@@ -415,8 +458,90 @@ pub fn pre_receive() -> i32 {
             eprintln!("keel: {why}");
             refused = true;
         }
+        if let (Some(branch), Some(new)) = (name.strip_prefix("refs/heads/"), new)
+            && rule_for(&rules, branch).is_some_and(|r| r.require_signed)
+        {
+            to_verify.push((branch.to_owned(), old.map(str::to_owned), new.to_owned()));
+        }
+    }
+    if !refused && !to_verify.is_empty() {
+        match verify_pushed(&rules, &to_verify) {
+            Ok(problems) => {
+                for why in &problems {
+                    eprintln!("keel: {why}");
+                }
+                refused = !problems.is_empty();
+            }
+            Err(e) => {
+                eprintln!("keel: couldn't check the commits' signatures: {e}");
+                refused = true;
+            }
+        }
     }
     i32::from(refused)
+}
+
+/// For the hook: why the pushed commits can't go to branches requiring
+/// verified ones. A branch gets the commits from its old tip to the new
+/// one; a new branch, those that aren't on any other branch requiring
+/// verified commits yet.
+fn verify_pushed(rules: &[BranchRule], updates: &[(String, Option<String>, String)]) -> anyhow::Result<Vec<String>> {
+    let git = |args: &[&str]| -> anyhow::Result<String> {
+        let out = keel_git::command().args(args).output()?;
+        anyhow::ensure!(out.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let tips = git(&["for-each-ref", "--format=%(objectname) %(refname:lstrip=2)", "refs/heads/"])?;
+    let mut per_branch = Vec::new();
+    for (branch, old, new) in updates {
+        let mut args = vec!["rev-list".to_owned(), format!("--max-count={}", MAX_VERIFY + 1), new.clone()];
+        match old {
+            Some(old) => args.push(format!("^{old}")),
+            None => {
+                let others = tips.lines().filter_map(|l| l.split_once(' ')).filter(|(_, b)| {
+                    b != branch && rule_for(rules, b).is_some_and(|r| r.require_signed)
+                });
+                args.extend(others.map(|(tip, _)| format!("^{tip}")));
+            }
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ids = git(&args)?.lines().map(Oid::from_str).collect::<Result<Vec<_>, _>>()?;
+        per_branch.push((branch, ids));
+    }
+    // The commits are still in quarantine: only git's environment finds them.
+    let repo = keel_git::GitRepo::open_from_env()?;
+    let all: Vec<Oid> = per_branch.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
+    let signed = repo.signed_commits(&all)?;
+    let data_dir = std::env::var_os(DATA_ENV).ok_or_else(|| anyhow::anyhow!("{DATA_ENV} isn't set"))?;
+    // Only whether mail is configured matters here.
+    let mail = std::env::var_os(TRUST_EMAILS_ENV).is_none().then(|| MailConfig { smtp_url: String::new(), from: String::new() });
+    let config = Config { data_dir: data_dir.into(), mail, ..Config::default() };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let found = runtime.block_on(async { Core::open_read_only(config).await?.verify_signed(signed).await.map_err(anyhow::Error::from) })?;
+    Ok(per_branch.into_iter().filter_map(|(branch, ids)| unverified_message(branch, &ids, &found)).collect())
+}
+
+/// Why `branch` can't get the commits `ids`, if some aren't verified.
+fn unverified_message(branch: &str, ids: &[Oid], found: &HashMap<Oid, Verification>) -> Option<String> {
+    if ids.len() > MAX_VERIFY {
+        return Some(format!("{branch} requires verified commits, and that's more than {MAX_VERIFY} new ones to check."));
+    }
+    let bad: Vec<String> = ids
+        .iter()
+        .filter_map(|id| match found.get(id) {
+            Some(v) if v.verified => None,
+            Some(v) => Some(format!("{} ({})", &id.to_string()[..10], v.reason.replace('_', " "))),
+            None => Some(format!("{} (unsigned)", &id.to_string()[..10])),
+        })
+        .collect();
+    if bad.is_empty() {
+        return None;
+    }
+    let more = if bad.len() > 5 { format!(" and {} more", bad.len() - 5) } else { String::new() };
+    Some(format!(
+        "{branch} requires verified commits; not verified: {}{more}.",
+        bad.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+    ))
 }
 
 /// Head commit pinned for a pull request, as a string.
@@ -440,6 +565,7 @@ mod tests {
             dismiss_stale: false,
             allow_force_push,
             required_checks: String::new(),
+            require_signed: false,
         }
     }
 

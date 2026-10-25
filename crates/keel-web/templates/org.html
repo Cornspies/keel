@@ -8,7 +8,10 @@
       <p class="muted">Created {{ created }}</p>
     </div>
   </div>
-  {% if is_owner %}<a class="btn" href="/org/{{ name }}/settings">Settings</a>{% endif %}
+  <div class="row-actions">
+    {% if is_member || is_owner %}<a class="btn" href="/org/{{ name }}/projects">Projects</a>{% endif %}
+    {% if is_owner %}<a class="btn" href="/org/{{ name }}/settings">Settings</a>{% endif %}
+  </div>
 </div>
 <div class="columns">
   <section class="column-main">

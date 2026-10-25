@@ -87,6 +87,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/projects/{number}", get(project))
         .route("/api/v1/repos/{owner}/{repo}/projects/{number}/cards", post(add_card))
         .route("/api/v1/repos/{owner}/{repo}/projects/{number}/cards/{id}/moves", post(move_card))
+        .route("/api/v1/orgs/{org}/projects", get(projects))
+        .route("/api/v1/orgs/{org}/projects/{number}", get(project))
+        .route("/api/v1/orgs/{org}/projects/{number}/cards", post(add_card))
+        .route("/api/v1/orgs/{org}/projects/{number}/cards/{id}/moves", post(move_card))
         .route("/api/v1/repos/{owner}/{repo}/issues", get(list_issues).post(create_issue))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}", get(issue).patch(update_issue))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}/comments", get(comments).post(create_comment))
@@ -690,7 +694,7 @@ async fn update_repo(
         state.core.set_template(r.id, t).await?;
     }
     if let Some(a) = body.archived {
-        state.core.set_archived(r.id, a).await?;
+        state.core.set_archived(r.id, a, caller.user.as_ref().map(|u| u.id)).await?;
     }
     if let Some(name) = body.name.as_deref().filter(|n| *n != r.name) {
         state.core.rename_repo(&r, name).await?;
@@ -1146,7 +1150,50 @@ fn parse_state(s: Option<&str>) -> ApiResult<Option<bool>> {
 
 // -- Projects ---------------------------------------------------------------
 
-fn project_value(state: &AppState, r: &Repo, p: &keel_core::Project) -> Value {
+/// Whose boards an API request is about: a repository's
+/// (`/repos/{owner}/{repo}/projects`) or an organization's
+/// (`/orgs/{org}/projects`, for its members).
+#[derive(Deserialize)]
+pub struct BoardPath {
+    owner: Option<String>,
+    repo: Option<String>,
+    org: Option<String>,
+    number: Option<i64>,
+    id: Option<i64>,
+}
+
+/// The boards of a [`BoardPath`]: their owner, their web address, and the
+/// repository for repository boards.
+struct Boards {
+    owner: keel_core::ProjectOwner,
+    url: String,
+    repo: Option<Repo>,
+    org: Option<User>,
+}
+
+async fn boards(state: &AppState, caller: &Caller, w: &BoardPath, write: bool) -> ApiResult<Boards> {
+    if let Some(name) = &w.org {
+        let org = state.core.user_by_name(name).await?.filter(User::is_org).ok_or_else(not_found_error)?;
+        let access = state.core.org_board_access(&org, caller.user.as_ref()).await?;
+        if access == Access::None {
+            return Err(not_found_error());
+        }
+        if write {
+            caller.writer()?;
+        }
+        let url = format!("{}/org/{}/projects", state.core.config.base_url, org.username);
+        return Ok(Boards { owner: keel_core::ProjectOwner::Org(org.id), url, repo: None, org: Some(org) });
+    }
+    let (Some(owner), Some(name)) = (&w.owner, &w.repo) else { return Err(not_found_error()) };
+    let (r, access) = find_repo(state, caller, owner, name).await?;
+    if write {
+        caller.writer()?;
+        need(caller, &r, access, Access::Write)?;
+    }
+    Ok(Boards { owner: keel_core::ProjectOwner::Repo(r.id), url: format!("{}/projects", repo_url(state, &r)), repo: Some(r), org: None })
+}
+
+fn project_value(boards: &Boards, p: &keel_core::Project) -> Value {
     json!({
         "id": p.id,
         "number": p.number,
@@ -1155,7 +1202,7 @@ fn project_value(state: &AppState, r: &Repo, p: &keel_core::Project) -> Value {
         "state": if p.is_open() { "open" } else { "closed" },
         "open_items": p.open_items,
         "closed_items": p.closed_items,
-        "html_url": format!("{}/projects/{}", repo_url(state, r), p.number),
+        "html_url": format!("{}/{}", boards.url, p.number),
         "creator": p.creator.as_ref().map(|c| json!({ "login": c })),
         "created_at": json_time(p.created_at),
         "updated_at": json_time(p.updated_at),
@@ -1164,7 +1211,11 @@ fn project_value(state: &AppState, r: &Repo, p: &keel_core::Project) -> Value {
 
 fn card_value(c: &keel_core::ProjectCard) -> Value {
     let issue = c.issue_number.map(|n| {
-        json!({ "number": n, "title": c.issue_title, "state": c.issue_state, "pull_request": c.issue_is_pull })
+        let repo = match (&c.issue_owner, &c.issue_repo) {
+            (Some(o), Some(r)) => json!(format!("{o}/{r}")),
+            _ => Value::Null,
+        };
+        json!({ "number": n, "title": c.issue_title, "state": c.issue_state, "pull_request": c.issue_is_pull, "repository": repo })
     });
     json!({ "id": c.id, "column_id": c.column_id, "position": c.position, "note": c.note, "issue": issue })
 }
@@ -1172,37 +1223,37 @@ fn card_value(c: &keel_core::ProjectCard) -> Value {
 async fn projects(
     State(state): State<AppState>,
     caller: Caller,
-    Path((owner, name)): Path<(String, String)>,
+    Path(w): Path<BoardPath>,
     Q(q): Q<StateQuery>,
     OriginalUri(uri): OriginalUri,
 ) -> ApiResult {
-    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let b = boards(&state, &caller, &w, false).await?;
     let mut list = Vec::new();
     match parse_state(q.state.as_deref())? {
-        Some(open) => list.extend(state.core.projects(r.id, open).await?),
+        Some(open) => list.extend(state.core.projects(b.owner, open).await?),
         None => {
-            list.extend(state.core.projects(r.id, true).await?);
-            list.extend(state.core.projects(r.id, false).await?);
+            list.extend(state.core.projects(b.owner, true).await?);
+            list.extend(state.core.projects(b.owner, false).await?);
         }
     }
     let (list, more) = page_of(list, &q.paging);
-    let items = list.iter().map(|p| project_value(&state, &r, p)).collect();
+    let items = list.iter().map(|p| project_value(&b, p)).collect();
     Ok(paged(&state, &uri, &q.paging, items, more))
 }
 
-async fn find_project(state: &AppState, r: &Repo, number: i64) -> ApiResult<keel_core::Project> {
-    state.core.project(r.id, number).await?.ok_or_else(not_found_error)
+async fn find_project(state: &AppState, b: &Boards, w: &BoardPath) -> ApiResult<keel_core::Project> {
+    let number = w.number.ok_or_else(not_found_error)?;
+    state.core.project(b.owner, number).await?.ok_or_else(not_found_error)
 }
 
 /// A project with its columns and their cards.
-async fn project(
-    State(state): State<AppState>,
-    caller: Caller,
-    Path((owner, name, number)): Path<(String, String, i64)>,
-) -> ApiResult<Json<Value>> {
-    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
-    let p = find_project(&state, &r, number).await?;
-    let cards = state.core.project_cards(p.id).await?;
+async fn project(State(state): State<AppState>, caller: Caller, Path(w): Path<BoardPath>) -> ApiResult<Json<Value>> {
+    let b = boards(&state, &caller, &w, false).await?;
+    let p = find_project(&state, &b, &w).await?;
+    let mut cards = state.core.project_cards(p.id).await?;
+    if b.org.is_some() {
+        crate::projects::readable_cards(&state, caller.user.as_ref(), &mut cards).await?;
+    }
     let columns: Vec<Value> = state
         .core
         .project_columns(p.id)
@@ -1213,7 +1264,7 @@ async fn project(
             json!({ "id": col.id, "name": col.name, "done": col.is_done, "cards": cards })
         })
         .collect();
-    let mut v = project_value(&state, &r, &p);
+    let mut v = project_value(&b, &p);
     v["columns"] = json!(columns);
     Ok(Json(v))
 }
@@ -1221,25 +1272,34 @@ async fn project(
 #[derive(Deserialize)]
 pub struct NewCard {
     column_id: i64,
-    /// An issue or pull request of the repository, or else…
+    /// An issue or pull request: of the repository, or of `repository`
+    /// (`name` or `org/name`) for organization boards…
     issue_number: Option<i64>,
-    /// …a note.
+    repository: Option<String>,
+    /// …or a note.
     note: Option<String>,
 }
 
 async fn add_card(
     State(state): State<AppState>,
     caller: Caller,
-    Path((owner, name, number)): Path<(String, String, i64)>,
+    Path(w): Path<BoardPath>,
     Body(body): Body<NewCard>,
 ) -> ApiResult {
+    let b = boards(&state, &caller, &w, true).await?;
     let user = caller.writer()?;
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, &r, access, Access::Write)?;
-    let p = find_project(&state, &r, number).await?;
+    let p = find_project(&state, &b, &w).await?;
     let id = match (body.issue_number, body.note.as_deref()) {
         (Some(n), None) => {
-            let issue = find_issue(&state, &r, n).await?;
+            let repo = match (&b.repo, &b.org, body.repository.as_deref()) {
+                (Some(r), _, _) => r.clone(),
+                (_, Some(org), Some(name)) => {
+                    let name = name.strip_prefix(&format!("{}/", org.username)).unwrap_or(name);
+                    state.core.repo(&org.username, name).await?.ok_or_else(not_found_error)?
+                }
+                _ => return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Give the issue's repository")),
+            };
+            let issue = find_issue(&state, &repo, n).await?;
             state.core.add_issue_card(&p, body.column_id, &issue, user).await?
         }
         (None, Some(note)) => state.core.add_note_card(&p, body.column_id, note, user).await?,
@@ -1261,14 +1321,14 @@ pub struct CardMove {
 async fn move_card(
     State(state): State<AppState>,
     caller: Caller,
-    Path((owner, name, number, id)): Path<(String, String, i64, i64)>,
+    Path(w): Path<BoardPath>,
     Body(body): Body<CardMove>,
 ) -> ApiResult<StatusCode> {
-    caller.writer()?;
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, &r, access, Access::Write)?;
-    let p = find_project(&state, &r, number).await?;
-    state.core.move_card(&p, id, body.column_id, body.position).await?;
+    let b = boards(&state, &caller, &w, true).await?;
+    let user = caller.writer()?;
+    let p = find_project(&state, &b, &w).await?;
+    let id = w.id.ok_or_else(not_found_error)?;
+    state.core.move_card(&p, id, body.column_id, body.position, user).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

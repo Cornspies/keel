@@ -24,6 +24,10 @@ pub const WEBHOOK_EVENTS: &[(&str, &str)] = &[
     ("release", "Releases published, edited or deleted"),
     ("gollum", "Wiki pages created or edited"),
     ("star", "Repositories starred or unstarred"),
+    ("repository", "Repositories archived or unarchived"),
+    ("project", "Project boards created, edited, closed, reopened or deleted"),
+    ("project_column", "Board columns created, renamed, moved or deleted"),
+    ("project_card", "Cards added to, moved on, edited on or removed from boards"),
 ];
 
 /// Retry delays after each failed attempt; after the last one the delivery
@@ -339,6 +343,17 @@ impl Core {
     /// organization) that wants `event`.
     pub(crate) async fn enqueue_webhooks(&self, repo_id: i64, event: &str, action: &str, payload: &serde_json::Value) -> Result<()> {
         let hooks = self.hooks_for_repo(repo_id).await?;
+        self.enqueue_for(&hooks, event, action, payload).await
+    }
+
+    /// For events of an organization itself (its boards), not of one of
+    /// its repositories: its own hooks only.
+    pub(crate) async fn enqueue_org_webhooks(&self, org_id: i64, event: &str, action: &str, payload: &serde_json::Value) -> Result<()> {
+        let hooks = self.webhooks(HookOwner::Org(org_id)).await?;
+        self.enqueue_for(&hooks, event, action, payload).await
+    }
+
+    async fn enqueue_for(&self, hooks: &[Webhook], event: &str, action: &str, payload: &serde_json::Value) -> Result<()> {
         let hooks: Vec<_> = hooks.iter().filter(|h| h.active && h.wants(event)).collect();
         if hooks.is_empty() {
             return Ok(());

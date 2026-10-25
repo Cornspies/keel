@@ -368,7 +368,7 @@ impl Core {
         tx.commit().await?;
         let action = if open { IssueAction::Reopened } else { IssueAction::Closed };
         self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
-        self.move_cards_of(issue.id, open).await
+        self.move_cards_of(issue.id, open, Some(actor.id)).await
     }
 
     pub async fn edit_issue(&self, issue: &Issue, actor: &User, title: &str, body: &str) -> Result<()> {

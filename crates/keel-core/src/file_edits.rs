@@ -136,7 +136,7 @@ impl Core {
             }
         };
         let before = self.ref_snapshot(repo.id).await?;
-        let (name, email) = (user.username.clone(), user.email.clone());
+        let (name, email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let to = target.clone();
         let committed = self
             .git(repo.id, move |g| {
@@ -158,7 +158,7 @@ impl Core {
                     let mode_of = Some(f.from.as_deref().unwrap_or(&f.path));
                     changes.push(FileChange { path: &f.path, content: f.content.as_deref(), mode_of });
                 }
-                let who = Identity { name: &name, email: &email };
+                let who = Identity::new(&name, &email).signed_by(&*signer);
                 let old = if to_new_branch { None } else { tip };
                 match g.commit_changes(&to, tip, old, &changes, &message, &who) {
                     Ok(commit) => Ok(Ok(commit)),
@@ -243,6 +243,7 @@ mod tests {
             dismiss_stale: false,
             allow_force_push: false,
             required_checks: String::new(),
+            require_signed: false,
         })
             .await
             .unwrap();

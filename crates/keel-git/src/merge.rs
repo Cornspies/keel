@@ -11,10 +11,32 @@ use git2::Oid;
 
 use crate::{CommitSummary, Error, GitRepo, Result};
 
-/// Name and email recorded on merge commits.
+/// Name and email recorded on the commits keel makes, and what signs them.
+#[derive(Clone, Copy)]
 pub struct Identity<'a> {
     pub name: &'a str,
     pub email: &'a str,
+    pub signer: Option<&'a dyn Signer>,
+}
+
+impl<'a> Identity<'a> {
+    /// Unsigned commits by `name <email>`.
+    pub fn new(name: &'a str, email: &'a str) -> Self {
+        Self { name, email, signer: None }
+    }
+
+    /// The same, signed by `signer`.
+    pub fn signed_by(self, signer: &'a dyn Signer) -> Self {
+        Self { signer: Some(signer), ..self }
+    }
+}
+
+/// Signs the commits keel makes (merges, squashes, rebases, edits in the
+/// browser) with the server's key.
+pub trait Signer: Send + Sync {
+    /// The ASCII-armored signature of `commit` (the commit object without
+    /// a signature), for its `gpgsig` header.
+    fn sign(&self, commit: &[u8]) -> std::result::Result<String, String>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +92,15 @@ impl GitRepo {
 
     pub fn is_ancestor(&self, ancestor: Oid, of: Oid) -> Result<bool> {
         Ok(ancestor == of || self.repo.graph_descendant_of(of, ancestor)?)
+    }
+
+    /// The ids of up to `limit` commits reachable from `head` but not from
+    /// `base`, newest first.
+    pub fn commit_ids_between(&self, base: Oid, head: Oid, limit: usize) -> Result<Vec<Oid>> {
+        let mut walk = self.repo.revwalk()?;
+        walk.push(head)?;
+        walk.hide(base)?;
+        Ok(walk.take(limit).collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Commits reachable from `head` but not from `base`, oldest first.
@@ -133,17 +164,15 @@ impl GitRepo {
         let Mergeability::Clean(tree) = self.mergeability(base, head)? else {
             return Err(Error::Other("the branches have conflicts".into()));
         };
-        let mut cmd = git(self.repo.path());
-        cmd.args(["commit-tree", &tree.to_string(), "-p", &base.to_string()]);
+        let tree = self.repo.find_tree(tree)?;
+        let mut parents = vec![self.repo.find_commit(base)?];
         if style == MergeStyle::Merge {
-            cmd.args(["-p", &head.to_string()]);
+            parents.push(self.repo.find_commit(head)?);
         }
-        cmd.args(["-m", message])
-            .env("GIT_AUTHOR_NAME", who.name)
-            .env("GIT_AUTHOR_EMAIL", who.email)
-            .env("GIT_COMMITTER_NAME", who.name)
-            .env("GIT_COMMITTER_EMAIL", who.email);
-        let commit = Oid::from_str(&run(&mut cmd)?)?;
+        let sig = git2::Signature::now(who.name, who.email)?;
+        // As `git commit -m` writes it.
+        let message = format!("{}\n", message.trim_end_matches('\n'));
+        let commit = self.create_commit(&sig, &sig, &message, &tree, &parents.iter().collect::<Vec<_>>(), who)?;
         self.update_ref(&format!("refs/heads/{base_branch}"), Some(commit), Some(base))?;
         Ok(commit)
     }
@@ -190,10 +219,29 @@ impl GitRepo {
             )?;
             let message = String::from_utf8_lossy(commit.message_raw_bytes());
             let tree = self.repo.find_tree(tree)?;
-            let new = self.repo.commit(None, &author, &committer, &message, &tree, &[&tip])?;
+            let new = self.create_commit(&author, &committer, &message, &tree, &[&tip], who)?;
             tip = self.repo.find_commit(new)?;
         }
         Ok(tip.id())
+    }
+
+    /// Writes a commit (no refs), signed if `who` has a signer.
+    pub(crate) fn create_commit(
+        &self,
+        author: &git2::Signature<'_>,
+        committer: &git2::Signature<'_>,
+        message: &str,
+        tree: &git2::Tree<'_>,
+        parents: &[&git2::Commit<'_>],
+        who: &Identity<'_>,
+    ) -> Result<Oid> {
+        let Some(signer) = who.signer else {
+            return Ok(self.repo.commit(None, author, committer, message, tree, parents)?);
+        };
+        let buffer = self.repo.commit_create_buffer(author, committer, message, tree, parents)?;
+        let content = std::str::from_utf8(&buffer).map_err(|_| Error::Other("commit isn't UTF-8".into()))?;
+        let signature = signer.sign(content.as_bytes()).map_err(|e| Error::Other(format!("signing the commit: {e}")))?;
+        Ok(self.repo.commit_signed(content, &signature, None)?)
     }
 
     /// Sets (`new` = `Some`) or deletes a ref. With `old`, only if the ref
@@ -286,7 +334,7 @@ mod tests {
         assert_eq!(repo.diff_range(Some(base), feature, 10, 100).unwrap().files.len(), 2);
         assert!(matches!(repo.mergeability(main, feature).unwrap(), Mergeability::Clean(_)));
 
-        let who = Identity { name: "Ada", email: "ada@example.com" };
+        let who = Identity::new("Ada", "ada@example.com");
         // Stale expectation: refused, branch unchanged.
         assert!(repo.merge("main", base, feature, MergeStyle::Merge, "m", &who).is_err());
         assert_eq!(repo.branch_tip("main"), Some(main));
@@ -312,7 +360,7 @@ mod tests {
         let (s, repo) = bare_with_branches();
         let main = repo.branch_tip("main").unwrap();
         let feature = repo.branch_tip("feature").unwrap();
-        let who = Identity { name: "Bob", email: "bob@example.com" };
+        let who = Identity::new("Bob", "bob@example.com");
         let tip = repo.merge("main", main, feature, MergeStyle::Rebase, "", &who).unwrap();
         assert_eq!(repo.branch_tip("main"), Some(tip));
         // Linear: the two feature commits on top of main, authors kept.
@@ -351,7 +399,7 @@ mod tests {
         let main = repo.branch_tip("main").unwrap();
         let feature = repo.branch_tip("feature").unwrap();
         assert_eq!(repo.mergeability(main, feature).unwrap(), Mergeability::Conflicts(vec!["a.txt".into()]));
-        let who = Identity { name: "Ada", email: "ada@example.com" };
+        let who = Identity::new("Ada", "ada@example.com");
         assert!(repo.merge("main", main, feature, MergeStyle::Merge, "m", &who).is_err());
 
         repo.update_ref("refs/pull/1/head", Some(feature), None).unwrap();

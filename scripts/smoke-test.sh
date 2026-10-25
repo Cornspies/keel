@@ -1164,7 +1164,7 @@ git -C "$LW" push -q "$LIN" signed
 check "signed commits are verified" contains "$(curl -s "$B/ada/linear/commits/signed")" '<span class="badge badge-verified" title="Signed with ada’s SSH key SHA256:'
 check "unknown keys aren't" contains "$(curl -s "$B/ada/linear/commits/signed")" "which nobody here has added"
 check "nor someone else's email" contains "$(curl -s "$B/ada/linear/commits/signed")" "the committer email isn’t their verified email"
-check "unsigned ones show nothing" bash -c "! curl -s '$B/ada/linear/commits/main' | grep -q 'badge-verified\|badge-unverified'"
+check "unsigned ones show nothing" bash -c "! curl -s '$B/ada/linear/commit/$(git -C "$LW" rev-parse theirs)' | grep -q 'badge-verified\|badge-unverified'"
 check "the commit page says how" contains "$(curl -s "$B/ada/linear/commit/$SIGNED")" "Signed with ada’s SSH key"
 check "the API too" is "$(curl -s "$API/repos/ada/linear/commits/$SIGNED" | field '["commit"]["verification"]["reason"]')" valid
 check "and lists" is "$(curl -s "$API/repos/ada/linear/commits?sha=signed&per_page=3" | field '[1]["commit"]["verification"]["reason"]')" unknown_key
@@ -1184,8 +1184,26 @@ if command -v gpg >/dev/null; then
     unset GNUPGHOME
 fi
 
+echo "== commits signed by keel"
+check "require verified commits on a branch" is "$(post "$T/ada" /ada/linear/settings/branches pattern=signed required_approvals=0 require_signed=on)" 303
+git -C "$LW" commit -q --allow-empty -m "unsigned"
+check "unsigned pushes are refused" bash -c "git -C '$LW' push '$LIN' signed 2>&1 | grep -q 'signed requires verified commits; not verified: .* (unsigned)'"
+check "over SSH too" bash -c "git -C '$LW' push 'ssh://git@127.0.0.1:$SSH_PORT/ada/linear.git' signed 2>&1 | grep -q 'requires verified commits'"
+git -C "$LW" reset -q --hard HEAD~1 && git -C "$LW" commit -S -q --allow-empty -m "signed again"
+check "verified ones go through" git -C "$LW" push -q "$LIN" signed
+check "edits in the browser are signed by keel" is "$(post "$T/ada" /ada/linear/new/signed path=keel.txt text=keel)" 303
+check "and verified" contains "$(curl -s "$B/ada/linear/commits/signed")" 'title="Made on keel and signed with its key SHA256:'
+check "the public key is published" contains "$(curl -s "$B/signing-key.pub")" "ssh-ed25519 "
+printf '* namespaces="git" %s\n' "$(curl -s "$B/signing-key.pub")" >"$T/allowed_signers"
+git -C "$LW" pull -q "$LIN" signed
+check "git verifies them too" git -C "$LW" -c gpg.ssh.allowedSignersFile="$T/allowed_signers" verify-commit HEAD
+
 echo "== archiving"
+check "a webhook for everything" is "$(post "$T/ada" /ada/linear/settings/hooks "url=http://127.0.0.1:$HOOK_PORT/linear" which=all active=on)" 303
+LINHOOK=$(curl -s -b "$T/ada" "$B/ada/linear/settings/hooks" | grep -o 'settings/hooks/[0-9]*' | head -1 | grep -o '[0-9]*$')
+queued() { curl -s -b "$T/ada" "$B/ada/linear/settings/hooks/$LINHOOK" | grep -c "<span class=\"mono\">$1</span>"; } # queued <event.action>
 check "archive" is "$(post "$T/ada" /ada/linear/archive to=on)" 303
+check "webhooks hear of it" is "$(queued repository.archived)" 1
 check "it says so" contains "$(curl -s "$B/ada/linear")" "It is read-only"
 check "pushes are refused" bash -c "git -C '$LW' push '$LIN' HEAD:refs/heads/late 2>&1 | grep -q 'archived'"
 check "over SSH too" bash -c "git -C '$LW' push 'ssh://git@127.0.0.1:$SSH_PORT/ada/linear.git' HEAD:refs/heads/late 2>&1 | grep -q 'archived'"
@@ -1199,6 +1217,7 @@ check "unless asked for" contains "$(curl -s "$B/explore?q=linear&archived=1")" 
 check "the API says so" is "$(curl -s "$API/repos/ada/linear" | field '["archived"]')" True
 check "unarchive with the API" is "$(api "$RW" PATCH /repos/ada/linear -d '{"archived":false}' | field '["archived"]')" False
 check "writable again" git -C "$LW" push -q "$LIN" HEAD:refs/heads/late
+check "and of that" is "$(queued repository.unarchived)" 1
 
 echo "== project boards"
 check "a board" is "$(curl -s -b "$T/ada" -H "$O" -o /dev/null -w '%{redirect_url}' -d title=Roadmap -d kanban=on "$B/ada/linear/projects")" "$B/ada/linear/projects/1"
@@ -1220,8 +1239,30 @@ check "bob can look" is "$(status -b "$T/bob" "$B/ada/linear/projects/1")" 200
 check "but not change it" is "$(post "$T/bob" /ada/linear/projects/1/columns name=Mine)" 403
 check "the API adds cards" is "$(api_status "$RW" POST /repos/ada/linear/projects/1/cards -d "{\"column_id\":$TODO,\"note\":\"From the API\"}")" 201
 check "and moves them" is "$(api_status "$RW" POST "/repos/ada/linear/projects/1/cards/$CARD/moves" -d "{\"column_id\":$TODO}")" 204
+check "the timeline says so" contains "$(curl -s "$B/ada/linear/pull/2")" 'added this to <strong>To do</strong> in'
+check "also moves" contains "$(curl -s "$B/ada/linear/pull/2")" 'moved this from <strong>To do</strong> to <strong>Done</strong> in'
+check "webhooks get cards" is "$(queued project_card.moved)" 4
+check "and boards" is "$(queued project.created)" 1
 check "close the board" is "$(post "$T/ada" /ada/linear/projects/1/state to=closed)" 303
 check "it's under closed" contains "$(curl -s "$B/ada/linear/projects?state=closed")" "Roadmap"
+check "search by board" is "$(curl -s "$API/search/issues?q=project:ada/linear/1" | field '["total_count"]')" 1
+
+echo "== organization boards"
+check "members see the organization's boards" contains "$(curl -s -b "$T/ada" "$B/acme")" '/org/acme/projects'
+check "an organization board" is "$(curl -s -b "$T/ada" -H "$O" -o /dev/null -w '%{redirect_url}' -d title=Launch -d kanban=on "$B/org/acme/projects")" "$B/org/acme/projects/1"
+check "it's for members" is "$(status -b "$T/bob" "$B/org/acme/projects/1")" 404
+check "not anonymous people" is "$(status "$B/org/acme/projects")" 404
+OISSUE=$(curl -s -b "$T/ada" -H "$O" -o /dev/null -w '%{redirect_url}' -d "title=Ship it" "$B/acme/tool/issues" | grep -o '[0-9]*$')
+check "an issue in an organization repository" test -n "$OISSUE"
+OTODO=$(api "$RW" GET /orgs/acme/projects/1 | field '["columns"][0]["id"]')
+check "plain numbers need a repository" contains "$(curl -s -b "$T/ada" -H "$O" -d "column=$OTODO" -d "text=#1" "$B/org/acme/projects/1/cards")" "Write it like repo#1"
+check "add it" is "$(post "$T/ada" /org/acme/projects/1/cards "column=$OTODO" "text=tool#$OISSUE")" 303
+check "the card says where it's from" contains "$(curl -s -b "$T/ada" "$B/org/acme/projects/1")" "<span class=\"muted small\">tool#$OISSUE</span>"
+check "not from elsewhere" contains "$(curl -s -b "$T/ada" -H "$O" -d "column=$OTODO" -d "text=ada/engine#1" "$B/org/acme/projects/1/cards")" "no issue or pull request ada/engine#1"
+check "the issue shows the board to members" contains "$(curl -s -b "$T/ada" "$B/acme/tool/issues/$OISSUE")" 'href="/org/acme/projects/1">Launch</a>'
+check "the API lists them" is "$(api "$RW" GET /orgs/acme/projects | field '[0]["html_url"]')" "$B/org/acme/projects/1"
+check "and their cards' repositories" is "$(api "$RW" GET /orgs/acme/projects/1 | field '["columns"][0]["cards"][0]["issue"]["repository"]')" acme/tool
+check "issue search finds them" is "$(api "$RW" GET "/search/issues?q=project:acme/1" | field '["total_count"]')" 1
 
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
@@ -1236,6 +1277,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /issues /pulls "/pulls?q=is:pr" "/ada/engine/pulls?q=is:closed" /settings/profile /new/import /ada/imported /ada/imported/pulls?q=is:merged \
     /ada/engine/graphs/contributors /ada/engine/graphs/commit-activity /ada/flow/pull/1 /ada/flow/pull/2 "/new?template=ada/flow" \
     /ada/linear/projects /ada/linear/projects/new /ada/linear/projects/1 /ada/linear/projects/1/edit "/ada/linear/commits/signed" "/ada/linear/commit/$SIGNED" \
+    /org/acme/projects /org/acme/projects/new /org/acme/projects/1 /org/acme/projects/1/edit "/org/acme/projects?state=closed" /signing-key.pub \
     /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done

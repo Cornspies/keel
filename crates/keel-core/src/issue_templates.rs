@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(core.pull_template(repo.id).await.unwrap(), None);
 
         let g = GitRepo::open(&core.repo_path(&repo)).unwrap();
-        let who = keel_git::Identity { name: "ada", email: "ada@example.com" };
+        let who = keel_git::Identity::new("ada", "ada@example.com");
         let files: [(&str, Option<&[u8]>); 5] = [
             (".github/ISSUE_TEMPLATE/bug.md", Some(b"---\nname: Bug\n---\nBroken?")),
             (".github/ISSUE_TEMPLATE/a_idea.md", Some(b"An idea")),
