@@ -527,7 +527,9 @@ impl Core {
             .await?;
         let head_repo = match pull.head_repo_id {
             Some(id) if id == repo.id => Some(repo.clone()),
-            Some(id) => self.repo_by_id(id).await?,
+            // A private head's name and description stay out of a public
+            // base's payloads.
+            Some(id) => self.repo_by_id(id).await?.filter(|h| !h.is_private || repo.is_private),
             None => None,
         };
         let side = |r: Option<&Repo>, branch: &str, sha: Option<Oid>, label: String| {

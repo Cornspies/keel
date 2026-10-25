@@ -99,11 +99,30 @@ pub fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((user.to_owned(), pass.to_owned()))
 }
 
-/// Only allow redirects to local paths (not `//evil.example`).
-pub fn safe_next(next: Option<&str>) -> &str {
+/// Only allow redirects to local paths: not `//evil.example`, nor what
+/// browsers turn into that (they drop tabs and newlines, and read `\` as
+/// `/`). Non-ASCII characters are percent-encoded, since header values
+/// can't have them.
+pub fn safe_next(next: Option<&str>) -> String {
     match next {
-        Some(n) if n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/\\") => n,
-        _ => "/",
+        Some(n)
+            if n.starts_with('/')
+                && !n.starts_with("//")
+                && !n.chars().any(|c| c.is_control() || c == ' ' || c == '\\') =>
+        {
+            let mut out = String::with_capacity(n.len());
+            for c in n.chars() {
+                if c.is_ascii() {
+                    out.push(c);
+                } else {
+                    for b in c.encode_utf8(&mut [0; 4]).bytes() {
+                        out.push_str(&format!("%{b:02X}"));
+                    }
+                }
+            }
+            out
+        }
+        _ => "/".to_owned(),
     }
 }
 
@@ -137,6 +156,15 @@ mod tests {
         assert_eq!(safe_next(Some("/ada/engine")), "/ada/engine");
         assert_eq!(safe_next(Some("//evil.example")), "/");
         assert_eq!(safe_next(Some("https://evil.example")), "/");
+        assert_eq!(safe_next(Some("/\\evil.example")), "/");
+        assert_eq!(safe_next(Some("/a\\b")), "/");
+        assert_eq!(safe_next(Some("/\t/evil.example")), "/");
+        assert_eq!(safe_next(Some("/\n/evil.example")), "/");
+        assert_eq!(safe_next(Some("/\r/evil.example")), "/");
+        assert_eq!(safe_next(Some("/\u{7f}/x")), "/");
+        assert_eq!(safe_next(Some("/ /x")), "/");
+        assert_eq!(safe_next(Some("/ada/é")), "/ada/%C3%A9");
+        assert_eq!(safe_next(Some("/ada/engine?tab=1#x")), "/ada/engine?tab=1#x");
         assert_eq!(safe_next(None), "/");
     }
 }

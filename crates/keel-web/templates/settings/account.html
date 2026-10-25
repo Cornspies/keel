@@ -7,6 +7,8 @@
 {% if let Some(e) = email_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
 <form method="post" action="/settings/account/email" class="form">
   <label>Email address <input name="email" type="email" value="{{ email }}" autocomplete="email" required></label>
+  <label>Your password <input name="password" type="password" autocomplete="current-password" required>
+    <span class="hint">Password resets go to the new address.</span></label>
   <button class="btn">Update email</button>
 </form>
 {% if mail_enabled %}

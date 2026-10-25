@@ -65,10 +65,15 @@ pub fn git_command(
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        // See `crate::command`.
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Unlike `crate::command`, the service account's global config applies:
+    // settings such as `safe.directory` (for a data directory owned by
+    // another user) are only read from there.
     if let Some(home) = std::env::var_os("HOME") {
         cmd.env("HOME", home);
     }

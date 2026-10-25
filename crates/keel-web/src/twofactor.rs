@@ -69,7 +69,7 @@ pub async fn second_form(State(state): State<AppState>, headers: HeaderMap, Quer
     }
     html(SecondStepPage {
         page: Page::new(&state, None, "Two-factor authentication"),
-        next: safe_next(q.next.as_deref()).to_owned(),
+        next: safe_next(q.next.as_deref()),
         error: None,
     })
 }
@@ -81,7 +81,7 @@ pub struct CodeForm {
 }
 
 pub async fn second(State(state): State<AppState>, headers: HeaderMap, Form(f): Form<CodeForm>) -> AppResult {
-    let next = safe_next(f.next.as_deref()).to_owned();
+    let next = safe_next(f.next.as_deref());
     let Some(token) = challenge_token(&headers) else {
         return Ok(Redirect::to("/login").into_response());
     };

@@ -24,6 +24,7 @@
     <label>Title <span class="hint">(optional, defaults to the key comment)</span> <input name="name" value="{{ name }}"></label>
     <label>Public key <textarea name="key" rows="4" class="mono" placeholder="ssh-ed25519 AAAA… you@laptop" required>{{ key }}</textarea>
       <span class="hint">Paste the contents of e.g. <code>~/.ssh/id_ed25519.pub</code>.</span></label>
+    <label>Your password <input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn btn-primary">Add key</button>
   </form>
   <p class="muted small">SSH keys also verify commits you sign with them (<code>git config gpg.format ssh</code>).</p>
@@ -51,6 +52,7 @@
   <form method="post" action="/settings/gpg-keys" class="form">
     <label>Public key <textarea name="key" rows="8" class="mono" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----" required>{{ gpg_key }}</textarea>
       <span class="hint">The output of <code>gpg --armor --export you@example.com</code>.</span></label>
+    <label>Your password <input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn btn-primary">Add GPG key</button>
   </form>
 {% endblock %}

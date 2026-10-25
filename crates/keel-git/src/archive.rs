@@ -43,9 +43,8 @@ pub fn archive_command(path: &Path, commit: Oid, format: ArchiveFormat, prefix: 
     cmd.arg("--git-dir")
         .arg(path)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    crate::standard_env(&mut cmd)
         .arg("archive")
         .arg(format!("--format={}", format.extension()))
         .arg(format!("--prefix={prefix}/"))
@@ -83,5 +82,22 @@ mod tests {
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&listing.stdout).contains("engine-main/src/lib.rs"));
+    }
+
+    #[test]
+    fn ignores_replace_refs() {
+        let s = Scratch::new();
+        s.write("a.txt", "good");
+        let good = s.commit("good");
+        s.write("a.txt", "evil");
+        let evil = s.commit("evil");
+        s.git(&["replace", &good.to_string(), &evil.to_string()]);
+        let repo = s.dir.path().join(".git");
+        let out = archive_command(&repo, good, ArchiveFormat::TarGz, "x").output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let file = s.dir.path().join("x.tar.gz");
+        std::fs::write(&file, out.stdout).unwrap();
+        let content = Command::new("tar").arg("-xzOf").arg(&file).arg("x/a.txt").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&content.stdout), "good");
     }
 }

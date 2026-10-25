@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use crate::{Error, GitRepo, Result};
 
@@ -17,8 +16,18 @@ const REPO_CONFIG: &[(&str, &str)] = &[
     // to do maintenance.
     ("gc.auto", "0"),
     ("receive.autogc", "false"),
+];
+
+/// Config keys with several values, all of which every repository keel
+/// creates has.
+const REPO_MULTI_CONFIG: &[(&str, &str)] = &[
     // Pull request refs are maintained by the server; pushes can't touch them.
     ("receive.hideRefs", "refs/pull"),
+    // Replace refs would make git commands see other commits than libgit2
+    // does; keel ignores them (see `crate::command`), and nobody can push
+    // or fetch them.
+    ("receive.hideRefs", "refs/replace"),
+    ("uploadpack.hideRefs", "refs/replace"),
 ];
 
 /// Creates a bare repository whose HEAD points at `default_branch`.
@@ -48,11 +57,10 @@ pub fn fork(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
         return Err(Error::Other(format!("{} already exists", dst.display())));
     }
-    let out = Command::new("git")
-        .args(["clone", "--bare", "--local", "--quiet"])
+    let out = crate::command()
+        .args(["clone", "--bare", "--local", "--quiet", "--"])
         .arg(src)
         .arg(dst)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(dst);
@@ -92,11 +100,10 @@ pub fn backup(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
         return Err(Error::Other(format!("{} already exists", dst.display())));
     }
-    let out = Command::new("git")
-        .args(["clone", "--mirror", "--no-hardlinks", "--quiet"])
+    let out = crate::command()
+        .args(["clone", "--mirror", "--no-hardlinks", "--quiet", "--"])
         .arg(src)
         .arg(dst)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(dst);
@@ -106,11 +113,10 @@ pub fn backup(src: &Path, dst: &Path) -> Result<()> {
         // Only the remote's configuration: deleting the remote (libgit2's
         // `remote_delete`) would delete every ref its `refs/*` refspec
         // covers, which for a mirror is all of them.
-        let out = Command::new("git")
+        let out = crate::command()
             .arg("--git-dir")
             .arg(dst)
             .args(["config", "--remove-section", "remote.origin"])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()?;
         if !out.status.success() {
             return Err(Error::Other(format!("git config: {}", String::from_utf8_lossy(&out.stderr).trim())));
@@ -156,6 +162,14 @@ fn apply_config(path: &Path) -> Result<()> {
             config.set_str(key, value)?;
         }
     }
+    for (key, value) in REPO_MULTI_CONFIG {
+        let mut present = false;
+        config.multivar(key, None)?.for_each(|e| present |= e.value_bytes() == value.as_bytes())?;
+        if !present {
+            // Replaces values matching the pattern (none), so adds one.
+            config.set_multivar(key, "^$", value)?;
+        }
+    }
     Ok(())
 }
 
@@ -169,7 +183,7 @@ fn fix_unborn_head(path: &Path) -> Result<()> {
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<()> {
-    let out = Command::new("git").arg("-C").arg(path).args(args).output()?;
+    let out = crate::command().arg("-C").arg(path).args(args).output()?;
     if !out.status.success() {
         return Err(Error::Other(format!(
             "git {}: {}",
@@ -197,6 +211,46 @@ mod tests {
     }
     use super::*;
     use crate::read::tests::Scratch;
+
+    #[test]
+    fn hidden_refs() {
+        let root = tempfile::tempdir().unwrap();
+        let bare = root.path().join("r.git");
+        create_bare(&bare, "main").unwrap();
+        // An older repository with only the pull request refs hidden.
+        let values = |key: &str| {
+            let config = git2::Repository::open_bare(&bare).unwrap().config().unwrap();
+            let mut values = Vec::new();
+            config.multivar(key, None).unwrap().for_each(|e| values.push(e.value().unwrap().to_owned())).unwrap();
+            values
+        };
+        assert_eq!(values("receive.hideRefs"), ["refs/pull", "refs/replace"]);
+        let mut config = git2::Repository::open_bare(&bare).unwrap().config().unwrap();
+        config.remove_multivar("receive.hideRefs", "replace").unwrap();
+        config.remove_multivar("uploadpack.hideRefs", ".*").unwrap();
+        drop(config);
+        apply_config(&bare).unwrap();
+        apply_config(&bare).unwrap();
+        assert_eq!(values("receive.hideRefs"), ["refs/pull", "refs/replace"]);
+        assert_eq!(values("uploadpack.hideRefs"), ["refs/replace"]);
+
+        // Pushes to refs/replace are refused.
+        let s = Scratch::new();
+        s.write("x", "1");
+        let a = s.commit("a");
+        s.write("x", "2");
+        let b = s.commit("b");
+        s.git(&["replace", &a.to_string(), &b.to_string()]);
+        s.git(&["push", "-q", bare.to_str().unwrap(), "main"]);
+        let out = std::process::Command::new("git")
+            .current_dir(s.dir.path())
+            .args(["push", "-q", bare.to_str().unwrap(), "refs/replace/*:refs/replace/*"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(git2::Repository::open_bare(&bare).unwrap().find_reference(&format!("refs/replace/{a}")).is_err());
+    }
 
     #[test]
     fn create_push_and_maintain() {

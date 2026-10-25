@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use git2::{ObjectType, Oid, Repository, Sort, Tree};
 
@@ -118,7 +118,7 @@ pub(crate) fn summarize(commit: &git2::Commit<'_>) -> CommitSummary {
 
 /// `git log` limited to `path`. See [`GitRepo::log`].
 fn git_log_path(git_dir: &Path, start: Oid, path: &str, skip: usize, limit: usize) -> Result<Vec<CommitSummary>> {
-    let out = Command::new("git")
+    let out = crate::command()
         .arg("--git-dir")
         .arg(git_dir)
         .args(["-c", "log.showSignature=false", "log", "--no-color"])
@@ -493,7 +493,7 @@ impl GitRepo {
         max_commits: Option<usize>,
     ) -> Result<NameWalk> {
         let files_pending = |p: &HashMap<String, (Oid, bool)>| p.values().any(|(_, dir)| !dir);
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::command();
         cmd.arg("--git-dir")
             .arg(self.repo.path())
             .args(["-c", "log.showSignature=false", "log", "--no-color", "-z"])
