@@ -7,9 +7,9 @@ use keel_core::{Access, BranchRule, Repo, User};
 
 use crate::error::{AppResult, html};
 use crate::labels::form_values;
-use crate::repo::{RepoView, load};
+use crate::repo::RepoView;
 use crate::session::SignedIn;
-use crate::{AppError, AppState, Page};
+use crate::{AppState, Page};
 
 #[derive(Template)]
 #[template(path = "repo/branch_rules.html")]
@@ -28,11 +28,7 @@ struct RulesPage {
 }
 
 async fn admin_repo(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
-    let (repo, access) = load(state, Some(user), owner, name).await?;
-    if access < Access::Admin {
-        return Err(AppError::Forbidden);
-    }
-    Ok(repo)
+    crate::repo::load_for_admin(state, user, owner, name).await
 }
 
 fn default_rule() -> BranchRule {

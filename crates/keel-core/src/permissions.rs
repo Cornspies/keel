@@ -76,7 +76,16 @@ impl OrgRole {
 }
 
 impl Core {
+    /// What `viewer` may do in `repo`. Archived repositories are read-only
+    /// for everyone.
     pub async fn access(&self, repo: &Repo, viewer: Option<&User>) -> Result<Access> {
+        let access = self.granted_access(repo, viewer).await?;
+        Ok(if repo.is_archived() { access.min(Access::Read) } else { access })
+    }
+
+    /// [`access`](Self::access) as if `repo` weren't archived: settings
+    /// (to unarchive it, say) go by this.
+    pub async fn granted_access(&self, repo: &Repo, viewer: Option<&User>) -> Result<Access> {
         let public = if repo.is_private { Access::None } else { Access::Read };
         let Some(user) = viewer else {
             return Ok(public);

@@ -116,6 +116,23 @@
 
   <h2 class="danger-title">Danger zone</h2>
   <div class="box danger-zone">
+    {% if repo.archived.is_some() %}
+    <h3>Unarchive</h3>
+    <p>Make <strong>{{ repo.owner }}/{{ repo.name }}</strong> writable again: pushes, issues, pull requests and comments.</p>
+    <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/archive" class="form">
+      <input type="hidden" name="to" value="off">
+      <button class="btn">Unarchive this repository</button>
+    </form>
+    {% else %}
+    <h3>Archive</h3>
+    <p>Make <strong>{{ repo.owner }}/{{ repo.name }}</strong> read-only: nobody can push, open or comment on issues and pull requests, or change releases and the wiki. It stays visible, can be cloned and forked, and moves out of the way on Explore. You can unarchive it later.</p>
+    <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/archive" class="form">
+      <input type="hidden" name="to" value="on">
+      <button class="btn btn-danger">Archive this repository</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="box danger-zone">
     <h3>Transfer</h3>
     <p>Move <strong>{{ repo.owner }}/{{ repo.name }}</strong> to {% if transfer_targets.is_empty() %}another account. You can move repositories to yourself and to organizations you belong to; you have none to move it to.{% else %}your account or an organization you belong to. Its issues, pull requests, collaborators and settings come along; the old address redirects.{% endif %}</p>
     {% if let Some(e) = errors.transfer %}<p class="flash flash-error">{{ e }}</p>{% endif %}

@@ -153,3 +153,49 @@ document.addEventListener("submit", (event) => {
   for (const b of form.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === event.submitter));
   fetch(form.action, { method: "POST", body: new URLSearchParams({ theme, js: "1" }) }).catch(() => {});
 });
+
+// Project boards: drag cards within and between columns. Each card's menu
+// does the same without scripts.
+const board = document.querySelector(".board[data-board]");
+if (board) {
+  let dragged = null;
+  board.addEventListener("dragstart", (event) => {
+    dragged = event.target.closest?.(".board-card[draggable]") ?? null;
+    if (!dragged) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", dragged.dataset.card);
+    dragged.classList.add("dragging");
+  });
+  board.addEventListener("dragover", (event) => {
+    const list = dragged && event.target.closest(".board-cards");
+    if (!list) return;
+    event.preventDefault();
+    const before = [...list.children].find((c) => {
+      const box = c.getBoundingClientRect();
+      return c !== dragged && event.clientY < box.top + box.height / 2;
+    });
+    if (before) list.insertBefore(dragged, before);
+    else list.append(dragged);
+  });
+  board.addEventListener("drop", (event) => {
+    if (dragged) event.preventDefault();
+  });
+  board.addEventListener("dragend", () => {
+    const card = dragged;
+    dragged = null;
+    if (!card) return;
+    card.classList.remove("dragging");
+    const column = card.closest("[data-column]").dataset.column;
+    const position = [...card.parentElement.children].indexOf(card);
+    const url = `${board.dataset.board}/cards/${card.dataset.card}/move`;
+    fetch(url, { method: "POST", body: new URLSearchParams({ column, position, js: "1" }) })
+      .then((r) => (r.ok ? fetch(location.href) : Promise.reject()))
+      .then((r) => (r.ok ? r.text() : Promise.reject()))
+      .then((html) => {
+        // Counts and menus as the server sees them now.
+        const fresh = new DOMParser().parseFromString(html, "text/html").querySelector(".board[data-board]");
+        if (fresh) board.replaceChildren(...fresh.childNodes);
+      })
+      .catch(() => location.reload());
+  });
+}

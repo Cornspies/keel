@@ -245,7 +245,9 @@ impl Core {
         let now = now();
         let row: Option<(i64,)> = sqlx::query_as(
             "UPDATE mirrors SET next_sync_at = ?1 + 3600
-             WHERE repo_id = (SELECT repo_id FROM mirrors WHERE next_sync_at <= ?1 ORDER BY next_sync_at LIMIT 1)
+             WHERE repo_id = (SELECT repo_id FROM mirrors WHERE next_sync_at <= ?1
+                                AND repo_id IN (SELECT id FROM repositories WHERE archived_at IS NULL)
+                              ORDER BY next_sync_at LIMIT 1)
              RETURNING repo_id",
         )
         .bind(now)
@@ -256,7 +258,11 @@ impl Core {
 
     /// When the next mirror is due.
     pub async fn next_mirror_due(&self) -> Result<Option<i64>> {
-        let (t,): (Option<i64>,) = sqlx::query_as("SELECT MIN(next_sync_at) FROM mirrors").fetch_one(&self.db).await?;
+        let (t,): (Option<i64>,) = sqlx::query_as(
+            "SELECT MIN(next_sync_at) FROM mirrors WHERE repo_id IN (SELECT id FROM repositories WHERE archived_at IS NULL)",
+        )
+        .fetch_one(&self.db)
+        .await?;
         Ok(t)
     }
 
@@ -543,6 +549,7 @@ impl Core {
     pub async fn next_mirror_work(&self) -> Result<Option<i64>> {
         let (t,): (Option<i64>,) = sqlx::query_as(
             "SELECT MIN(t) FROM (SELECT MIN(next_sync_at) AS t FROM mirrors
+                                   WHERE repo_id IN (SELECT id FROM repositories WHERE archived_at IS NULL)
                                  UNION ALL SELECT MIN(next_attempt_at) FROM push_mirrors WHERE pending = 1)",
         )
         .fetch_one(&self.db)

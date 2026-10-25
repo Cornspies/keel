@@ -20,6 +20,7 @@ struct ExplorePage {
     q: String,
     topic: Option<String>,
     sort: &'static str,
+    archived: bool,
     sorts: Vec<(&'static str, &'static str)>,
     repos: Vec<RepoCard>,
     total: i64,
@@ -34,10 +35,12 @@ pub struct ExploreParams {
     q: String,
     topic: Option<String>,
     sort: Option<String>,
+    /// Include archived repositories.
+    archived: Option<String>,
     page: Option<i64>,
 }
 
-fn page_url(q: &str, topic: Option<&str>, sort: ExploreSort, page: i64) -> String {
+fn page_url(q: &str, topic: Option<&str>, sort: ExploreSort, archived: bool, page: i64) -> String {
     let mut s = form_urlencoded::Serializer::new(String::new());
     if !q.is_empty() {
         s.append_pair("q", q);
@@ -47,6 +50,9 @@ fn page_url(q: &str, topic: Option<&str>, sort: ExploreSort, page: i64) -> Strin
     }
     if sort != ExploreSort::default() {
         s.append_pair("sort", sort.as_str());
+    }
+    if archived {
+        s.append_pair("archived", "1");
     }
     if page > 1 {
         s.append_pair("page", &page.to_string());
@@ -59,16 +65,18 @@ pub async fn index(State(state): State<AppState>, Viewer(viewer): Viewer, Query(
     let sort = p.sort.as_deref().and_then(ExploreSort::parse).unwrap_or_default();
     let topic = p.topic.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty());
     let page = p.page.unwrap_or(1).max(1);
-    let query = ExploreQuery { text: p.q.trim().to_owned(), topic: topic.clone(), sort };
+    let archived = p.archived.is_some();
+    let query = ExploreQuery { text: p.q.trim().to_owned(), topic: topic.clone(), sort, archived };
     let (repos, total) = state.core.explore(viewer.as_ref(), &query, (page - 1) * PER_PAGE, PER_PAGE).await?;
     let topics = state.core.popular_topics(viewer.as_ref(), 30).await?;
-    let url = |n| page_url(&query.text, topic.as_deref(), sort, n);
+    let url = |n| page_url(&query.text, topic.as_deref(), sort, archived, n);
     html(ExplorePage {
         page: Page::new(&state, viewer, "Explore"),
         newer_url: (page > 1).then(|| url(page - 1)),
         older_url: (page * PER_PAGE < total).then(|| url(page + 1)),
         sorts: ExploreSort::ALL.iter().map(|s| (s.as_str(), s.label())).collect(),
         sort: sort.as_str(),
+        archived,
         repos: cards(&repos),
         q: query.text,
         topic,
@@ -83,7 +91,10 @@ mod tests {
 
     #[test]
     fn page_urls() {
-        assert_eq!(page_url("", None, ExploreSort::Updated, 1), "/explore");
-        assert_eq!(page_url("a b", Some("rust"), ExploreSort::Name, 2), "/explore?q=a+b&topic=rust&sort=name&page=2");
+        assert_eq!(page_url("", None, ExploreSort::Updated, false, 1), "/explore");
+        assert_eq!(
+            page_url("a b", Some("rust"), ExploreSort::Name, true, 2),
+            "/explore?q=a+b&topic=rust&sort=name&archived=1&page=2"
+        );
     }
 }

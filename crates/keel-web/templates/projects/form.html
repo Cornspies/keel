@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/projects">Projects</a> / {% if number.is_some() %}Edit{% else %}New{% endif %}</p>
+  <h2>{% if number.is_some() %}Edit project{% else %}New project{% endif %}</h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/projects{% if let Some(n) = number %}/{{ n }}/edit{% endif %}" class="form">
+    <label>Name <input name="title" value="{{ title }}" maxlength="100" required autofocus></label>
+    <label>Description <span class="hint">(optional) Markdown is supported.</span> <textarea name="description" rows="5">{{ description }}</textarea></label>
+    {% if number.is_none() %}<label class="check"><input type="checkbox" name="kanban"{% if kanban %} checked{% endif %}> Start with To do, In progress and Done columns <span class="hint">Closing an issue moves its card to Done; reopening it, back to To do.</span></label>{% endif %}
+    <div class="row-actions"><a class="btn" href="/{{ repo.owner }}/{{ repo.name }}/projects{% if let Some(n) = number %}/{{ n }}{% endif %}">Cancel</a> <button class="btn btn-primary">{% if number.is_some() %}Save{% else %}Create project{% endif %}</button></div>
+  </form>
+</div>
+{% endblock %}

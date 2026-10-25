@@ -10,6 +10,8 @@ One binary, one data directory, no external services.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
   `.tar.gz`.
+- **Verified commits:** commits signed with SSH or GPG keys people added show
+  as verified (or say why not).
 - **Changing files in the browser:** edit, create, rename, upload and delete
   files, committed to the branch or to a new one with a pull request.
 - **Releases:** notes and files for a tag, with drafts and pre-releases.
@@ -27,11 +29,14 @@ One binary, one data directory, no external services.
   reactions (👍 ❤️ 🚀 …); issue and pull request templates (GitHub's
   `.github/ISSUE_TEMPLATE` work as they are); search with GitHub's
   qualifiers (`is:open label:bug author:@me`), also across repositories.
+- **Project boards:** issues, pull requests and notes as cards in columns,
+  moved by dragging (or with each card's menu); closing an issue moves its
+  card to Done.
 - **Code review:** pull requests from branches or forks, review requests,
   comments on lines of the diff (with replies, marked outdated once the line
   changes), suggested changes that can be applied with one click, approvals
-  and change requests, and merging with a merge commit or squash, with
-  conflict detection. Draft pull requests can't be merged until they're
+  and change requests, and merging with a merge commit, squash or rebase,
+  with conflict detection. Draft pull requests can't be merged until they're
   marked ready for review; auto-merge merges once checks pass and reviews are
   in.
 - **Branch protection:** require pull requests, a number of approvals and
@@ -40,6 +45,8 @@ One binary, one data directory, no external services.
 - **Commit statuses:** CI reports results through the API (GitHub's status
   API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
+- **Archiving:** archived repositories are read-only (no pushes, issues,
+  comments or merges) and stay out of the way on Explore.
 - **Templates:** mark a repository as a template, and start new ones with a
   copy of its files (without its history) and its labels.
 - **Mirrors:** pull mirrors of repositories hosted elsewhere (GitHub,
@@ -181,10 +188,11 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | --- | --- |
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
-| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template` |
+| `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`) |
+| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template`, `archived` |
 | `POST /repos/{owner}/{repo}/generate` | from a template: `owner`, `name`, `description`, `private`, `include_all_branches` |
 | `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
-| `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `stars`, `created`, `watchers`, `name`) |
+| `GET /search/repositories` | `q` (words, `topic:x` and `archived:false`), `sort` (`updated`, `stars`, `created`, `watchers`, `name`) |
 | `GET /user/starred`, `GET /users/{name}/starred`, `GET /repos/{owner}/{repo}/stargazers` | |
 | `GET`, `PUT`, `DELETE /user/starred/{owner}/{repo}` | `204` if starred (or done), `404` if not |
 | `GET /search/issues` | `q` (as on the web), `sort` (`created`, `updated`, `comments`), `order` |
@@ -192,7 +200,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /repos/{owner}/{repo}/import` | `status` (`queued`, `running`, `done`, `failed`), `progress`, `error` |
 | `POST /repos/{owner}/{repo}/transfer` | `new_owner`: you or an organization you're in |
 | `GET /repos/{owner}/{repo}/branches[/{branch}]`, `/tags` | with `protected` |
-| `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path` |
+| `GET /repos/{owner}/{repo}/commits[/{sha}]` | `sha`, `path`; `commit.verification` says whether it's signed and verified |
 | `POST /repos/{owner}/{repo}/statuses/{sha}` | `state` (`pending`, `success`, `failure`, `error`), `context`, `description`, `target_url` |
 | `GET /repos/{owner}/{repo}/commits/{ref}/status`, `/statuses` | combined state, and each status |
 | `GET /repos/{owner}/{repo}/contents/{path}` | `ref`; files base64-encoded |
@@ -205,7 +213,9 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET`, `POST /repos/{owner}/{repo}/pulls` | `title`, `body`, `head` (`branch` or `owner:branch`), `base`, `draft` |
 | `GET /repos/{owner}/{repo}/pulls/{n}` | with `draft` and `auto_merge`; adds `approvals`, `required_approvals`, `merge_blocked_by` |
 | `POST /repos/{owner}/{repo}/pulls/{n}/reviews` | `event`: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` |
-| `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge` or `squash`; `delete_branch` |
+| `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge`, `squash` or `rebase`; `delete_branch` |
+| `GET /repos/{owner}/{repo}/projects[/{n}]` | boards; one board with its `columns` and their `cards` |
+| `POST /repos/{owner}/{repo}/projects/{n}/cards`, `…/cards/{id}/moves` | `column_id` and `issue_number` or `note`; `column_id` and `position` |
 | `GET`, `POST /repos/{owner}/{repo}/releases` | `tag_name`, `target_commitish`, `name`, `body`, `draft`, `prerelease` |
 | `GET /repos/{owner}/{repo}/releases/latest`, `/releases/tags/{tag}` | |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}/releases/{id}` | `"draft": false` publishes |
@@ -238,9 +248,11 @@ crates/
               queue and payloads, push events, site administration, Git LFS
               storage, wikis, topics, stars, reactions, issue templates,
               commits from the browser, issue search, avatars, pins,
-              imports, drafts and auto-merge, templates, commit counts for
-              graphs, backups
-  keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
+              imports, drafts and auto-merge, templates, archiving, commit
+              counts for graphs, verifying commit signatures (SSH and
+              OpenPGP), project boards, backups
+  keel-git    reading repositories (libgit2 + git CLI), diffs, merging and
+              rebasing,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
   keel-hooks  webhook delivery worker (reqwest)
@@ -260,10 +272,11 @@ scripts/
 ## Design notes
 
 **Pages are rendered on the server** with compile-time-checked askama
-templates. There is no frontend build. The ~150 lines of JavaScript
+templates. There is no frontend build. The ~200 lines of JavaScript
 only add conveniences (copy buttons, late-loaded commit info, opening the
 line-comment form in place, starting a suggested change, reactions and the
-theme switch without a reload), so every page works without them.
+theme switch without a reload, dragging cards on project boards), so every
+page works without them.
 
 **git itself serves clones and pushes.** keel authenticates and
 authorizes, then streams request and response bodies straight into and out of
@@ -511,6 +524,37 @@ setting decides. The choice is kept in a cookie, so it works signed out, and
 with the account, so it follows people to other devices. The script applies
 it in place; without the script the form reloads the page.
 
+**Rebase and merge** replays the pull request's commits one by one onto the
+base branch (`git merge-tree --merge-base` for each, without a working tree),
+keeping their authors, dates and messages, with the merger as committer. If
+the branch already builds on the base, its commits are kept as they are,
+signatures included. A commit that doesn't apply, or a merge commit in the
+branch, stops it with a message saying which; the base is only moved
+(compare-and-swap) once every commit is in.
+
+**Archiving** caps everyone's access to an archived repository at read: the
+check every push, merge and edit goes through. Issues, comments and
+reactions, which readers can otherwise add, are refused where they're
+written. Settings stay open to admins, so they can unarchive it; pull mirrors
+stop syncing.
+
+**Verified commits:** a commit's `gpgsig` header is checked when it's shown,
+in pure Rust (SSH signatures with `ssh-key`, OpenPGP with `pgp`), against
+the SSH and GPG keys people added. A commit is verified when the signature
+is good, made by someone's key (and before it expired), and its committer
+email is that person's verified email. SSH keys sign as well as
+authenticate. Uploaded GPG keys must carry valid self-signatures, so nobody
+can attach someone else's address; subkeys are looked up by their key IDs.
+Whether a signature matches a key can't change, so that result is kept in
+memory (the cryptography is the slow part: about 0.4 ms for an RSA-3072
+signature); who owns the key, and their email, are looked up every time.
+
+**Project boards** belong to a repository and hold its issues, pull requests
+and notes. Cards are moved with forms (each card's menu), or dragged; the
+script posts the move and then reloads the board's markup. A column can be
+the done column: closing or merging an issue moves its cards there, and
+reopening it moves them back to the first column.
+
 **Labels** come from a fixed palette of ten colors, so they read well in light
 and dark mode without inline styles (which the Content Security Policy
 forbids). New repositories start with six common labels.
@@ -547,6 +591,7 @@ doesn't get around it.
 **Permissions:** a user's access to a repository is the highest of: admin for
 the owner, organization owners and site admins; write for organization
 members; the collaborator role; read for anyone if the repository is public.
+Archived repositories cap it at read.
 
 **Background work** listens to push events from `keel-core` (after repository
 maintenance): cache warming, search indexing and pull request updates.
@@ -570,6 +615,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 | Commit with diff | ~5 ms |
 | Contributors graph (first view; after a push only new commits are counted) | ~7 ms (~375 ms) |
 | Commit activity graph | ~2 ms |
+| Commit list of 50 signed commits, all verified (first view, RSA-3072 GPG) | ~3.5 ms (~20 ms) |
 
 ## Security
 
@@ -623,8 +669,11 @@ run automatically at startup.
 
 ## Ideas
 
-- Rebase and merge, as a third way to merge pull requests.
-- Verified commits: check SSH and GPG commit signatures against the keys
-  people added, and show which commits are verified.
-- Archiving repositories: read-only, and out of the way on Explore.
-- Project boards: issues and pull requests in columns.
+- Sign the commits keel makes (merges, squashes, rebases, edits in the
+  browser) with the server's key, so they show as verified too; and a branch
+  rule that requires verified commits.
+- Organization boards with issues from several repositories, and `project:`
+  in issue search.
+- Board changes in issue timelines and in webhooks, and webhooks for
+  archiving.
+- A container image registry (the OCI distribution API).

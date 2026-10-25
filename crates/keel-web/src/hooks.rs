@@ -9,7 +9,7 @@ use keel_core::{Access, Delivery, HookOwner, Repo, User, WEBHOOK_EVENTS, Webhook
 use crate::error::{AppResult, html};
 use crate::labels::form_values;
 use crate::render::{datetime, relative_time};
-use crate::repo::{RepoView, load};
+use crate::repo::RepoView;
 use crate::session::SignedIn;
 use crate::{AppError, AppState, Page};
 
@@ -124,11 +124,7 @@ impl Scope {
 
 /// The repository, if `user` may administer it.
 async fn repo_scope(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Scope> {
-    let (repo, access) = load(state, Some(user), owner, name).await?;
-    if access != Access::Admin {
-        return Err(AppError::Forbidden);
-    }
-    Ok(Scope::Repo(repo))
+    Ok(Scope::Repo(crate::repo::load_for_admin(state, user, owner, name).await?))
 }
 
 /// The organization, if `user` owns it.

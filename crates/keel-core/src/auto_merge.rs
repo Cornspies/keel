@@ -10,7 +10,13 @@ pub fn style_name(style: MergeStyle) -> &'static str {
     match style {
         MergeStyle::Merge => "merge",
         MergeStyle::Squash => "squash",
+        MergeStyle::Rebase => "rebase",
     }
+}
+
+/// The opposite of [`style_name`].
+pub fn parse_style(name: &str) -> Option<MergeStyle> {
+    [MergeStyle::Merge, MergeStyle::Squash, MergeStyle::Rebase].into_iter().find(|s| style_name(*s) == name)
 }
 
 impl Core {
@@ -159,7 +165,7 @@ impl Core {
             if self.merge_check(&repo, &issue, &pull, Some(&head)).await?.blocked().is_some() {
                 continue;
             }
-            let style = if style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
+            let style = parse_style(&style).unwrap_or(MergeStyle::Merge);
             match self.merge_pull(&repo, &issue, &user, style, delete_branch).await {
                 Ok(_) => tracing::info!("auto-merged {}/{}#{number}", repo.owner, repo.name),
                 // Conflicts, or the branches moved meanwhile: a later push

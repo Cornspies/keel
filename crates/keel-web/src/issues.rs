@@ -128,7 +128,7 @@ impl Reactions {
         Ok(Self {
             url: format!("/{}/{}/issues/{}/reactions", repo.owner, repo.name, issue.number),
             groups: keel_core::group_reactions(&all, viewer.map(|v| v.id)),
-            can_react: viewer.is_some(),
+            can_react: viewer.is_some() && !repo.is_archived(),
         })
     }
 
@@ -198,6 +198,12 @@ pub(crate) struct Conversation {
     pub timeline: Vec<TimelineItem>,
     /// Signed in with read access.
     pub can_comment: bool,
+    /// Open boards it's on: title, column and URL.
+    pub projects: Vec<(String, String, String)>,
+    /// Open boards it could be added to: number and title.
+    pub project_choices: Vec<(i64, String)>,
+    /// The repository is archived, so nobody can comment.
+    pub archived: bool,
     /// Author or a writer.
     pub can_close: bool,
     pub can_edit: bool,
@@ -272,7 +278,8 @@ pub(crate) async fn conversation(
     let renderer = Renderer::new(state, repo).await?;
     let render = |body: &str| renderer.render(body);
     let writer = access >= Access::Write;
-    let is_author = viewer.is_some_and(|v| issue.is_author(v));
+    // Archived repositories are read-only for authors too.
+    let is_author = !repo.is_archived() && viewer.is_some_and(|v| issue.is_author(v));
     let reactions = Reactions::load(state, repo, issue, viewer).await?;
 
     let all_labels = state.core.labels(repo.id).await?;
@@ -414,6 +421,18 @@ pub(crate) async fn conversation(
     } else {
         Vec::new()
     };
+    let cards = state.core.issue_cards(issue.id).await?;
+    let project_choices = if writer {
+        let mut open = state.core.projects(repo.id, true).await?;
+        open.retain(|p| !cards.iter().any(|c| c.number == p.number));
+        open.into_iter().map(|p| (p.number, p.title)).collect()
+    } else {
+        Vec::new()
+    };
+    let projects = cards
+        .into_iter()
+        .map(|c| (c.title, c.column, format!("/{}/{}/projects/{}", repo.owner, repo.name, c.number)))
+        .collect();
     let milestone = state.core.issue_milestone(issue).await?;
     let milestone_choices = if writer {
         let mut all = state.core.milestones(repo.id, true).await?;
@@ -438,7 +457,10 @@ pub(crate) async fn conversation(
         opened: relative_time(issue.created_at),
         comment_count: issue.comment_count,
         timeline,
-        can_comment: viewer.is_some(),
+        can_comment: viewer.is_some() && !repo.is_archived(),
+        projects,
+        project_choices,
+        archived: repo.is_archived(),
         can_close: is_author || writer,
         can_edit: is_author || writer,
         is_pull: issue.is_pull,

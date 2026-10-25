@@ -1,0 +1,1 @@
+{% if let Some(s) = c.signature %}<span class="badge {% if s.verified %}badge-verified{% else %}badge-unverified{% endif %}" title="{{ s.title }}">{% if s.verified %}Verified{% else %}Unverified{% endif %}</span>{% endif %}

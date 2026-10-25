@@ -108,9 +108,11 @@ async fn authorize(
             }
         }
         (_, None) => Err(unauthorized()),
-        (Some(_), Some(_)) if access == Access::Read => Err(text(
+        (Some(t), Some(_)) if access == Access::Read => Err(text(
             StatusCode::FORBIDDEN,
-            if can_write {
+            if t.repo.is_archived() {
+                "This repository is archived, so it's read-only"
+            } else if can_write {
                 "You don't have permission to push to this repository"
             } else {
                 "This access token is read-only; create one with write access to push"

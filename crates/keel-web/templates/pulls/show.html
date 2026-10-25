@@ -45,8 +45,7 @@
     {% if can_merge %}
     <form method="post" action="{{ pr.url }}/merge" class="form form-inline merge-form">
       <select name="style" aria-label="Merge method">
-        <option value="merge">Create a merge commit</option>
-        <option value="squash"{% if let Some((_, how)) = auto_merge %}{% if *how == "squash and merge" %} selected{% endif %}{% endif %}>Squash and merge</option>
+        {% for (value, label) in MERGE_STYLES %}<option value="{{ value }}"{% if value == merge_style %} selected{% endif %}>{{ label }}</option>{% endfor %}
       </select>
       {% if can_delete_branch %}<label class="check"><input type="checkbox" name="delete_branch" checked> Delete <span class="branch">{{ pr.head_label }}</span> afterwards</label>{% endif %}
       <button class="btn btn-primary"{% if merge_blocked %} disabled{% endif %}>Merge pull request</button>

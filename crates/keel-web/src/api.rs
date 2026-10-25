@@ -8,6 +8,8 @@
 //! read. Without a token, public repositories are readable. Cookies are
 //! ignored, so there is nothing to forge cross-site.
 
+use std::collections::HashMap;
+
 use axum::extract::{FromRequest, FromRequestParts, OriginalUri, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -16,9 +18,10 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use keel_core::{
-    Access, BranchRule, Issue, IssueFilter, Repo, User, Verdict, json_time, label_json, looks_like_token, rule_for,
+    Access, BranchRule, Issue, IssueFilter, Repo, User, Verdict, Verification, json_time, label_json, looks_like_token,
+    rule_for,
 };
-use keel_git::{CommitDetail, EntryKind, MergeStyle};
+use keel_git::{CommitDetail, EntryKind, Oid};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -35,6 +38,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/user", get(me))
         .route("/api/v1/user/repos", get(my_repos).post(create_my_repo))
         .route("/api/v1/user/starred", get(my_starred))
+        .route("/api/v1/user/keys", get(my_ssh_keys).post(add_ssh_key))
+        .route("/api/v1/user/keys/{id}", get(my_ssh_key).delete(delete_ssh_key))
+        .route("/api/v1/user/gpg_keys", get(my_gpg_keys).post(add_gpg_key))
+        .route("/api/v1/user/gpg_keys/{id}", get(my_gpg_key).delete(delete_gpg_key))
         .route("/api/v1/user/starred/{owner}/{repo}", get(is_starred).put(star).delete(unstar))
         .route("/api/v1/users/{name}/starred", get(user_starred))
         .route("/api/v1/repos/{owner}/{repo}/stargazers", get(stargazers))
@@ -76,6 +83,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/contents/{*path}", get(contents))
         .route("/api/v1/repos/{owner}/{repo}/labels", get(labels))
         .route("/api/v1/repos/{owner}/{repo}/milestones", get(milestones))
+        .route("/api/v1/repos/{owner}/{repo}/projects", get(projects))
+        .route("/api/v1/repos/{owner}/{repo}/projects/{number}", get(project))
+        .route("/api/v1/repos/{owner}/{repo}/projects/{number}/cards", post(add_card))
+        .route("/api/v1/repos/{owner}/{repo}/projects/{number}/cards/{id}/moves", post(move_card))
         .route("/api/v1/repos/{owner}/{repo}/issues", get(list_issues).post(create_issue))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}", get(issue).patch(update_issue))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}/comments", get(comments).post(create_comment))
@@ -236,11 +247,22 @@ async fn find_repo(state: &AppState, caller: &Caller, owner: &str, name: &str) -
     Ok((repo, if caller.can_write { access } else { access.min(Access::Read) }))
 }
 
-fn need(caller: &Caller, access: Access, level: Access) -> ApiResult<()> {
+/// [`find_repo`] for changing settings, which archived repositories
+/// still allow (to unarchive them, say).
+async fn find_repo_for_admin(state: &AppState, caller: &Caller, owner: &str, name: &str) -> ApiResult<(Repo, Access)> {
+    let (repo, _) = find_repo(state, caller, owner, name).await?;
+    let access = state.core.granted_access(&repo, caller.user.as_ref()).await?;
+    Ok((repo, if caller.can_write { access } else { access.min(Access::Read) }))
+}
+
+fn need(caller: &Caller, repo: &Repo, access: Access, level: Access) -> ApiResult<()> {
     if access >= level {
         return Ok(());
     }
     caller.writer()?;
+    if repo.is_archived() {
+        return Err(error(StatusCode::FORBIDDEN, "This repository is archived, so it’s read-only"));
+    }
     Err(error(StatusCode::FORBIDDEN, format!("This needs {} access to the repository", level.role_name())))
 }
 
@@ -361,6 +383,76 @@ async fn me(State(state): State<AppState>, caller: Caller) -> ApiResult<Json<Val
     let mut v = user_value(&state, user);
     v["email"] = json!(user.email);
     Ok(Json(v))
+}
+
+// -- Keys -------------------------------------------------------------------
+
+fn ssh_key_value(k: &keel_core::SshKey) -> Value {
+    json!({ "id": k.id, "title": k.name, "key": k.public_key, "fingerprint": k.fingerprint, "created_at": json_time(k.created_at) })
+}
+
+async fn my_ssh_keys(State(state): State<AppState>, caller: Caller) -> ApiResult<Json<Value>> {
+    let keys = state.core.ssh_keys(caller.user()?.id).await?;
+    Ok(Json(json!(keys.iter().map(ssh_key_value).collect::<Vec<_>>())))
+}
+
+async fn my_ssh_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let keys = state.core.ssh_keys(caller.user()?.id).await?;
+    keys.iter().find(|k| k.id == id).map(|k| Json(ssh_key_value(k))).ok_or_else(not_found_error)
+}
+
+#[derive(Deserialize)]
+pub struct NewSshKey {
+    #[serde(default)]
+    title: String,
+    key: String,
+}
+
+async fn add_ssh_key(State(state): State<AppState>, caller: Caller, Body(body): Body<NewSshKey>) -> ApiResult {
+    let key = state.core.add_ssh_key(caller.writer()?.id, &body.title, &body.key).await?;
+    Ok((StatusCode::CREATED, Json(ssh_key_value(&key))).into_response())
+}
+
+async fn delete_ssh_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    state.core.delete_ssh_key(caller.writer()?.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn gpg_key_value(k: &keel_core::GpgKey) -> Value {
+    json!({
+        "id": k.id,
+        "key_id": k.key_id(),
+        "fingerprint": k.fingerprint,
+        "emails": k.emails().map(|e| json!({ "email": e })).collect::<Vec<_>>(),
+        "raw_key": k.public_key,
+        "created_at": json_time(k.created_at),
+        "expires_at": k.expires_at.map(json_time),
+    })
+}
+
+async fn my_gpg_keys(State(state): State<AppState>, caller: Caller) -> ApiResult<Json<Value>> {
+    let keys = state.core.gpg_keys(caller.user()?.id).await?;
+    Ok(Json(json!(keys.iter().map(gpg_key_value).collect::<Vec<_>>())))
+}
+
+async fn my_gpg_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let keys = state.core.gpg_keys(caller.user()?.id).await?;
+    keys.iter().find(|k| k.id == id).map(|k| Json(gpg_key_value(k))).ok_or_else(not_found_error)
+}
+
+#[derive(Deserialize)]
+pub struct NewGpgKey {
+    armored_public_key: String,
+}
+
+async fn add_gpg_key(State(state): State<AppState>, caller: Caller, Body(body): Body<NewGpgKey>) -> ApiResult {
+    let key = state.core.add_gpg_key(caller.writer()?.id, &body.armored_public_key).await?;
+    Ok((StatusCode::CREATED, Json(gpg_key_value(&key))).into_response())
+}
+
+async fn delete_gpg_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    state.core.delete_gpg_key(caller.writer()?.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user(State(state): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
@@ -581,6 +673,7 @@ pub struct RepoUpdate {
     description: Option<String>,
     private: Option<bool>,
     is_template: Option<bool>,
+    archived: Option<bool>,
 }
 
 async fn update_repo(
@@ -589,12 +682,15 @@ async fn update_repo(
     Path((owner, name)): Path<(String, String)>,
     Body(body): Body<RepoUpdate>,
 ) -> ApiResult<Json<Value>> {
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Admin)?;
+    let (r, access) = find_repo_for_admin(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Admin)?;
     let description = body.description.unwrap_or_else(|| r.description.clone());
     state.core.update_repo(r.id, &description, body.private.unwrap_or(r.is_private)).await?;
     if let Some(t) = body.is_template {
         state.core.set_template(r.id, t).await?;
+    }
+    if let Some(a) = body.archived {
+        state.core.set_archived(r.id, a).await?;
     }
     if let Some(name) = body.name.as_deref().filter(|n| *n != r.name) {
         state.core.rename_repo(&r, name).await?;
@@ -623,8 +719,8 @@ async fn set_topics(
     Path((owner, name)): Path<(String, String)>,
     Body(body): Body<Topics>,
 ) -> ApiResult<Json<Value>> {
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Admin)?;
+    let (r, access) = find_repo_for_admin(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Admin)?;
     if body.names.iter().any(|n| n.contains([' ', ','])) {
         return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Topics can't contain spaces or commas"));
     }
@@ -649,10 +745,15 @@ pub struct RepoSearch {
 async fn search_repos(State(state): State<AppState>, caller: Caller, Q(q): Q<RepoSearch>) -> ApiResult<Json<Value>> {
     let mut words = Vec::new();
     let mut topic = None;
+    // Like GitHub, archived repositories are found unless `archived:false`.
+    let mut archived = true;
     for w in q.q.split_whitespace() {
-        match w.strip_prefix("topic:") {
-            Some(t) => topic = Some(t.to_lowercase()),
-            None => words.push(w),
+        if let Some(t) = w.strip_prefix("topic:") {
+            topic = Some(t.to_lowercase());
+        } else if let Some(a) = w.strip_prefix("archived:") {
+            archived = a != "false";
+        } else {
+            words.push(w);
         }
     }
     let sort = match q.sort.as_deref() {
@@ -660,7 +761,7 @@ async fn search_repos(State(state): State<AppState>, caller: Caller, Q(q): Q<Rep
         Some(s) => keel_core::ExploreSort::parse(s)
             .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, "sort is updated, created, watchers or name"))?,
     };
-    let query = keel_core::ExploreQuery { text: words.join(" "), topic, sort };
+    let query = keel_core::ExploreQuery { text: words.join(" "), topic, sort, archived };
     let (repos, total) =
         state.core.explore(caller.user.as_ref(), &query, q.paging.offset(), q.paging.per_page()).await?;
     let mut items = Vec::new();
@@ -683,8 +784,8 @@ async fn transfer(
     Body(body): Body<Transfer>,
 ) -> ApiResult {
     let user = caller.writer()?;
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Admin)?;
+    let (r, access) = find_repo_for_admin(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Admin)?;
     let new_owner = state
         .core
         .user_by_name(&body.new_owner)
@@ -699,8 +800,8 @@ async fn delete_repo(
     caller: Caller,
     Path((owner, name)): Path<(String, String)>,
 ) -> ApiResult {
-    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Admin)?;
+    let (r, access) = find_repo_for_admin(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Admin)?;
     state.core.delete_repo(&r).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -767,9 +868,13 @@ async fn tags(
     Ok(paged(&state, &uri, &paging, items, more))
 }
 
-fn commit_value(repo_url: &str, c: &CommitDetail) -> Value {
+fn commit_value(repo_url: &str, c: &CommitDetail, signed: &HashMap<Oid, Verification>) -> Value {
     let message = if c.body.is_empty() { c.commit.summary.clone() } else { format!("{}\n\n{}", c.commit.summary, c.body) };
     let sha = c.commit.id.to_string();
+    let verification = match signed.get(&c.commit.id) {
+        Some(v) => json!({ "verified": v.verified, "reason": v.reason, "key": v.key, "signer": v.signer }),
+        None => json!({ "verified": false, "reason": "unsigned", "key": null, "signer": null }),
+    };
     json!({
         "sha": sha,
         "html_url": format!("{repo_url}/commit/{sha}"),
@@ -777,6 +882,7 @@ fn commit_value(repo_url: &str, c: &CommitDetail) -> Value {
             "message": message,
             "author": { "name": c.commit.author.name, "email": c.commit.author.email, "date": json_time(c.commit.author.time) },
             "committer": { "name": c.committer.name, "email": c.committer.email, "date": json_time(c.committer.time) },
+            "verification": verification,
         },
         "parents": c.parents.iter().map(|p| json!({ "sha": p.to_string() })).collect::<Vec<_>>(),
     })
@@ -821,7 +927,8 @@ async fn commits(
     let more = list.len() > limit;
     list.truncate(limit);
     let url = repo_url(&state, &r);
-    Ok(paged(&state, &uri, &q.paging, list.iter().map(|c| commit_value(&url, c)).collect(), more))
+    let signed = state.core.verify_commits(r.id, list.iter().map(|c| c.commit.id).collect()).await?;
+    Ok(paged(&state, &uri, &q.paging, list.iter().map(|c| commit_value(&url, c, &signed)).collect(), more))
 }
 
 async fn commit(
@@ -836,7 +943,8 @@ async fn commit(
     })
     .await?
     .ok_or_else(not_found_error)?;
-    Ok(Json(commit_value(&repo_url(&state, &r), &detail)))
+    let signed = state.core.verify_commits(r.id, vec![detail.commit.id]).await?;
+    Ok(Json(commit_value(&repo_url(&state, &r), &detail, &signed)))
 }
 
 /// The full id of the commit `rev` names, if it exists.
@@ -867,7 +975,7 @@ async fn create_status(
 ) -> ApiResult {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let sha = commit_id(&state, &r, sha).await?;
     let s = state
         .core
@@ -1034,6 +1142,134 @@ fn parse_state(s: Option<&str>) -> ApiResult<Option<bool>> {
         "all" => Ok(None),
         other => Err(error(StatusCode::UNPROCESSABLE_ENTITY, format!("Unknown state “{other}”: use open, closed or all"))),
     }
+}
+
+// -- Projects ---------------------------------------------------------------
+
+fn project_value(state: &AppState, r: &Repo, p: &keel_core::Project) -> Value {
+    json!({
+        "id": p.id,
+        "number": p.number,
+        "name": p.title,
+        "body": p.description,
+        "state": if p.is_open() { "open" } else { "closed" },
+        "open_items": p.open_items,
+        "closed_items": p.closed_items,
+        "html_url": format!("{}/projects/{}", repo_url(state, r), p.number),
+        "creator": p.creator.as_ref().map(|c| json!({ "login": c })),
+        "created_at": json_time(p.created_at),
+        "updated_at": json_time(p.updated_at),
+    })
+}
+
+fn card_value(c: &keel_core::ProjectCard) -> Value {
+    let issue = c.issue_number.map(|n| {
+        json!({ "number": n, "title": c.issue_title, "state": c.issue_state, "pull_request": c.issue_is_pull })
+    });
+    json!({ "id": c.id, "column_id": c.column_id, "position": c.position, "note": c.note, "issue": issue })
+}
+
+async fn projects(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Q(q): Q<StateQuery>,
+    OriginalUri(uri): OriginalUri,
+) -> ApiResult {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let mut list = Vec::new();
+    match parse_state(q.state.as_deref())? {
+        Some(open) => list.extend(state.core.projects(r.id, open).await?),
+        None => {
+            list.extend(state.core.projects(r.id, true).await?);
+            list.extend(state.core.projects(r.id, false).await?);
+        }
+    }
+    let (list, more) = page_of(list, &q.paging);
+    let items = list.iter().map(|p| project_value(&state, &r, p)).collect();
+    Ok(paged(&state, &uri, &q.paging, items, more))
+}
+
+async fn find_project(state: &AppState, r: &Repo, number: i64) -> ApiResult<keel_core::Project> {
+    state.core.project(r.id, number).await?.ok_or_else(not_found_error)
+}
+
+/// A project with its columns and their cards.
+async fn project(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+) -> ApiResult<Json<Value>> {
+    let (r, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let p = find_project(&state, &r, number).await?;
+    let cards = state.core.project_cards(p.id).await?;
+    let columns: Vec<Value> = state
+        .core
+        .project_columns(p.id)
+        .await?
+        .iter()
+        .map(|col| {
+            let cards: Vec<Value> = cards.iter().filter(|c| c.column_id == col.id).map(card_value).collect();
+            json!({ "id": col.id, "name": col.name, "done": col.is_done, "cards": cards })
+        })
+        .collect();
+    let mut v = project_value(&state, &r, &p);
+    v["columns"] = json!(columns);
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+pub struct NewCard {
+    column_id: i64,
+    /// An issue or pull request of the repository, or else…
+    issue_number: Option<i64>,
+    /// …a note.
+    note: Option<String>,
+}
+
+async fn add_card(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Body(body): Body<NewCard>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Write)?;
+    let p = find_project(&state, &r, number).await?;
+    let id = match (body.issue_number, body.note.as_deref()) {
+        (Some(n), None) => {
+            let issue = find_issue(&state, &r, n).await?;
+            state.core.add_issue_card(&p, body.column_id, &issue, user).await?
+        }
+        (None, Some(note)) => state.core.add_note_card(&p, body.column_id, note, user).await?,
+        _ => return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Give either issue_number or note")),
+    };
+    let cards = state.core.project_cards(p.id).await?;
+    let card = cards.iter().find(|c| c.id == id).ok_or_else(not_found_error)?;
+    Ok((StatusCode::CREATED, Json(card_value(card))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CardMove {
+    column_id: i64,
+    /// From 0, the top; past the end means the bottom.
+    #[serde(default)]
+    position: i64,
+}
+
+async fn move_card(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, number, id)): Path<(String, String, i64, i64)>,
+    Body(body): Body<CardMove>,
+) -> ApiResult<StatusCode> {
+    caller.writer()?;
+    let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
+    need(&caller, &r, access, Access::Write)?;
+    let p = find_project(&state, &r, number).await?;
+    state.core.move_card(&p, id, body.column_id, body.position).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn milestones(
@@ -1601,7 +1837,7 @@ async fn review(
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct MergeRequest {
-    /// `merge` (default) or `squash`.
+    /// `merge` (default), `squash` or `rebase`.
     merge_method: Option<String>,
     /// Delete the head branch afterwards (if the caller may).
     delete_branch: bool,
@@ -1615,7 +1851,7 @@ async fn merge(
 ) -> ApiResult<Json<Value>> {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let i = find_pull(&state, &r, number).await?;
     // The body is optional.
     let body: MergeRequest = if body.iter().all(u8::is_ascii_whitespace) {
@@ -1623,12 +1859,9 @@ async fn merge(
     } else {
         serde_json::from_slice(&body).map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, format!("Invalid JSON: {e}")))?
     };
-    let style = match body.merge_method.as_deref().unwrap_or("merge") {
-        "merge" => MergeStyle::Merge,
-        "squash" => MergeStyle::Squash,
-        other => {
-            return Err(error(StatusCode::UNPROCESSABLE_ENTITY, format!("Unknown merge_method “{other}”: use merge or squash")));
-        }
+    let method = body.merge_method.as_deref().unwrap_or("merge");
+    let Some(style) = keel_core::parse_style(method) else {
+        return Err(error(StatusCode::UNPROCESSABLE_ENTITY, format!("Unknown merge_method “{method}”: use merge, squash or rebase")));
     };
     match state.core.merge_pull(&r, &i, user, style, body.delete_branch).await {
         Ok(sha) => Ok(Json(json!({ "sha": sha.to_string(), "merged": true, "message": "Pull request merged" }))),
@@ -1729,7 +1962,7 @@ async fn create_release(
 ) -> ApiResult {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let target = match body.target_commitish {
         Some(t) => t,
         None => crate::repo::with_git(&state, &r, |g| Ok(g.default_branch()?.unwrap_or_default())).await?,
@@ -1758,7 +1991,7 @@ async fn update_release(
 ) -> ApiResult<Json<Value>> {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let rel = find_release(&state, &r, access, id).await?;
     let title = body.name.unwrap_or_else(|| rel.title.clone());
     let notes = body.body.unwrap_or_else(|| rel.notes.clone());
@@ -1778,7 +2011,7 @@ async fn delete_release(
 ) -> ApiResult {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let rel = find_release(&state, &r, access, id).await?;
     state.core.delete_release(&rel, user).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1810,7 +2043,7 @@ async fn upload_asset(
 ) -> ApiResult {
     let user = caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let rel = find_release(&state, &r, access, id).await?;
     let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
     let stream = futures_util::StreamExt::map(body.into_data_stream(), |c| c.map_err(|e| e.to_string()));
@@ -1837,7 +2070,7 @@ async fn delete_asset(
 ) -> ApiResult {
     caller.writer()?;
     let (r, access) = find_repo(&state, &caller, &owner, &name).await?;
-    need(&caller, access, Access::Write)?;
+    need(&caller, &r, access, Access::Write)?;
     let release_id = state.core.release_of_asset(asset).await?.ok_or_else(not_found_error)?;
     let rel = find_release(&state, &r, access, release_id).await?;
     state.core.delete_release_asset(&rel, asset).await?;

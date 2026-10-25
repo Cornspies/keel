@@ -1,5 +1,6 @@
 //! Template repositories: new repositories that start with a copy of a
-//! template's files (without its history) and labels.
+//! template's files (without its history) and labels. And archiving, the
+//! other repository-wide switch.
 
 use keel_git::{GitRepo, Identity};
 
@@ -11,6 +12,18 @@ impl Core {
         sqlx::query("UPDATE repositories SET is_template = ?2 WHERE id = ?1")
             .bind(repo_id)
             .bind(is_template)
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Archives `repo_id` (makes it read-only: see
+    /// [`access`](Self::access)), or unarchives it.
+    pub async fn set_archived(&self, repo_id: i64, archived: bool) -> Result<()> {
+        sqlx::query("UPDATE repositories SET archived_at = CASE WHEN ?2 THEN COALESCE(archived_at, ?3) END WHERE id = ?1")
+            .bind(repo_id)
+            .bind(archived)
+            .bind(now())
             .execute(&self.db)
             .await?;
         Ok(())
@@ -124,6 +137,37 @@ impl Core {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[tokio::test]
+    async fn archiving() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        let issue = core.create_issue(repo.id, &bob, "Bug", "").await.unwrap();
+        core.set_archived(repo.id, true).await.unwrap();
+        let repo = core.repo_by_id(repo.id).await.unwrap().unwrap();
+        assert!(repo.is_archived());
+        assert_eq!(core.access(&repo, Some(&ada)).await.unwrap(), Access::Read);
+        assert_eq!(core.granted_access(&repo, Some(&ada)).await.unwrap(), Access::Admin);
+
+        let err = core.create_issue(repo.id, &bob, "Another", "").await.unwrap_err();
+        assert!(err.to_string().contains("archived"), "{err}");
+        assert!(core.add_comment(&issue, &bob, "Hi").await.is_err());
+        assert!(core.set_issue_open(&issue, &ada, false).await.is_err());
+        assert!(core.edit_issue(&issue, &bob, "Bug!", "").await.is_err());
+        assert!(core.add_reaction(&issue, None, &bob, "+1").await.is_err());
+
+        let q = crate::ExploreQuery::default();
+        assert_eq!(core.explore(None, &q, 0, 10).await.unwrap().1, 0, "out of the way");
+        let q = crate::ExploreQuery { archived: true, ..q };
+        assert_eq!(core.explore(None, &q, 0, 10).await.unwrap().1, 1);
+
+        core.set_archived(repo.id, false).await.unwrap();
+        let repo = core.repo_by_id(repo.id).await.unwrap().unwrap();
+        assert_eq!(core.access(&repo, Some(&ada)).await.unwrap(), Access::Admin);
+        core.add_comment(&issue, &bob, "Hi").await.unwrap();
+    }
 
     #[tokio::test]
     async fn generating() {

@@ -164,8 +164,8 @@ impl Connection {
         let needed = if upload { Access::Write } else { Access::Read };
         let repo = match repo {
             Some(r) if access >= needed => r,
-            Some(_) if access == Access::Read => {
-                Self::fail(&handle, channel, "keel: you don't have permission to push to this repository").await;
+            Some(r) if access == Access::Read => {
+                Self::fail(&handle, channel, push_refusal(&r)).await;
                 return Ok(());
             }
             _ => {
@@ -207,8 +207,8 @@ impl Connection {
         };
         let target = match target {
             Some(t) if access >= needed => t,
-            Some(_) if access == Access::Read => {
-                Self::fail(&handle, channel, "keel: you don't have permission to push to this repository").await;
+            Some(t) if access == Access::Read => {
+                Self::fail(&handle, channel, push_refusal(&t.repo)).await;
                 return Ok(());
             }
             _ => {
@@ -413,6 +413,15 @@ impl russh::server::Handler for Connection {
         self.stdin.remove(&channel);
         self.protocol.remove(&channel);
         Ok(())
+    }
+}
+
+/// Why someone who can read `repo` can't push to it.
+fn push_refusal(repo: &keel_core::Repo) -> &'static str {
+    if repo.is_archived() {
+        "keel: this repository is archived, so it's read-only"
+    } else {
+        "keel: you don't have permission to push to this repository"
     }
 }
 

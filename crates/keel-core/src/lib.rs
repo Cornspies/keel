@@ -34,12 +34,14 @@ mod notifications;
 mod milestones;
 mod mirrors;
 mod permissions;
+mod projects;
 mod protection;
 mod pulls;
 mod reactions;
 mod releases;
 mod repos;
 mod reviews;
+mod signatures;
 mod ssh_keys;
 mod statuses;
 mod tokens;
@@ -54,7 +56,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
-pub use auto_merge::style_name;
+pub use auto_merge::{parse_style, style_name};
 pub use backup::{BackupReport, backup};
 pub use activity::{Activity, IssueAction, label_json, time as json_time};
 pub use admin::{AdminUser, SiteSettings, SiteStats};
@@ -77,6 +79,8 @@ pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::{ExploreQuery, ExploreSort, IssueHit, IssueQuery, IssueSort, MAX_PINS, MAX_TOPICS, Repo, Stargazer, StateFilter, parse_topics};
 pub use reviews::{InlineAnchor, Verdict, suggestion};
+pub use projects::{IssueCard, KANBAN, Project, ProjectCard, ProjectColumn};
+pub use signatures::{GpgKey, Verification, parse_gpg_key};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
 pub use tokens::{AccessToken, looks_like_token};
@@ -156,6 +160,8 @@ pub struct Core {
     auto_merge_lock: Arc<tokio::sync::Mutex<()>>,
     /// Commit counts for graphs, by repository id.
     activity_cache: Arc<std::sync::Mutex<std::collections::HashMap<i64, Arc<insights::RepoActivity>>>>,
+    /// See [`signatures::SignatureCache`].
+    signature_cache: Arc<signatures::SignatureCache>,
     /// Instance settings from the admin page, read on every page view.
     settings: Arc<std::sync::RwLock<SiteSettings>>,
     /// Signs short-lived tokens (Git LFS).
@@ -192,6 +198,7 @@ impl Core {
             import_wakeup: Arc::default(),
             auto_merge_lock: Arc::default(),
             activity_cache: Arc::default(),
+            signature_cache: Arc::default(),
             settings: Arc::default(),
             token_secret,
             metrics: Arc::default(),

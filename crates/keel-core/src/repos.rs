@@ -23,9 +23,15 @@ pub struct Repo {
     pub is_template: bool,
     /// The template this one was generated from, if it still exists.
     pub template_id: Option<i64>,
+    /// When it was archived (made read-only), if it is.
+    pub archived_at: Option<i64>,
 }
 
 impl Repo {
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
+    }
+
     pub fn topics(&self) -> impl Iterator<Item = &str> {
         self.topic_names.split_whitespace()
     }
@@ -38,7 +44,7 @@ macro_rules! repo_select {
             r.is_private, r.created_at, r.updated_at, r.forked_from,
             COALESCE((SELECT group_concat(t.topic, ' ' ORDER BY t.topic) FROM repo_topics t WHERE t.repo_id = r.id), '')
               AS topic_names,
-            r.star_count AS stars, r.is_template, r.template_id
+            r.star_count AS stars, r.is_template, r.template_id, r.archived_at
          FROM repositories r JOIN users u ON u.id = r.owner_id "
     };
 }
@@ -174,6 +180,7 @@ impl Core {
             stars: 0,
             is_template: false,
             template_id: None,
+            archived_at: None,
         })
     }
 

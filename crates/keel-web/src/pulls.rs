@@ -55,8 +55,10 @@ async fn changes(state: &AppState, repo: &Repo, head_repo: &Repo, base: Oid, hea
         ))
     })
     .await?;
+    let mut commits: Vec<CommitView> = commits.iter().map(|c| CommitView::new(&url, c)).collect();
+    crate::signatures::attach(state, head_repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
     Ok(Changes {
-        commits: commits.iter().map(|c| CommitView::new(&url, c)).collect(),
+        commits,
         files: file_views(&url, &head.to_string(), &diff),
         additions: diff.additions,
         deletions: diff.deletions,
@@ -463,6 +465,8 @@ struct PullPage {
     can_set_draft: bool,
     /// Who turned auto-merge on and how it will merge, if it's on.
     auto_merge: Option<(String, &'static str)>,
+    /// The merge method picked in the merge box.
+    merge_style: &'static str,
     /// May turn auto-merge off.
     can_stop_auto_merge: bool,
     error: Option<String>,
@@ -510,11 +514,20 @@ async fn show_page(
     let can_delete_branch = can_delete_branch(state, repo, &l, viewer.as_ref()).await?;
     let protection = if l.issue.is_open() { merge_checks(state, repo, &l).await? } else { None };
     let checks = head_checks(state, repo, &l).await?;
-    let is_author = viewer.as_ref().is_some_and(|v| l.issue.is_author(v));
+    // Archived repositories are read-only for authors too.
+    let is_author = !repo.is_archived() && viewer.as_ref().is_some_and(|v| l.issue.is_author(v));
     let auto_merge = l.pull.auto_merge_by.clone().filter(|_| l.issue.is_open()).map(|by| {
-        let how = if l.pull.auto_merge_style == "squash" { "squash and merge" } else { "merge" };
+        let how = match l.pull.auto_merge_style.as_str() {
+            "squash" => "squash and merge",
+            "rebase" => "rebase and merge",
+            _ => "merge",
+        };
         (by, how)
     });
+    let merge_style = match auto_merge {
+        Some(_) => keel_core::parse_style(&l.pull.auto_merge_style).map_or("merge", keel_core::style_name),
+        None => "merge",
+    };
     let can_stop_auto_merge = auto_merge.as_ref().is_some_and(|(by, _)| {
         is_author || access >= Access::Write || viewer.as_ref().is_some_and(|v| &v.username == by)
     });
@@ -528,6 +541,7 @@ async fn show_page(
         can_merge: access >= Access::Write,
         can_set_draft: l.issue.is_open() && (is_author || access >= Access::Write),
         auto_merge,
+        merge_style,
         can_stop_auto_merge,
         can_delete_branch,
         merge_blocked: protection.as_ref().is_some_and(|c| c.blocked.is_some()),
@@ -870,7 +884,7 @@ pub(crate) fn inline_threads(
                     .collect(),
                 hunk,
                 reply_url: format!("{pull_base}/comments/{}/reply", root.id),
-                can_reply: viewer.is_some(),
+                can_reply: viewer.is_some() && !repo.is_archived(),
                 outdated: false,
                 in_diff: false,
             }
@@ -1124,6 +1138,13 @@ pub async fn review(
 // Merging
 // ---------------------------------------------------------------------------
 
+/// The merge box's methods.
+const MERGE_STYLES: [(&str, &str); 3] = [
+    ("merge", "Create a merge commit"),
+    ("squash", "Squash and merge"),
+    ("rebase", "Rebase and merge"),
+];
+
 #[derive(Deserialize)]
 pub struct MergeForm {
     style: String,
@@ -1144,7 +1165,7 @@ pub async fn merge(
     if !issue.is_open() {
         return Err(AppError::BadRequest("This pull request is not open.".into()));
     }
-    let style = if f.style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
+    let style = keel_core::parse_style(&f.style).unwrap_or(MergeStyle::Merge);
     match state.core.merge_pull(&repo, &issue, &user, style, f.delete_branch.is_some()).await {
         Ok(_) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
@@ -1191,7 +1212,7 @@ pub async fn auto_merge(
 ) -> AppResult {
     let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
     let issue = load_issue(&state, &repo, number).await?;
-    let style = if f.style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
+    let style = keel_core::parse_style(&f.style).unwrap_or(MergeStyle::Merge);
     match state.core.enable_auto_merge(&repo, &issue, &user, style, f.delete_branch.is_some()).await {
         Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,

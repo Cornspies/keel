@@ -191,6 +191,12 @@ input:focus, textarea:focus { outline: 2px solid var(--link); outline-offset: -1
   background: var(--flash-bg); border: 1px solid var(--flash-border);
 }
 .flash-error { background: var(--error-bg); border-color: var(--error-border); }
+.flash-warn { border-color: var(--warn-border); }
+.archived-note { margin: 10px 0 0; }
+.commit-side { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.commit-side .ci-status { margin-right: 0; }
+.badge-verified, .badge-unverified { cursor: help; }
+.signature-note { flex-basis: 100%; }
 
 .badge {
   display: inline-block; padding: 0 7px; font-size: 12px; font-weight: 500; line-height: 18px;
@@ -368,7 +374,7 @@ input:focus, textarea:focus { outline: 2px solid var(--link); outline-offset: -1
 .org-list .badge { margin-right: 4px; }
 
 /* Issues and pull requests */
-.tabs .count {
+.tabs .count, .board-column-head .count {
   display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 2px; font-size: 12px; line-height: 18px;
   text-align: center; border-radius: 2em; background: var(--bg-hover); color: var(--text-muted); font-weight: 500;
 }
@@ -620,7 +626,8 @@ ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-directio
 .payload { background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: var(--radius); padding: 10px 12px; max-height: 360px; overflow: auto; margin: 0 0 12px; }
 
 /* Branch protection */
-.badge-protected { color: var(--warn-text); border-color: var(--warn-border); }
+.badge-verified { color: var(--ok); border-color: var(--ok); }
+.badge-unverified, .badge-protected, .badge-archived { color: var(--warn-text); border-color: var(--warn-border); }
 .merge-blocked { border-color: #bf8700; }
 .rule-list .card-row { display: block; }
 .rule-row summary { cursor: pointer; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; list-style: none; }
@@ -860,3 +867,38 @@ button.reaction:hover, .reaction-add:hover { background: var(--bg-hover); }
 .segmented button + button { border-left: 1px solid var(--border); }
 .segmented button:hover { background: var(--bg-hover); color: var(--text); }
 .segmented button[aria-pressed="true"] { background: var(--bg-subtle); color: var(--text); font-weight: 600; }
+
+/* Project boards: columns side by side, scrolling sideways on their own */
+.board-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.board-title { margin: 0 0 4px; }
+.board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; scrollbar-color: var(--border) transparent; }
+.board-column {
+  flex: 0 0 280px; max-width: calc(100vw - 48px); display: flex; flex-direction: column; gap: 8px; padding: 8px;
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.board-column-head { display: flex; align-items: center; gap: 6px; min-height: 26px; }
+.board-column-head h3 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.board-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-height: 28px; }
+.board-card {
+  position: relative; padding: 8px 36px 8px 10px; font-size: 13px; overflow-wrap: anywhere;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.board-card[draggable="true"] { cursor: grab; }
+.board-card.dragging { opacity: 0.4; }
+.board-cards.drop-target { outline: 2px dashed var(--border); outline-offset: 2px; border-radius: var(--radius); }
+.board-issue { display: flex; gap: 8px; align-items: flex-start; }
+.board-issue .state-icon { margin-top: 4px; }
+.board-issue .label { margin: 4px 4px 0 0; }
+.board-note.markdown { padding: 0; font-size: 13px; line-height: 1.5; }
+.board-note > :first-child { margin-top: 0; }
+.board-note > :last-child { margin-bottom: 0; }
+.card-menu { position: absolute; top: 4px; right: 4px; }
+.card-menu > summary.btn, .board-column-head summary.btn { padding: 0 7px; line-height: 20px; }
+.card-menu > summary.btn::after, .board-column-head summary.btn::after { display: none; }
+.board .dropdown-menu > form, .board .dropdown-menu > .row-actions { padding: 4px 12px; }
+.board .dropdown-menu .form-inline { display: flex; gap: 6px; }
+.board-head .dropdown-menu .linkish { display: block; width: 100%; padding: 5px 14px; text-align: left; color: var(--text); }
+.board-head .dropdown-menu .danger { color: var(--danger); }
+.board-add > summary { cursor: pointer; padding: 2px 2px; }
+.board-add .form { margin-top: 6px; }
+.board-new-column { background: none; border-style: dashed; }

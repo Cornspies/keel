@@ -151,6 +151,28 @@ pub(crate) fn validate_comment(body: &str) -> Result<()> {
 
 /// Inserts an issue with the next number in the repository. A single
 /// statement, so concurrent inserts can't pick the same number.
+pub(crate) const ARCHIVED: &str = "This repository is archived, so it’s read-only.";
+
+/// Refuses changes to an archived repository's issues and pull requests.
+pub(crate) async fn ensure_unarchived<'c>(db: impl sqlx::SqliteExecutor<'c>, repo_id: i64) -> Result<()> {
+    let archived: Option<(bool,)> = sqlx::query_as("SELECT archived_at IS NOT NULL FROM repositories WHERE id = ?1")
+        .bind(repo_id)
+        .fetch_optional(db)
+        .await?;
+    if archived.is_some_and(|(a,)| a) { invalid(ARCHIVED) } else { Ok(()) }
+}
+
+/// [`ensure_unarchived`] for the repository of an issue.
+pub(crate) async fn ensure_issue_unarchived<'c>(db: impl sqlx::SqliteExecutor<'c>, issue_id: i64) -> Result<()> {
+    let archived: Option<(bool,)> = sqlx::query_as(
+        "SELECT r.archived_at IS NOT NULL FROM issues i JOIN repositories r ON r.id = i.repo_id WHERE i.id = ?1",
+    )
+    .bind(issue_id)
+    .fetch_optional(db)
+    .await?;
+    if archived.is_some_and(|(a,)| a) { invalid(ARCHIVED) } else { Ok(()) }
+}
+
 pub(crate) async fn insert_issue(
     conn: &mut SqliteConnection,
     repo_id: i64,
@@ -160,6 +182,7 @@ pub(crate) async fn insert_issue(
     is_pull: bool,
 ) -> Result<(i64, i64)> {
     validate(title, body)?;
+    ensure_unarchived(&mut *conn, repo_id).await?;
     let now = now();
     Ok(sqlx::query_as(
         "INSERT INTO issues (repo_id, number, author_id, title, body, is_pull, created_at, updated_at)
@@ -185,6 +208,8 @@ pub(crate) async fn insert_comment(
     kind: &str,
     body: &str,
 ) -> Result<i64> {
+    // Every change to the timeline comes through here.
+    ensure_issue_unarchived(&mut *conn, issue_id).await?;
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING id",
@@ -343,11 +368,12 @@ impl Core {
         tx.commit().await?;
         let action = if open { IssueAction::Reopened } else { IssueAction::Closed };
         self.record(Activity::Issue { issue_id: issue.id, actor: Some(actor.id), action }).await;
-        Ok(())
+        self.move_cards_of(issue.id, open).await
     }
 
     pub async fn edit_issue(&self, issue: &Issue, actor: &User, title: &str, body: &str) -> Result<()> {
         validate(title, body)?;
+        ensure_issue_unarchived(&self.db, issue.id).await?;
         sqlx::query("UPDATE issues SET title = ?2, body = ?3, updated_at = ?4 WHERE id = ?1")
             .bind(issue.id)
             .bind(title.trim())
@@ -361,6 +387,7 @@ impl Core {
 
     pub async fn edit_comment(&self, comment: &Comment, body: &str) -> Result<()> {
         validate_comment(body)?;
+        ensure_issue_unarchived(&self.db, comment.issue_id).await?;
         sqlx::query("UPDATE comments SET body = ?2, updated_at = ?3 WHERE id = ?1 AND kind IN ('comment', 'inline')")
             .bind(comment.id)
             .bind(body.trim_end())
@@ -373,6 +400,7 @@ impl Core {
     /// Deletes a comment; for an inline comment, with its replies.
     pub async fn delete_comment(&self, comment: &Comment) -> Result<()> {
         let mut tx = self.db.begin().await?;
+        ensure_issue_unarchived(&mut *tx, comment.issue_id).await?;
         sqlx::query("DELETE FROM comments WHERE id = ?1 AND kind IN ('comment', 'inline')")
             .bind(comment.id)
             .execute(&mut *tx)

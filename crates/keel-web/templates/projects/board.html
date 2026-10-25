@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="board-head">
+  <div>
+    <h2 class="board-title">{{ project.title }}{% if !project.is_open %} <span class="badge">Closed</span>{% endif %}</h2>
+    {% if !project.description_html.is_empty() %}<div class="markdown muted">{{ project.description_html|safe }}</div>{% endif %}
+  </div>
+  <div class="spacer"></div>
+  <span class="muted small nowrap"><strong>{{ project.progress }}%</strong> done</span>
+  {% if can_edit %}
+  <details class="dropdown dropdown-right">
+    <summary class="btn btn-small">Project</summary>
+    <div class="dropdown-menu">
+      <a href="{{ project.url }}/edit">Edit name and description</a>
+      <form method="post" action="{{ project.url }}/state"><input type="hidden" name="to" value="{% if project.is_open %}closed{% else %}open{% endif %}"><button class="linkish">{% if project.is_open %}Close project{% else %}Reopen project{% endif %}</button></form>
+      <form method="post" action="{{ project.url }}/delete"><button class="linkish danger" title="Its issues and pull requests are kept">Delete project</button></form>
+    </div>
+  </details>
+  {% endif %}
+</div>
+{% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<div class="board" data-board="{{ project.url }}">
+  {% for col in columns %}
+  <section class="board-column" data-column="{{ col.id }}" aria-label="{{ col.name }}">
+    <div class="board-column-head">
+      <h3>{{ col.name }}</h3>
+      <span class="count">{{ col.cards.len() }}</span>
+      {% if col.is_done && col.name.to_lowercase() != "done" %}<span class="muted small" title="Closed issues' cards move here">done</span>{% endif %}
+      <div class="spacer"></div>
+      {% if can_edit %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Column options">⋯</summary>
+        <div class="dropdown-menu dropdown-wide">
+          <form method="post" action="{{ project.url }}/columns/{{ col.id }}" class="form">
+            <label>Name <input name="name" value="{{ col.name }}" maxlength="50" required></label>
+            <label class="check"><input type="checkbox" name="done"{% if col.is_done %} checked{% endif %}> Closed issues move here</label>
+            <button class="btn btn-small btn-primary">Save</button>
+          </form>
+          <div class="row-actions">
+            {% if col.position > 0 %}<form method="post" action="{{ project.url }}/columns/{{ col.id }}/move" class="inline"><input type="hidden" name="position" value="{{ col.position - 1 }}"><button class="btn btn-small">← Move left</button></form>{% endif %}
+            {% if !loop.last %}<form method="post" action="{{ project.url }}/columns/{{ col.id }}/move" class="inline"><input type="hidden" name="position" value="{{ col.position + 1 }}"><button class="btn btn-small">Move right →</button></form>{% endif %}
+          </div>
+          <form method="post" action="{{ project.url }}/columns/{{ col.id }}/delete"><button class="btn btn-small btn-danger">Delete column and its cards</button></form>
+        </div>
+      </details>
+      {% endif %}
+    </div>
+    <ol class="board-cards">
+      {% for card in col.cards %}
+      <li class="board-card"{% if can_edit %} draggable="true"{% endif %} data-card="{{ card.id }}">
+        {% if let Some(note) = card.note %}
+        <div class="markdown board-note">{{ card.note_html|safe }}</div>
+        {% else %}
+        <div class="board-issue">
+          <span class="state-icon state-{{ card.state }}" title="{% if card.is_pull %}Pull request{% else %}Issue{% endif %}, {{ card.state }}" aria-label="{% if card.is_pull %}Pull request{% else %}Issue{% endif %}, {{ card.state }}"></span>
+          <div>
+            <a href="{{ card.url }}">{{ card.title }}</a> <span class="muted small">#{{ card.number }}</span>
+            {% if !card.labels.is_empty() %}<div>{% for l in card.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}</div>{% endif %}
+            {% if !card.assignees.is_empty() %}<div class="muted small">{{ card.assignees.join(", ") }}</div>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+        {% if can_edit %}
+        <details class="dropdown dropdown-right card-menu">
+          <summary class="btn btn-small" aria-label="Card options">⋯</summary>
+          <div class="dropdown-menu dropdown-wide">
+            <div class="row-actions">
+              {% if card.position > 0 %}<form method="post" action="{{ project.url }}/cards/{{ card.id }}/move" class="inline"><input type="hidden" name="column" value="{{ col.id }}"><input type="hidden" name="position" value="{{ card.position - 1 }}"><button class="btn btn-small">↑ Up</button></form>{% endif %}
+              {% if !loop.last %}<form method="post" action="{{ project.url }}/cards/{{ card.id }}/move" class="inline"><input type="hidden" name="column" value="{{ col.id }}"><input type="hidden" name="position" value="{{ card.position + 1 }}"><button class="btn btn-small">↓ Down</button></form>{% endif %}
+            </div>
+            <form method="post" action="{{ project.url }}/cards/{{ card.id }}/move" class="form-inline">
+              <input type="hidden" name="position" value="0">
+              <select name="column" aria-label="Column">{% for other in columns %}<option value="{{ other.id }}"{% if other.id == col.id %} selected{% endif %}>{{ other.name }}</option>{% endfor %}</select>
+              <button class="btn btn-small">Move</button>
+            </form>
+            {% if let Some(note) = card.note %}
+            <form method="post" action="{{ project.url }}/cards/{{ card.id }}/note" class="form">
+              <textarea name="note" rows="3" aria-label="Note" required>{{ note }}</textarea>
+              <button class="btn btn-small">Save note</button>
+            </form>
+            {% endif %}
+            <form method="post" action="{{ project.url }}/cards/{{ card.id }}/delete"><button class="btn btn-small btn-danger">Remove from board</button></form>
+          </div>
+        </details>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% if can_edit %}
+    <details class="board-add">
+      <summary class="muted small">+ Add a card</summary>
+      <form method="post" action="{{ project.url }}/cards" class="form">
+        <input type="hidden" name="column" value="{{ col.id }}">
+        <textarea name="text" rows="2" required aria-label="Card" placeholder="#12 for an issue or pull request, or a note"></textarea>
+        <button class="btn btn-small btn-primary">Add</button>
+      </form>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+  {% if can_edit %}
+  <section class="board-column board-new-column">
+    <form method="post" action="{{ project.url }}/columns" class="form">
+      <label>New column <input name="name" maxlength="50" required placeholder="e.g. Review"></label>
+      <button class="btn btn-small">Add column</button>
+    </form>
+  </section>
+  {% endif %}
+  {% if columns.is_empty() && !can_edit %}<p class="empty">This board has no columns yet.</p>{% endif %}
+</div>
+{% endblock %}

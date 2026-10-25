@@ -9,6 +9,7 @@
     <span class="spacer"></span>
     {% if parents.len() > 0 %}<span>{% if parents.len() == 1 %}parent{% else %}parents{% endif %} {% for (short, url) in parents %}<a class="mono" href="{{ url }}">{{ short }}</a> {% endfor %}</span> ·{% endif %}
     <span>commit <span class="mono">{{ commit.id }}</span></span>
+    {% if let Some(s) = commit.signature %}<span class="signature-note">{% let c = commit %}{% include "repo/signature.html" %} {{ s.title }}</span>{% endif %}
   </div>
 </div>
 

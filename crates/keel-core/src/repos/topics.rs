@@ -78,15 +78,19 @@ pub struct ExploreQuery {
     pub text: String,
     pub topic: Option<String>,
     pub sort: ExploreSort,
+    /// Include archived repositories.
+    pub archived: bool,
 }
 
 // Explore's filter. `?1`: text pattern, `?2`, `?3`: the viewer (see
-// `visible_to!`), `?4`: topic or ''.
+// `visible_to!`), `?4`: topic or '', `?7`: whether to include archived
+// repositories.
 macro_rules! explore_where {
     () => {
         concat!(
             "WHERE (?1 = '%%' OR u.username || '/' || r.name LIKE ?1 ESCAPE '\\' OR r.description LIKE ?1 ESCAPE '\\')
                AND (?4 = '' OR EXISTS (SELECT 1 FROM repo_topics t WHERE t.topic = ?4 AND t.repo_id = r.id))
+               AND (?7 OR r.archived_at IS NULL)
                AND ",
             visible_to!()
         )
@@ -137,6 +141,7 @@ impl Core {
             .bind(topic)
             .bind(limit)
             .bind(offset)
+            .bind(q.archived)
             .fetch_all(&self.db)
             .await?;
         let (total,): (i64,) = sqlx::query_as(concat!(
@@ -147,6 +152,9 @@ impl Core {
         .bind(viewer_id)
         .bind(admin)
         .bind(topic)
+        .bind(0) // ?5 and ?6 are unused here
+        .bind(0)
+        .bind(q.archived)
         .fetch_one(&self.db)
         .await?;
         Ok((repos, total))
@@ -199,7 +207,7 @@ mod tests {
         assert_eq!(core.repo_by_id(engine.id).await.unwrap().unwrap().topics().collect::<Vec<_>>(), ["math", "rust"]);
 
         let names = |(repos, total): (Vec<Repo>, i64)| (repos.into_iter().map(|r| r.name).collect::<Vec<_>>(), total);
-        let q = |text: &str, topic: Option<&str>, sort| ExploreQuery { text: text.into(), topic: topic.map(Into::into), sort };
+        let q = |text: &str, topic: Option<&str>, sort| ExploreQuery { text: text.into(), topic: topic.map(Into::into), sort, archived: false };
         let all = q("", None, ExploreSort::Name);
         assert_eq!(names(core.explore(None, &all, 0, 10).await.unwrap()), (vec!["engine".into(), "web_site".into()], 2));
         assert_eq!(core.explore(Some(&ada), &all, 0, 10).await.unwrap().1, 3);

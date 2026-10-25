@@ -21,6 +21,8 @@ base64.workspace = true
 hex.workspace = true
 form_urlencoded.workspace = true
 time.workspace = true
+ssh-key.workspace = true
+pgp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1109,6 +1109,101 @@ check "back to the system's" is "$(post "$T/bob" /theme theme=auto)" 303
 CSS=$(curl -s "$B/" | grep -o 'href="/static/style.css[^"]*"' | cut -d'"' -f2)
 check "the styles know both" bash -c "curl -s '$B$CSS' | grep -q ':root\[data-theme=\"dark\"\] .hl-comment'"
 
+echo "== rebase and merge"
+check "a repository for it" is "$(post "$T/ada" /new name=linear)" 303
+LIN="http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/linear.git"
+LW=$T/linear
+git init -q -b main "$LW" && echo one >"$LW/a.txt" && git -C "$LW" add -A && git -C "$LW" commit -qm one && git -C "$LW" push -q "$LIN" main
+git -C "$LW" checkout -q -b topic && echo two >"$LW/b.txt" && git -C "$LW" add -A && git -C "$LW" commit -qm two
+echo three >"$LW/c.txt" && git -C "$LW" add -A && git -C "$LW" commit -qm three && git -C "$LW" push -q "$LIN" topic
+git -C "$LW" checkout -q main && echo moved >"$LW/m.txt" && git -C "$LW" add -A && git -C "$LW" commit -qm "main moves" && git -C "$LW" push -q "$LIN" main
+check "open a pull request" is "$(post "$T/ada" /ada/linear/pulls base=main head=topic title=Topic)" 303
+check "rebasing is offered" contains "$(curl -s -b "$T/ada" "$B/ada/linear/pull/1")" '<option value="rebase">Rebase and merge</option>'
+check "rebase and merge" is "$(post "$T/ada" /ada/linear/pull/1/merge style=rebase)" 303
+git -C "$LW" fetch -q "$LIN" main
+check "the history is linear" is "$(git -C "$LW" log --format=%s FETCH_HEAD | tr '\n' ,)" "three,two,main moves,one,"
+check "the commits are new" bash -c "[ \"\$(git -C '$LW' rev-parse FETCH_HEAD)\" != \"\$(git -C '$LW' rev-parse topic)\" ]"
+check "it's merged" contains "$(curl -s "$B/ada/linear/pull/1")" "state-badge state-merged"
+# Merges cleanly (the branch undoes its own change), but its first commit
+# can't be replayed.
+git -C "$LW" checkout -q -b undo FETCH_HEAD && echo mine >"$LW/a.txt" && git -C "$LW" commit -qam mine && echo one >"$LW/a.txt" && git -C "$LW" commit -qam undo
+git -C "$LW" push -q "$LIN" undo
+git -C "$LW" checkout -q -b theirs FETCH_HEAD && echo theirs >"$LW/a.txt" && git -C "$LW" commit -qam theirs && git -C "$LW" push -q "$LIN" theirs:main
+check "another one" is "$(post "$T/ada" /ada/linear/pulls base=main head=undo title=Undo)" 303
+check "says why it can't rebase" contains "$(curl -s -b "$T/ada" -H "$O" -d style=rebase "$B/ada/linear/pull/2/merge")" "conflicts in a.txt"
+check "the API rebases too" contains "$(api "$RW" PUT /repos/ada/linear/pulls/2/merge -d '{"merge_method":"rebase"}')" "conflicts in a.txt"
+check "and knows the methods" contains "$(api "$RW" PUT /repos/ada/linear/pulls/2/merge -d '{"merge_method":"octopus"}')" "merge, squash or rebase"
+
+echo "== verified commits"
+git -C "$LW" config gpg.format ssh && git -C "$LW" config user.signingkey "$T/key.pub"
+git -C "$LW" checkout -q -b signed theirs && git -C "$LW" commit -S -q --allow-empty -m "signed with ada's key"
+SIGNED=$(git -C "$LW" rev-parse HEAD)
+ssh-keygen -q -t ed25519 -N "" -C stranger -f "$T/stranger"
+git -C "$LW" -c user.signingkey="$T/stranger.pub" commit -S -q --allow-empty -m "signed with a stranger's key"
+GIT_COMMITTER_EMAIL=bob@example.com git -C "$LW" commit -S -q --allow-empty -m "signed by ada, committed as bob"
+git -C "$LW" push -q "$LIN" signed
+check "signed commits are verified" contains "$(curl -s "$B/ada/linear/commits/signed")" '<span class="badge badge-verified" title="Signed with ada’s SSH key SHA256:'
+check "unknown keys aren't" contains "$(curl -s "$B/ada/linear/commits/signed")" "which nobody here has added"
+check "nor someone else's email" contains "$(curl -s "$B/ada/linear/commits/signed")" "the committer email isn’t their verified email"
+check "unsigned ones show nothing" bash -c "! curl -s '$B/ada/linear/commits/main' | grep -q 'badge-verified\|badge-unverified'"
+check "the commit page says how" contains "$(curl -s "$B/ada/linear/commit/$SIGNED")" "Signed with ada’s SSH key"
+check "the API too" is "$(curl -s "$API/repos/ada/linear/commits/$SIGNED" | field '["commit"]["verification"]["reason"]')" valid
+check "and lists" is "$(curl -s "$API/repos/ada/linear/commits?sha=signed&per_page=3" | field '[1]["commit"]["verification"]["reason"]')" unknown_key
+check "SSH keys over the API" is "$(api "$RW" GET /user/keys | field '[0]["fingerprint"][:7]')" "SHA256:"
+check "GPG keys page" contains "$(curl -s -b "$T/ada" "$B/settings/keys")" "GPG keys"
+check "nonsense isn't a GPG key" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode key=nonsense "$B/settings/gpg-keys")" "doesn’t look like a GPG public key"
+if command -v gpg >/dev/null; then
+    export GNUPGHOME=$T/gnupg && mkdir -m 700 "$GNUPGHOME"
+    gpg --batch --quiet --passphrase "" --quick-gen-key "Ada <ada@example.com>" ed25519 sign never
+    check "add a GPG key" is "$(post "$T/ada" /settings/gpg-keys "key=$(gpg --armor --export ada@example.com)")" 303
+    check "it lists its emails" contains "$(curl -s -b "$T/ada" "$B/settings/keys")" "ada@example.com"
+    git -C "$LW" -c gpg.format=openpgp -c user.signingkey=ada@example.com commit -S -q --allow-empty -m "signed with GPG"
+    git -C "$LW" push -q "$LIN" signed
+    check "GPG signatures verify" is "$(curl -s "$API/repos/ada/linear/commits/signed" | field '["commit"]["verification"]["reason"]')" valid
+    check "the API lists GPG keys" is "$(api "$RW" GET /user/gpg_keys | field '[0]["emails"][0]["email"]')" ada@example.com
+    gpgconf --kill gpg-agent
+    unset GNUPGHOME
+fi
+
+echo "== archiving"
+check "archive" is "$(post "$T/ada" /ada/linear/archive to=on)" 303
+check "it says so" contains "$(curl -s "$B/ada/linear")" "It is read-only"
+check "pushes are refused" bash -c "git -C '$LW' push '$LIN' HEAD:refs/heads/late 2>&1 | grep -q 'archived'"
+check "over SSH too" bash -c "git -C '$LW' push 'ssh://git@127.0.0.1:$SSH_PORT/ada/linear.git' HEAD:refs/heads/late 2>&1 | grep -q 'archived'"
+check "no new issues" contains "$(curl -s -b "$T/bob" -H "$O" -d title=Hi "$B/ada/linear/issues")" "archived"
+check "no comments" contains "$(curl -s -b "$T/bob" "$B/ada/linear/pull/2")" "closed to new comments"
+check "nor merges" bash -c "! curl -s -b '$T/ada' '$B/ada/linear/pull/2' | grep -q 'name=\"style\"'"
+check "the API refuses too" contains "$(api "$RW" POST /repos/ada/linear/issues -d '{"title":"x"}')" "archived"
+check "settings still open" is "$(status -b "$T/ada" "$B/ada/linear/settings")" 200
+check "out of the way on Explore" bash -c "! curl -s '$B/explore?q=linear' | grep -q 'href=\"/ada/linear\"'"
+check "unless asked for" contains "$(curl -s "$B/explore?q=linear&archived=1")" 'href="/ada/linear"'
+check "the API says so" is "$(curl -s "$API/repos/ada/linear" | field '["archived"]')" True
+check "unarchive with the API" is "$(api "$RW" PATCH /repos/ada/linear -d '{"archived":false}' | field '["archived"]')" False
+check "writable again" git -C "$LW" push -q "$LIN" HEAD:refs/heads/late
+
+echo "== project boards"
+check "a board" is "$(curl -s -b "$T/ada" -H "$O" -o /dev/null -w '%{redirect_url}' -d title=Roadmap -d kanban=on "$B/ada/linear/projects")" "$B/ada/linear/projects/1"
+check "with columns" contains "$(curl -s "$B/ada/linear/projects/1")" "<h3>In progress</h3>"
+TODO=$(api "$RW" GET /repos/ada/linear/projects/1 | field '["columns"][0]["id"]')
+DONE=$(api "$RW" GET /repos/ada/linear/projects/1 | field '["columns"][2]["id"]')
+check "add a pull request" is "$(post "$T/ada" /ada/linear/projects/1/cards "column=$TODO" "text=#2")" 303
+check "and a note" is "$(post "$T/ada" /ada/linear/projects/1/cards "column=$TODO" "text=Write the **docs**")" 303
+check "notes are Markdown" contains "$(curl -s "$B/ada/linear/projects/1")" "<strong>docs</strong>"
+check "unknown numbers" contains "$(curl -s -b "$T/ada" -H "$O" -d "column=$TODO" -d "text=#99" "$B/ada/linear/projects/1/cards")" "no issue or pull request #99"
+check "the pull request shows it" contains "$(curl -s "$B/ada/linear/pull/2")" "Roadmap</a> <span class=\"muted small\">· To do"
+CARD=$(api "$RW" GET /repos/ada/linear/projects/1 | field '["columns"][0]["cards"][0]["id"]')
+check "move a card" is "$(post "$T/ada" "/ada/linear/projects/1/cards/$CARD/move" "column=$DONE" position=0)" 303
+check "the script's way" is "$(curl -s -b "$T/ada" -H "$O" -o /dev/null -w '%{http_code}' -d "column=$TODO" -d position=5 -d js=1 "$B/ada/linear/projects/1/cards/$CARD/move")" 204
+check "closing moves it to Done" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$T/ada' -H '$O' -d action=close -d body= '$B/ada/linear/issues/2/comments')\" = 303 ] && curl -s '$API/repos/ada/linear/projects/1' | python3 -c 'import json,sys; c=json.load(sys.stdin)[\"columns\"]; sys.exit(0 if c[2][\"cards\"] and c[2][\"cards\"][0][\"issue\"][\"number\"] == 2 else 1)'"
+check "the list shows progress" contains "$(curl -s "$B/ada/linear/projects")" "<strong>100%</strong> done"
+check "add a column" is "$(post "$T/ada" /ada/linear/projects/1/columns name=Review)" 303
+check "bob can look" is "$(status -b "$T/bob" "$B/ada/linear/projects/1")" 200
+check "but not change it" is "$(post "$T/bob" /ada/linear/projects/1/columns name=Mine)" 403
+check "the API adds cards" is "$(api_status "$RW" POST /repos/ada/linear/projects/1/cards -d "{\"column_id\":$TODO,\"note\":\"From the API\"}")" 201
+check "and moves them" is "$(api_status "$RW" POST "/repos/ada/linear/projects/1/cards/$CARD/moves" -d "{\"column_id\":$TODO}")" 204
+check "close the board" is "$(post "$T/ada" /ada/linear/projects/1/state to=closed)" 303
+check "it's under closed" contains "$(curl -s "$B/ada/linear/projects?state=closed")" "Roadmap"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -1121,6 +1216,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /ada/tracker/upload/main /ada/tracker/edit/main/docs/README.md /ada/tracker/delete/main/docs/README.md \
     /issues /pulls "/pulls?q=is:pr" "/ada/engine/pulls?q=is:closed" /settings/profile /new/import /ada/imported /ada/imported/pulls?q=is:merged \
     /ada/engine/graphs/contributors /ada/engine/graphs/commit-activity /ada/flow/pull/1 /ada/flow/pull/2 "/new?template=ada/flow" \
+    /ada/linear/projects /ada/linear/projects/new /ada/linear/projects/1 /ada/linear/projects/1/edit "/ada/linear/commits/signed" "/ada/linear/commit/$SIGNED" \
     /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done

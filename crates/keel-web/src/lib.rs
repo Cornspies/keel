@@ -24,6 +24,7 @@ mod hooks;
 mod pages;
 mod password;
 mod profile;
+mod projects;
 mod protection;
 mod milestones;
 mod pulls;
@@ -34,6 +35,7 @@ mod search;
 mod session;
 mod stars;
 mod settings;
+mod signatures;
 mod statuses;
 mod theme;
 mod twofactor;
@@ -236,6 +238,8 @@ pub fn router(state: AppState) -> Router {
         .route("/email/verify", get(password::verify))
         .route("/settings/keys", get(settings::keys).post(settings::add_key))
         .route("/settings/keys/{id}/delete", post(settings::delete_key))
+        .route("/settings/gpg-keys", post(settings::add_gpg_key))
+        .route("/settings/gpg-keys/{id}/delete", post(settings::delete_gpg_key))
         .route("/settings/tokens", get(settings::tokens).post(settings::create_token))
         .route("/settings/tokens/{id}/delete", post(settings::delete_token))
         .route("/static/{file}", get(assets::serve))
@@ -261,6 +265,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/settings/push-mirrors/{id}/delete", post(repo::delete_push_mirror))
         .route("/{owner}/{repo}/settings/lfs-locks/{id}/unlock", post(repo::unlock_file))
         .route("/{owner}/{repo}/transfer", post(repo::transfer))
+        .route("/{owner}/{repo}/archive", post(repo::archive))
         .route("/{owner}/{repo}/search", get(search::in_repo))
         .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
         .route("/{owner}/{repo}/compare", get(pulls::compare_index))
@@ -296,6 +301,21 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/milestones/{id}/state", post(milestones::set_state))
         .route("/{owner}/{repo}/milestones/{id}/delete", post(milestones::delete))
         .route("/{owner}/{repo}/issues/{number}/milestone", post(milestones::set_issue_milestone))
+        .route("/{owner}/{repo}/issues/{number}/projects", post(projects::add_issue))
+        .route("/{owner}/{repo}/projects", get(projects::index).post(projects::create))
+        .route("/{owner}/{repo}/projects/new", get(projects::new_form))
+        .route("/{owner}/{repo}/projects/{number}", get(projects::board))
+        .route("/{owner}/{repo}/projects/{number}/edit", get(projects::edit_form).post(projects::edit))
+        .route("/{owner}/{repo}/projects/{number}/state", post(projects::set_state))
+        .route("/{owner}/{repo}/projects/{number}/delete", post(projects::delete))
+        .route("/{owner}/{repo}/projects/{number}/columns", post(projects::add_column))
+        .route("/{owner}/{repo}/projects/{number}/columns/{id}", post(projects::edit_column))
+        .route("/{owner}/{repo}/projects/{number}/columns/{id}/move", post(projects::move_column))
+        .route("/{owner}/{repo}/projects/{number}/columns/{id}/delete", post(projects::delete_column))
+        .route("/{owner}/{repo}/projects/{number}/cards", post(projects::add_card))
+        .route("/{owner}/{repo}/projects/{number}/cards/{id}/move", post(projects::move_card))
+        .route("/{owner}/{repo}/projects/{number}/cards/{id}/note", post(projects::edit_note))
+        .route("/{owner}/{repo}/projects/{number}/cards/{id}/delete", post(projects::delete_card))
         .route("/{owner}/{repo}/issues/{number}/reviewers", post(labels::set_reviewers))
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/apply", post(pulls::apply_suggestion))
         .route("/{owner}/{repo}/releases", get(releases::list).post(releases::create))

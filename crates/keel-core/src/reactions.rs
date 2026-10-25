@@ -123,6 +123,7 @@ impl Core {
             return invalid(format!("Unknown reaction “{content}”."));
         };
         self.check_reactable(issue, comment_id).await?;
+        crate::issues::ensure_issue_unarchived(&self.db, issue.id).await?;
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO reactions (issue_id, comment_id, user_id, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
@@ -152,6 +153,7 @@ impl Core {
     /// Adds `user`'s reaction, or takes it back if it's there. Returns
     /// whether it's there now.
     pub async fn toggle_reaction(&self, issue: &Issue, comment_id: Option<i64>, user: &User, content: &str) -> Result<bool> {
+        crate::issues::ensure_issue_unarchived(&self.db, issue.id).await?;
         let removed = sqlx::query(
             "DELETE FROM reactions WHERE issue_id = ?1 AND IFNULL(comment_id, 0) = IFNULL(?2, 0) AND user_id = ?3 AND content = ?4",
         )
@@ -172,6 +174,7 @@ impl Core {
 
     /// Deletes reaction `id` to the issue or comment, if it's `user`'s.
     pub async fn delete_reaction(&self, issue: &Issue, comment_id: Option<i64>, user: &User, id: i64) -> Result<()> {
+        crate::issues::ensure_issue_unarchived(&self.db, issue.id).await?;
         let deleted = sqlx::query(
             "DELETE FROM reactions WHERE id = ?1 AND issue_id = ?2 AND IFNULL(comment_id, 0) = IFNULL(?3, 0) AND user_id = ?4",
         )

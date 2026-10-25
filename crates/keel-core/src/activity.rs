@@ -369,6 +369,7 @@ impl Core {
             "private": r.is_private,
             "fork": r.forked_from.is_some(),
             "is_template": r.is_template,
+            "archived": r.is_archived(),
             "description": r.description,
             "topics": r.topics().collect::<Vec<_>>(),
             "stargazers_count": r.stars,

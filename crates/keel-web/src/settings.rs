@@ -5,7 +5,7 @@ use axum::Form;
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{AccessToken, SshKey, User};
+use keel_core::{AccessToken, GpgKey, SshKey, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
@@ -204,6 +204,26 @@ impl From<SshKey> for KeyView {
     }
 }
 
+struct GpgKeyView {
+    id: i64,
+    key_id: String,
+    emails: Vec<String>,
+    added: String,
+    expires: Option<String>,
+}
+
+impl From<GpgKey> for GpgKeyView {
+    fn from(k: GpgKey) -> Self {
+        Self {
+            id: k.id,
+            key_id: k.key_id().to_owned(),
+            emails: k.emails().map(str::to_owned).collect(),
+            added: date(k.created_at),
+            expires: k.expires_at.map(date),
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "settings/keys.html")]
 struct KeysPage {
@@ -214,23 +234,68 @@ struct KeysPage {
     name: String,
     key: String,
     ssh_enabled: bool,
+    gpg_keys: Vec<GpgKeyView>,
+    gpg_error: Option<String>,
+    gpg_key: String,
 }
 
-async fn keys_page(state: &AppState, user: keel_core::User, error: Option<String>, name: String, key: String) -> AppResult {
+/// What the forms held, to show them again with an error.
+#[derive(Default)]
+struct KeyForms {
+    error: Option<String>,
+    name: String,
+    key: String,
+    gpg_error: Option<String>,
+    gpg_key: String,
+}
+
+async fn keys_page(state: &AppState, user: keel_core::User, forms: KeyForms) -> AppResult {
     let keys = state.core.ssh_keys(user.id).await?.into_iter().map(KeyView::from).collect();
+    let gpg_keys = state.core.gpg_keys(user.id).await?.into_iter().map(GpgKeyView::from).collect();
     html(KeysPage {
-        page: Page::new(state, Some(user), "SSH keys"),
+        page: Page::new(state, Some(user), "SSH and GPG keys"),
         nav: "keys",
-        error,
+        error: forms.error,
         keys,
-        name,
-        key,
+        name: forms.name,
+        key: forms.key,
         ssh_enabled: state.core.config.ssh.is_some(),
+        gpg_keys,
+        gpg_error: forms.gpg_error,
+        gpg_key: forms.gpg_key,
     })
 }
 
 pub async fn keys(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
-    keys_page(&state, user, None, String::new(), String::new()).await
+    keys_page(&state, user, KeyForms::default()).await
+}
+
+#[derive(Deserialize)]
+pub struct GpgKeyForm {
+    key: String,
+}
+
+pub async fn add_gpg_key(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Form(f): Form<GpgKeyForm>,
+) -> AppResult {
+    match state.core.add_gpg_key(user.id, &f.key).await {
+        Ok(_) => Ok(Redirect::to("/settings/keys#gpg").into_response()),
+        Err(keel_core::Error::Invalid(msg)) => {
+            keys_page(&state, user, KeyForms { gpg_error: Some(msg), gpg_key: f.key, ..Default::default() }).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn delete_gpg_key(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path(id): Path<i64>,
+) -> AppResult {
+    state.core.delete_gpg_key(user.id, id).await?;
+    Ok(Redirect::to("/settings/keys#gpg").into_response())
 }
 
 #[derive(Deserialize)]
@@ -247,7 +312,9 @@ pub async fn add_key(
 ) -> AppResult {
     match state.core.add_ssh_key(user.id, &f.name, &f.key).await {
         Ok(_) => Ok(Redirect::to("/settings/keys").into_response()),
-        Err(keel_core::Error::Invalid(msg)) => keys_page(&state, user, Some(msg), f.name, f.key).await,
+        Err(keel_core::Error::Invalid(msg)) => {
+            keys_page(&state, user, KeyForms { error: Some(msg), name: f.name, key: f.key, ..Default::default() }).await
+        }
         Err(e) => Err(e.into()),
     }
 }

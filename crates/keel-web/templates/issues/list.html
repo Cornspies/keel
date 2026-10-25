@@ -32,7 +32,8 @@
     </div>
   </details>
   {% if let Some((url, on)) = review_filter %}<a class="btn btn-small{% if *on %} btn-selected{% endif %}" href="{{ url }}" title="Pull requests waiting for your review">Review requested</a>{% endif %}
-  {% if pulls %}
+  {% if repo.archived.is_some() %}
+  {% else if pulls %}
   <a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/compare">New pull request</a>
   {% else if signed_in %}
   <a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/issues/new">New issue</a>

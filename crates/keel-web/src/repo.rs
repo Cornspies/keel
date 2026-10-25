@@ -99,8 +99,11 @@ pub(crate) struct RepoView {
     pub description: String,
     pub is_private: bool,
     pub can_write: bool,
-    /// May change settings and collaborators.
+    /// May change settings and collaborators (also of an archived
+    /// repository).
     pub can_admin: bool,
+    /// When it was archived, if it is.
+    pub archived: Option<String>,
     pub http_url: String,
     pub ssh_url: Option<String>,
     /// Which tab is active: code, commits, branches or settings.
@@ -127,6 +130,10 @@ pub(crate) struct RepoView {
     pub topics: Vec<String>,
     /// Show the wiki tab (there is a wiki, or the viewer can start one).
     pub wiki_tab: bool,
+    /// Open projects, and whether to show the tab (there are projects, or
+    /// the viewer can start one).
+    pub open_projects: i64,
+    pub projects_tab: bool,
     /// An import that's running, or ended recently with problems.
     pub import: Option<ImportView>,
 }
@@ -176,6 +183,7 @@ impl RepoView {
             url: m.url,
         });
         let import = state.core.import(repo.id).await?.filter(|i| i.worth_showing());
+        let (open_projects, closed_projects) = state.core.project_counts(repo.id).await?;
         Ok(Self {
             import: import.map(|i| ImportView {
                 running: i.in_progress(),
@@ -188,6 +196,8 @@ impl RepoView {
             releases: state.core.release_count(repo.id).await?,
             topics: repo.topics().map(str::to_owned).collect(),
             wiki_tab: access >= Access::Write || state.core.has_wiki(repo.id),
+            open_projects,
+            projects_tab: access >= Access::Write || open_projects + closed_projects > 0,
             mirror,
             parent,
             is_template: repo.is_template,
@@ -210,7 +220,9 @@ impl RepoView {
             description: repo.description.clone(),
             is_private: repo.is_private,
             can_write: access >= Access::Write,
-            can_admin: access == Access::Admin,
+            can_admin: access == Access::Admin
+                || repo.is_archived() && state.core.granted_access(repo, viewer).await? == Access::Admin,
+            archived: repo.archived_at.map(crate::render::date),
             http_url: cfg.http_clone_url(&repo.owner, &repo.name),
             ssh_url: cfg.ssh_clone_url(&repo.owner, &repo.name),
             tab,
@@ -229,6 +241,8 @@ pub(crate) struct CommitView {
     pub url: String,
     /// The status badge (HTML), if CI reported anything.
     pub status: String,
+    /// Set for signed commits by [`crate::signatures::attach`].
+    pub signature: Option<crate::signatures::SignatureView>,
 }
 
 impl CommitView {
@@ -242,6 +256,7 @@ impl CommitView {
             when_full: datetime(c.author.time),
             url: format!("{base}/commit/{}", c.id),
             status: String::new(),
+            signature: None,
         }
     }
 }
@@ -481,7 +496,8 @@ async fn render_tree(
             };
             let mut latest = latest.as_ref().map(|c| CommitView::new(&base, c));
             if let Some(c) = latest.as_mut() {
-                crate::statuses::attach(&state, &repo, &mut [c]).await?;
+                crate::statuses::attach(&state, &repo, &mut [&mut *c]).await?;
+                crate::signatures::attach(&state, &repo, &mut [c]).await?;
             }
             let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
             let here = (view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == resolved.rev))
@@ -874,6 +890,7 @@ pub async fn commits(
     let here = here.trim_end_matches('/').to_owned();
     let mut commits: Vec<CommitView> = list.iter().map(|c| CommitView::new(&base, c)).collect();
     crate::statuses::attach(&state, &repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
+    crate::signatures::attach(&state, &repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
     html(CommitsPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Commits · {}/{}", repo.owner, repo.name)),
@@ -1033,11 +1050,13 @@ pub async fn commit(
         .map(|s| crate::statuses::CheckView::new(s, false))
         .collect();
 
+    let mut commit = CommitView::new(&base, &detail.commit);
+    crate::signatures::attach(&state, &repo, &mut [&mut commit]).await?;
     html(CommitPage {
         checks,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("{} · {}/{}", detail.commit.summary, repo.owner, repo.name)),
-        commit: CommitView::new(&base, &detail.commit),
+        commit,
         body: detail.body,
         committer: detail.committer.name,
         parents: detail
@@ -1151,8 +1170,14 @@ pub(crate) struct SettingsErrors {
 
 /// The repository, if `user` may administer it.
 async fn writable(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
-    let (repo, access) = load(state, Some(user), owner, name).await?;
-    if access != Access::Admin {
+    load_for_admin(state, user, owner, name).await
+}
+
+/// The repository, if `user` may change its settings, which archived
+/// repositories still allow (to unarchive them, say).
+pub(crate) async fn load_for_admin(state: &AppState, user: &User, owner: &str, name: &str) -> AppResult<Repo> {
+    let (repo, _) = load(state, Some(user), owner, name).await?;
+    if state.core.granted_access(&repo, Some(user)).await? != Access::Admin {
         return Err(AppError::Forbidden);
     }
     Ok(repo)
@@ -1451,6 +1476,23 @@ pub async fn rename(
 pub struct TransferForm {
     new_owner: String,
     confirm: String,
+}
+
+#[derive(Deserialize)]
+pub struct ArchiveForm {
+    /// `on` or `off`.
+    to: String,
+}
+
+pub async fn archive(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name)): Path<(String, String)>,
+    Form(f): Form<ArchiveForm>,
+) -> AppResult {
+    let repo = writable(&state, &user, &owner, &name).await?;
+    state.core.set_archived(repo.id, f.to == "on").await?;
+    Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
 }
 
 pub async fn transfer(

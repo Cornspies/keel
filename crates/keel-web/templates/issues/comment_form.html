@@ -10,6 +10,8 @@
     <button class="btn btn-primary" name="action" value="comment">Comment</button>
   </div>
 </form>
+{% else if conv.archived %}
+<p class="muted">This repository is archived, so the conversation is closed to new comments.</p>
 {% else %}
 <p class="muted"><a href="/login">Sign in</a> to join the conversation.</p>
 {% endif %}

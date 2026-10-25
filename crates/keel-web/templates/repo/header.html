@@ -5,6 +5,7 @@
       <a href="/{{ repo.owner }}/{{ repo.name }}"><strong>{{ repo.name }}</strong></a>
       {% if repo.is_private %}<span class="badge">Private</span>{% endif %}
       {% if repo.is_template %}<span class="badge">Template</span>{% endif %}
+      {% if repo.archived.is_some() %}<span class="badge badge-archived">Archived</span>{% endif %}
     </h1>
     <div class="spacer"></div>
     {% if repo.is_template %}<a class="btn btn-small btn-primary use-template" href="/new?template={{ repo.owner }}/{{ repo.name }}">Use this template</a>{% endif %}
@@ -53,6 +54,7 @@
   <p class="flash flash-error small import-note">{% if e.starts_with("Imported") %}{{ e }}{% else %}Importing from <a href="{{ i.url }}" rel="nofollow noopener noreferrer">{{ i.service }}</a> failed: {{ e }}{% endif %}</p>
   {% endif %}
   {% endif %}
+  {% if let Some(when) = repo.archived %}<p class="flash flash-warn archived-note">This repository was archived on {{ when }}. It is read-only.</p>{% endif %}
   {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
   {% if !repo.topics.is_empty() %}<p class="topics">{% for t in repo.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
   <nav class="tabs">
@@ -62,6 +64,7 @@
     <a href="/{{ repo.owner }}/{{ repo.name }}/commits{% if !repo.default_rev.is_empty() %}/{{ repo.default_rev }}{% endif %}"{% if repo.tab == "commits" %} class="active"{% endif %}>Commits</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/branches"{% if repo.tab == "branches" %} class="active"{% endif %}>Branches</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/releases"{% if repo.tab == "releases" %} class="active"{% endif %}>Releases{% if repo.releases > 0 %} <span class="count">{{ repo.releases }}</span>{% endif %}</a>
+    {% if repo.projects_tab %}<a href="/{{ repo.owner }}/{{ repo.name }}/projects"{% if repo.tab == "projects" %} class="active"{% endif %}>Projects{% if repo.open_projects > 0 %} <span class="count">{{ repo.open_projects }}</span>{% endif %}</a>{% endif %}
     {% if repo.wiki_tab %}<a href="/{{ repo.owner }}/{{ repo.name }}/wiki"{% if repo.tab == "wiki" %} class="active"{% endif %}>Wiki</a>{% endif %}
     <a href="/{{ repo.owner }}/{{ repo.name }}/graphs/contributors"{% if repo.tab == "insights" %} class="active"{% endif %}>Insights</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/search" class="tab-search">Search</a>

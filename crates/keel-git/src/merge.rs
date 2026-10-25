@@ -23,7 +23,12 @@ pub enum MergeStyle {
     Merge,
     /// One new commit on top of the base with the combined changes.
     Squash,
+    /// The head's commits, replayed one by one on top of the base.
+    Rebase,
 }
+
+/// Most commits a rebase replays (each takes a `git merge-tree`).
+pub const REBASE_LIMIT: usize = 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mergeability {
@@ -37,6 +42,10 @@ fn git(path: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("--git-dir").arg(path).env("GIT_CONFIG_NOSYSTEM", "1");
     cmd
+}
+
+fn short(id: Oid) -> String {
+    id.to_string()[..10].to_owned()
 }
 
 fn run(cmd: &mut Command) -> Result<String> {
@@ -78,11 +87,18 @@ impl GitRepo {
 
     /// Would merging `head` into `base` succeed without conflicts?
     pub fn mergeability(&self, base: Oid, head: Oid) -> Result<Mergeability> {
-        let out = git(self.repo.path())
-            .args(["merge-tree", "--write-tree", "--name-only", "--no-messages"])
-            .arg(base.to_string())
-            .arg(head.to_string())
-            .output()?;
+        self.merge_tree(None, base, head)
+    }
+
+    /// Merges commit `theirs` into `ours`, from their merge base or from
+    /// `merge_base` if given.
+    fn merge_tree(&self, merge_base: Option<Oid>, ours: Oid, theirs: Oid) -> Result<Mergeability> {
+        let mut cmd = git(self.repo.path());
+        cmd.args(["merge-tree", "--write-tree", "--name-only", "--no-messages"]);
+        if let Some(b) = merge_base {
+            cmd.arg(format!("--merge-base={b}"));
+        }
+        let out = cmd.arg(ours.to_string()).arg(theirs.to_string()).output()?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let mut lines = stdout.lines();
         let tree = lines.next().and_then(|l| Oid::from_str(l.trim()).ok());
@@ -109,6 +125,11 @@ impl GitRepo {
         message: &str,
         who: &Identity<'_>,
     ) -> Result<Oid> {
+        if style == MergeStyle::Rebase {
+            let tip = self.rebase(base, head, who)?;
+            self.update_ref(&format!("refs/heads/{base_branch}"), Some(tip), Some(base))?;
+            return Ok(tip);
+        }
         let Mergeability::Clean(tree) = self.mergeability(base, head)? else {
             return Err(Error::Other("the branches have conflicts".into()));
         };
@@ -125,6 +146,54 @@ impl GitRepo {
         let commit = Oid::from_str(&run(&mut cmd)?)?;
         self.update_ref(&format!("refs/heads/{base_branch}"), Some(commit), Some(base))?;
         Ok(commit)
+    }
+
+    /// Replays the commits on `head` that aren't on `base` on top of
+    /// `base`, keeping their authors and messages, with `who` as the
+    /// committer; commits that end up changing nothing are dropped. If
+    /// `head` already builds on `base` its commits are kept as they are
+    /// (signatures and all). Returns the new tip; writes no refs.
+    pub fn rebase(&self, base: Oid, head: Oid, who: &Identity<'_>) -> Result<Oid> {
+        if self.is_ancestor(base, head)? {
+            return Ok(head);
+        }
+        let mut walk = self.repo.revwalk()?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+        walk.push(head)?;
+        walk.hide(base)?;
+        let commits = walk.take(REBASE_LIMIT + 1).collect::<std::result::Result<Vec<_>, _>>()?;
+        if commits.len() > REBASE_LIMIT {
+            return Err(Error::Rebase(format!("more than {REBASE_LIMIT} commits to rebase")));
+        }
+        let committer = git2::Signature::now(who.name, who.email)?;
+        let mut tip = self.repo.find_commit(base)?;
+        for id in commits {
+            let commit = self.repo.find_commit(id)?;
+            if commit.parent_count() != 1 {
+                return Err(Error::Rebase(format!("{} is a merge commit", short(id))));
+            }
+            let parent = commit.parent_id(0)?;
+            let tree = match self.merge_tree(Some(parent), tip.id(), id)? {
+                Mergeability::Clean(tree) => tree,
+                Mergeability::Conflicts(files) => {
+                    return Err(Error::Rebase(format!("{} conflicts in {}", short(id), files.join(", "))));
+                }
+            };
+            if tree == tip.tree_id() {
+                continue;
+            }
+            let author = commit.author();
+            let author = git2::Signature::new(
+                &String::from_utf8_lossy(author.name_bytes()),
+                &String::from_utf8_lossy(author.email_bytes()),
+                &author.when(),
+            )?;
+            let message = String::from_utf8_lossy(commit.message_raw_bytes());
+            let tree = self.repo.find_tree(tree)?;
+            let new = self.repo.commit(None, &author, &committer, &message, &tree, &[&tip])?;
+            tip = self.repo.find_commit(new)?;
+        }
+        Ok(tip.id())
     }
 
     /// Sets (`new` = `Some`) or deletes a ref. With `old`, only if the ref
@@ -221,6 +290,41 @@ mod tests {
         let squashed = repo.merge("main", main, feature, MergeStyle::Squash, "Feature (#1)", &who).unwrap();
         assert_eq!(repo.commit_detail(squashed).unwrap().parents, [main]);
         assert_eq!(s.git(&["show", "main:new.txt"]), "x");
+    }
+
+    #[test]
+    fn rebase() {
+        let (s, repo) = bare_with_branches();
+        let main = repo.branch_tip("main").unwrap();
+        let feature = repo.branch_tip("feature").unwrap();
+        let who = Identity { name: "Bob", email: "bob@example.com" };
+        let tip = repo.merge("main", main, feature, MergeStyle::Rebase, "", &who).unwrap();
+        assert_eq!(repo.branch_tip("main"), Some(tip));
+        // Linear: the two feature commits on top of main, authors kept.
+        let log = s.git(&["log", "--format=%s|%an|%cn|%P", "main"]);
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines[0].rsplit_once('|').unwrap().0, "feature: add new|Ada|Bob");
+        assert_eq!(lines[1].rsplit_once('|').unwrap().0, "feature: change a|Ada|Bob");
+        assert_eq!(lines[2].split('|').next(), Some("main: change b"));
+        assert!(lines.iter().all(|l| l.rsplit('|').next().unwrap().split(' ').count() == 1));
+        assert_eq!(s.git(&["show", "main:a.txt"]), "feature");
+        assert_eq!(s.git(&["show", "main:b.txt"]), "main");
+
+        // Already on top: kept as is.
+        s.git(&["branch", "-f", "more", "main"]);
+        s.git(&["checkout", "-q", "more"]);
+        s.write("c.txt", "c\n");
+        s.commit("more: add c");
+        let more = repo.branch_tip("more").unwrap();
+        assert_eq!(repo.rebase(tip, more, &who).unwrap(), more);
+
+        // A commit that conflicts with main's change to b.
+        s.git(&["checkout", "-q", "-b", "clash", &format!("{main}~1")]);
+        s.write("b.txt", "clash\n");
+        s.commit("clash: change b");
+        let clash = repo.branch_tip("clash").unwrap();
+        let err = repo.rebase(tip, clash, &who).unwrap_err().to_string();
+        assert!(err.contains("conflicts in b.txt"), "{err}");
     }
 
     #[test]

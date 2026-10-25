@@ -75,6 +75,26 @@
     </div>
     {% if let Some((title, url)) = conv.milestone %}<p><a href="{{ url }}">{{ title }}</a></p>{% else %}<p class="muted small">No milestone</p>{% endif %}
   </section>
+  {% if !conv.projects.is_empty() || !conv.project_choices.is_empty() %}
+  <section>
+    <div class="sidebar-head">
+      <h3>Projects</h3>
+      {% if !conv.project_choices.is_empty() %}
+      <details class="dropdown dropdown-right">
+        <summary class="btn btn-small" aria-label="Add to a project">Add</summary>
+        <form method="post" action="{{ conv.base_url }}/projects" class="dropdown-menu dropdown-wide checklist">
+          {% for (number, title) in conv.project_choices %}
+          <label class="check"><input type="radio" name="project" value="{{ number }}"{% if loop.first %} checked{% endif %}> {{ title }}</label>
+          {% endfor %}
+          <button class="btn btn-small btn-primary">Add to project</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% if conv.projects.is_empty() %}<p class="muted small">None yet</p>{% endif %}
+    {% for (title, column, url) in conv.projects %}<p><a href="{{ url }}">{{ title }}</a> <span class="muted small">· {{ column }}</span></p>{% endfor %}
+  </section>
+  {% endif %}
   {% if let Some(sub) = conv.subscription %}
   <section>
     <div class="sidebar-head"><h3>Notifications</h3></div>

@@ -26,4 +26,31 @@
       <span class="hint">Paste the contents of e.g. <code>~/.ssh/id_ed25519.pub</code>.</span></label>
     <button class="btn btn-primary">Add key</button>
   </form>
+  <p class="muted small">SSH keys also verify commits you sign with them (<code>git config gpg.format ssh</code>).</p>
+
+  <h1 id="gpg">GPG keys</h1>
+  <p class="muted">Commits signed with these keys show as verified when their committer email is your verified email.</p>
+  {% if gpg_keys.is_empty() %}
+  <p class="empty">You haven’t added any GPG keys yet.</p>
+  {% else %}
+  <ul class="card-list">
+    {% for k in gpg_keys %}
+    <li class="card-row">
+      <div>
+        <strong class="mono">{{ k.key_id }}</strong>
+        <div class="small">{% if k.emails.is_empty() %}<span class="muted">No email addresses</span>{% else %}{{ k.emails.join(", ") }}{% endif %}</div>
+        <div class="muted small">Added {{ k.added }}{% if let Some(e) = k.expires %} · Expires {{ e }}{% endif %}</div>
+      </div>
+      <form method="post" action="/settings/gpg-keys/{{ k.id }}/delete"><button class="btn btn-small btn-danger">Delete</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <h2>Add a GPG key</h2>
+  {% if let Some(e) = gpg_error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/settings/gpg-keys" class="form">
+    <label>Public key <textarea name="key" rows="8" class="mono" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----" required>{{ gpg_key }}</textarea>
+      <span class="hint">The output of <code>gpg --armor --export you@example.com</code>.</span></label>
+    <button class="btn btn-primary">Add GPG key</button>
+  </form>
 {% endblock %}

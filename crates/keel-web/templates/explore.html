@@ -7,6 +7,7 @@
       <input type="search" name="q" value="{{ q }}" placeholder="Find a repository" aria-label="Find a repository">
       {% if let Some(t) = topic %}<input type="hidden" name="topic" value="{{ t }}">{% endif %}
       <select name="sort" aria-label="Sort">{% for (value, label) in sorts %}<option value="{{ value }}"{% if *value == sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <label class="check"><input type="checkbox" name="archived" value="1"{% if archived %} checked{% endif %}> Include archived</label>
       <button class="btn">Search</button>
     </form>
     <p class="muted explore-summary">

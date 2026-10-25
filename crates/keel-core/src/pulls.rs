@@ -291,7 +291,7 @@ impl Core {
         insert_comment(&mut tx, issue.id, actor, "merged", "").await?;
         tx.commit().await?;
         self.record(Activity::Issue { issue_id: issue.id, actor, action: IssueAction::Merged }).await;
-        Ok(())
+        self.move_cards_of(issue.id, false).await
     }
 
     /// After refs of `repo_id` changed: updates the open pull requests into
@@ -301,7 +301,8 @@ impl Core {
     pub async fn sync_pulls(&self, repo_id: i64, pusher: Option<i64>) -> Result<()> {
         let open: Vec<(i64, i64)> = sqlx::query_as(
             "SELECT i.repo_id, i.number FROM issues i JOIN pull_requests p ON p.issue_id = i.id
-             WHERE i.state = 'open' AND (i.repo_id = ?1 OR p.head_repo_id = ?1)",
+             JOIN repositories r ON r.id = i.repo_id
+             WHERE i.state = 'open' AND (i.repo_id = ?1 OR p.head_repo_id = ?1) AND r.archived_at IS NULL",
         )
         .bind(repo_id)
         .fetch_all(&self.db)
@@ -379,6 +380,8 @@ impl Core {
                 let list: Vec<String> = commits.iter().map(|c| format!("* {}", c.summary)).collect();
                 format!("{} (#{number})\n\n{}", issue.title, list.join("\n"))
             }
+            // Each commit keeps its own.
+            MergeStyle::Rebase => String::new(),
         };
         let base_ref = pull.base_ref.clone();
         let (name, email) = (user.username.clone(), user.email.clone());
@@ -387,13 +390,17 @@ impl Core {
             .git(repo.id, move |g| {
                 let merge_base = g.merge_base(base, head)?;
                 let who = Identity { name: &name, email: &email };
-                let commit = g.merge(&base_ref, base, head, style, &message, &who)?;
+                let commit = match g.merge(&base_ref, base, head, style, &message, &who) {
+                    Err(keel_git::Error::Rebase(why)) => return Ok(Err(why)),
+                    commit => commit?,
+                };
                 g.update_ref(&pull_ref(number), Some(head), None)?;
-                Ok((merge_base, commit))
+                Ok(Ok((merge_base, commit)))
             })
             .await;
         let (merge_base, commit) = match merged {
-            Ok(v) => v,
+            Ok(Ok(v)) => v,
+            Ok(Err(why)) => return invalid(format!("Couldn’t rebase: {why}. Merge or squash it instead.")),
             Err(Error::Internal(e)) => {
                 tracing::info!("merge of {}/{}#{number} failed: {e:#}", repo.owner, repo.name);
                 return invalid("Merging failed: the branches changed or conflict. Reload and try again.");
@@ -500,6 +507,38 @@ mod tests {
         assert_ne!(pull.base_commit, pull.head_commit, "merge base from before the merge");
         assert!(core.set_issue_open(&issue, &ada, true).await.is_ok());
         assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().state, "merged", "can't reopen");
+    }
+
+    #[tokio::test]
+    async fn rebase_merge() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        let work = push_branches(&core, &repo);
+        // Main moves on, so the feature commit has to be replayed.
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(work.path()).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(work.path().join("c"), "1").unwrap();
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-qm", "main moves"]);
+        git(&["push", "-q", core.repo_path(&repo).to_str().unwrap(), "main"]);
+        let main = core.git(repo.id, |g| Ok(g.branch_tip("main"))).await.unwrap().unwrap();
+        let feature = core.git(repo.id, |g| Ok(g.branch_tip("feature"))).await.unwrap().unwrap();
+
+        let issue = core.create_pull(&repo, &bob, "Add b", "", "main", &repo, "feature", false).await.unwrap();
+        let tip = core.merge_pull(&repo, &issue, &ada, MergeStyle::Rebase, true).await.unwrap();
+        let detail = core.git(repo.id, move |g| g.commit_detail(tip)).await.unwrap();
+        assert_eq!(detail.parents, [main], "linear");
+        assert_eq!(detail.commit.summary, "feature");
+        assert_ne!(tip, feature);
+        let pull = core.pull(issue.id).await.unwrap().unwrap();
+        assert_eq!(pull.merge_commit, Some(tip.to_string()));
+        assert_eq!(core.issue(repo.id, 1).await.unwrap().unwrap().state, "merged");
+        assert_eq!(core.git(repo.id, |g| Ok(g.branch_tip("feature"))).await.unwrap(), None, "deleted");
     }
 
     #[tokio::test]

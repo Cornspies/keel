@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  <nav class="state-tabs">
+    <a href="/{{ repo.owner }}/{{ repo.name }}/projects"{% if show_open %} class="active"{% endif %}>{{ open_count }} Open</a>
+    <a href="/{{ repo.owner }}/{{ repo.name }}/projects?state=closed"{% if !show_open %} class="active"{% endif %}>{{ closed_count }} Closed</a>
+  </nav>
+  <div class="spacer"></div>
+  {% if can_edit %}<a class="btn btn-primary" href="/{{ repo.owner }}/{{ repo.name }}/projects/new">New project</a>{% endif %}
+</div>
+{% if projects.is_empty() %}
+<p class="empty">{% if show_open %}No open projects. A project is a board of issues, pull requests and notes in columns{% if can_edit %} — <a href="/{{ repo.owner }}/{{ repo.name }}/projects/new">create one</a>{% endif %}.{% else %}No closed projects.{% endif %}</p>
+{% else %}
+<ul class="card-list milestone-list">
+  {% for p in projects %}
+  <li class="card-row milestone-row">
+    <div class="milestone-main">
+      <a class="milestone-title" href="{{ p.url }}">{{ p.title }}</a>
+      <div class="small muted">Updated {{ p.updated }}</div>
+      {% if !p.description_html.is_empty() %}<div class="markdown milestone-desc">{{ p.description_html|safe }}</div>{% endif %}
+    </div>
+    <div class="milestone-side">
+      <progress max="100" value="{{ p.progress }}" aria-label="{{ p.progress }}% done">{{ p.progress }}%</progress>
+      <div class="small muted"><strong>{{ p.progress }}%</strong> done · {{ p.open_items }} open · {{ p.closed_items }} closed{% if p.notes > 0 %} · {{ p.notes }} note{% if p.notes != 1 %}s{% endif %}{% endif %}</div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
