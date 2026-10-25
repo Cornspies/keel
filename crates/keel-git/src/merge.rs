@@ -39,8 +39,8 @@ pub enum Mergeability {
 }
 
 fn git(path: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("--git-dir").arg(path).env("GIT_CONFIG_NOSYSTEM", "1");
+    let mut cmd = crate::command();
+    cmd.arg("--git-dir").arg(path);
     cmd
 }
 
@@ -258,6 +258,21 @@ mod tests {
         s.commit("main: change b");
         let repo = s.open();
         (s, repo)
+    }
+
+    #[test]
+    fn ignores_replace_refs() {
+        let (s, repo) = bare_with_branches();
+        let main = repo.branch_tip("main").unwrap();
+        let feature = repo.branch_tip("feature").unwrap();
+        s.git(&["checkout", "-q", "-b", "evil", "feature"]);
+        s.write("a.txt", "evil\n");
+        let evil = s.commit("evil");
+        s.git(&["replace", &feature.to_string(), &evil.to_string()]);
+        let Mergeability::Clean(tree) = repo.mergeability(main, feature).unwrap() else { panic!("conflicts") };
+        let tree = repo.repo.find_tree(tree).unwrap();
+        let blob = tree.get_path(Path::new("a.txt")).unwrap().to_object(&repo.repo).unwrap();
+        assert_eq!(blob.as_blob().unwrap().content(), b"feature\n");
     }
 
     #[test]

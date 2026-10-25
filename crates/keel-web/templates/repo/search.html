@@ -2,7 +2,7 @@
 {% block content %}
 {% include "repo/header.html" %}
 <form method="get" action="/{{ repo.owner }}/{{ repo.name }}/search" class="form form-inline search-form">
-  <input name="q" value="{{ q }}" placeholder="Search this repository" aria-label="Search this repository" autofocus>
+  <input name="q" value="{{ q }}" placeholder="Search this repository" aria-label="Search this repository" maxlength="256" title="Up to 256 characters" autofocus>
   {% if branches.len() > 1 %}
   <select name="ref" aria-label="Branch">
     {% for b in branches %}<option value="{{ b }}"{% if *b == rev %} selected{% endif %}>{{ b }}</option>{% endfor %}

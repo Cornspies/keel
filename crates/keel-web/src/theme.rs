@@ -74,7 +74,7 @@ pub async fn set(State(state): State<AppState>, Viewer(viewer): Viewer, headers:
             .get(header::REFERER)
             .and_then(|r| r.to_str().ok())
             .and_then(|r| r.strip_prefix(state.core.config.base_url.trim_end_matches('/')));
-        Redirect::to(safe_next(back)).into_response()
+        Redirect::to(&safe_next(back)).into_response()
     };
     res.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).expect("plain ASCII"));
     Ok(res)

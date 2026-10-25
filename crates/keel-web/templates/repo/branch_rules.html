@@ -7,7 +7,7 @@
     <label>Required checks <span class="hint">Status contexts that must succeed on the latest commit before merging, separated by commas.{% if !contexts.is_empty() %} Reported lately: <span class="mono">{{ contexts }}</span>.{% endif %}</span>
       <input name="required_checks" value="{{ r.required_checks }}" placeholder="ci/build, lint" class="mono"></label>
     <label class="check"><input type="checkbox" name="dismiss_stale"{% if r.dismiss_stale %} checked{% endif %}> Only count reviews of the latest commits <span class="hint">New commits in a pull request need a fresh review.</span></label>
-    <label class="check"><input type="checkbox" name="allow_force_push"{% if r.allow_force_push %} checked{% endif %}> Allow force pushes and deleting the branch</label>
+    <label class="check"><input type="checkbox" name="allow_force_push"{% if r.allow_force_push %} checked{% endif %}> Allow force pushes and deleting the branch <span class="hint">Deleting only if pull requests aren't required.</span></label>
 {% endmacro %}
 {% block content %}
 {% include "repo/header.html" %}

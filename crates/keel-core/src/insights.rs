@@ -129,7 +129,7 @@ impl Core {
     pub async fn commit_authors(&self, emails: &[&str]) -> Result<HashMap<String, String>> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT lower(u.email), u.username FROM users u JOIN json_each(?1) j ON lower(u.email) = j.value
-             WHERE u.kind = 'user' AND (u.email_verified_at IS NOT NULL OR ?2)",
+             WHERE u.kind = 'user' AND u.disabled_at IS NULL AND (u.email_verified_at IS NOT NULL OR ?2)",
         )
         .bind(serde_json::json!(emails).to_string())
         .bind(!self.mail_enabled())

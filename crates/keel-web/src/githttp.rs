@@ -2,8 +2,6 @@
 //! the protocol itself is spoken by `git upload-pack` / `git receive-pack`,
 //! with request and response bodies streamed straight through.
 
-use std::io::Read;
-
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -12,15 +10,50 @@ use futures_util::StreamExt;
 use keel_core::{Access, GitSession, GitTarget, User, looks_like_token};
 use keel_git::{Service, git_command};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::io::ReaderStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::AppState;
 use crate::session::basic_auth;
 
-/// Upper bound for gzip-compressed negotiation requests, which are buffered
-/// to be decompressed. Packfiles (pushes) are never compressed this way.
-const MAX_GZIP_BODY: usize = 64 * 1024 * 1024;
+/// Upper bound for gzip-compressed requests once decompressed. Clients only
+/// compress negotiation requests, which are small; packfiles (pushes) are
+/// never compressed this way.
+const MAX_GZIP_PLAIN: u64 = 64 * 1024 * 1024;
+
+/// Streams a request body into git's stdin, decompressing it if `gzip`.
+/// Returns whether it decompressed to more than [`MAX_GZIP_PLAIN`] (then
+/// git only got the start). Without gzip, the body goes through as is.
+async fn write_body(body: Body, gzip: bool, mut stdin: impl AsyncWrite + Unpin) -> anyhow::Result<bool> {
+    let mut stream = body.into_data_stream();
+    if !gzip {
+        while let Some(chunk) = stream.next().await {
+            stdin.write_all(&chunk?).await?;
+        }
+        return Ok(false);
+    }
+    let compressed = StreamReader::new(stream.map(|c| c.map_err(std::io::Error::other)));
+    copy_capped(async_compression::tokio::bufread::GzipDecoder::new(compressed), stdin).await
+}
+
+/// Copies `plain` to `stdin`, up to [`MAX_GZIP_PLAIN`] bytes; whether there
+/// was more. Keeps counting if git stops reading (e.g. at garbage), so
+/// oversized requests are always recognized.
+async fn copy_capped(mut plain: impl AsyncRead + Unpin, mut stdin: impl AsyncWrite + Unpin) -> anyhow::Result<bool> {
+    let mut buf = vec![0; 64 * 1024];
+    let (mut total, mut git_reads) = (0, true);
+    loop {
+        let n = plain.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(false);
+        }
+        total += n as u64;
+        if total > MAX_GZIP_PLAIN {
+            return Ok(true);
+        }
+        git_reads = git_reads && stdin.write_all(&buf[..n]).await.is_ok();
+    }
+}
 
 fn text(status: StatusCode, msg: &str) -> Response {
     (status, format!("{msg}\n")).into_response()
@@ -42,6 +75,8 @@ pub(crate) enum CredentialError {
     Wrong,
     /// A password for an account with two-factor authentication.
     TwoFactor,
+    /// Too many wrong passwords; the message says for how long.
+    Locked(String),
     Internal(keel_core::Error),
 }
 
@@ -61,6 +96,7 @@ pub(crate) async fn basic_credentials(state: &AppState, headers: &HeaderMap) -> 
         Ok(Some((user, _))) if user.totp_enabled && token.is_none() => Err(CredentialError::TwoFactor),
         Ok(Some(found)) => Ok(Some(found)),
         Ok(None) => Err(CredentialError::Wrong),
+        Err(keel_core::Error::Invalid(msg)) => Err(CredentialError::Locked(msg)),
         Err(e) => Err(CredentialError::Internal(e)),
     }
 }
@@ -86,6 +122,7 @@ async fn authorize(
         Ok(None) => (None, false),
         Err(CredentialError::Wrong) => return Err(unauthorized()),
         Err(CredentialError::TwoFactor) => return Err(text(StatusCode::FORBIDDEN, TWO_FACTOR)),
+        Err(CredentialError::Locked(msg)) => return Err(text(StatusCode::TOO_MANY_REQUESTS, &msg)),
         Err(CredentialError::Internal(e)) => return Err(internal(e)),
     };
     let target = state.core.git_target(owner, name).await.map_err(internal)?;
@@ -239,32 +276,12 @@ async fn rpc(
     let gzip = headers
         .get(header::CONTENT_ENCODING)
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
-    tokio::spawn(async move {
-        let result: anyhow::Result<()> = async {
-            if gzip {
-                let compressed = axum::body::to_bytes(body, MAX_GZIP_BODY).await?;
-                let plain = tokio::task::spawn_blocking(move || {
-                    let mut out = Vec::new();
-                    flate2::read::GzDecoder::new(&compressed[..])
-                        .take(MAX_GZIP_BODY as u64 * 8)
-                        .read_to_end(&mut out)
-                        .map(|_| out)
-                })
-                .await??;
-                stdin.write_all(&plain).await?;
-            } else {
-                let mut stream = body.into_data_stream();
-                while let Some(chunk) = stream.next().await {
-                    stdin.write_all(&chunk?).await?;
-                }
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = result {
+    let mut writer = tokio::spawn(async move {
+        // Dropping stdin at the end signals EOF to git.
+        write_body(body, gzip, &mut stdin).await.unwrap_or_else(|e| {
             tracing::debug!("git http request body: {e}");
-        }
-        // Dropping stdin signals EOF to git.
+            false
+        })
     });
 
     let core = state.core.clone();
@@ -286,12 +303,30 @@ async fn rpc(
         }
     });
 
+    // Answer once git does, or refuses an oversized request: git stops
+    // without output when its input is cut off.
+    let mut stdout = ReaderStream::new(stdout);
+    let mut oversized = None;
+    let first = tokio::select! {
+        biased;
+        r = &mut writer => {
+            oversized = Some(r.unwrap_or(false));
+            if oversized == Some(true) { None } else { stdout.next().await }
+        }
+        chunk = stdout.next() => chunk,
+    };
+    if first.is_none() && oversized.is_none() {
+        oversized = Some(writer.await.unwrap_or(false));
+    }
+    if oversized == Some(true) {
+        return text(StatusCode::PAYLOAD_TOO_LARGE, "Request too large");
+    }
     (
         [
             (header::CONTENT_TYPE, format!("application/x-{}-result", service.name())),
             (header::CACHE_CONTROL, "no-cache".to_owned()),
         ],
-        Body::from_stream(ReaderStream::new(stdout)),
+        Body::from_stream(futures_util::stream::iter(first).chain(stdout)),
     )
         .into_response()
 }
@@ -299,6 +334,30 @@ async fn rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gzip_limit() {
+        use std::io::Write;
+        let gzip = |len: usize| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(&vec![b'0'; len]).unwrap();
+            Body::from(e.finish().unwrap())
+        };
+        let mut out = Vec::new();
+        assert!(!write_body(gzip(1000), true, &mut out).await.unwrap());
+        assert_eq!(out, vec![b'0'; 1000]);
+        // Too large, whether git reads it all or gives up early.
+        let mut out = Vec::new();
+        assert!(write_body(gzip(MAX_GZIP_PLAIN as usize + 1), true, &mut out).await.unwrap());
+        assert!(out.len() as u64 <= MAX_GZIP_PLAIN);
+        let (stdin, stopped) = tokio::io::duplex(1024);
+        drop(stopped);
+        assert!(write_body(gzip(MAX_GZIP_PLAIN as usize + 1), true, stdin).await.unwrap());
+        assert!(write_body(Body::from("not gzip"), true, Vec::new()).await.is_err());
+        let mut out = Vec::new();
+        assert!(!write_body(Body::from("plain"), false, &mut out).await.unwrap());
+        assert_eq!(out, b"plain");
+    }
 
     #[test]
     fn pkt_lines() {

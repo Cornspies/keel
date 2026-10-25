@@ -4,7 +4,8 @@
 //! keys in the web UI, and this server maps a key to its owner and runs
 //! `git-upload-pack` / `git-receive-pack` for permitted repositories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,9 +18,15 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::{HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Server, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet, SshId};
+use russh::{Channel, ChannelId, ChannelOpenFailure, MethodKind, MethodSet, SshId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+/// Most sessions (channels) one connection may have open at once.
+const MAX_CHANNELS: usize = 10;
+/// Longest `GIT_PROTOCOL` value accepted (`git_command` drops invalid ones
+/// anyway).
+const MAX_PROTOCOL: usize = 256;
 
 /// Runs the SSH server until the listener fails.
 pub async fn serve(core: Core, addr: SocketAddr) -> anyhow::Result<()> {
@@ -81,6 +88,8 @@ impl Server for SshServer {
             user: None,
             protocol: HashMap::new(),
             stdin: HashMap::new(),
+            channels: Channels::default(),
+            running: HashMap::new(),
         }
     }
 
@@ -98,6 +107,40 @@ struct Connection {
     protocol: HashMap<ChannelId, String>,
     /// Feeds client data to the running git process, per channel.
     stdin: HashMap<ChannelId, mpsc::Sender<Vec<u8>>>,
+    channels: Channels<ChannelId>,
+    /// Dropped when the channel closes (or the connection does), which
+    /// stops its git process.
+    running: HashMap<ChannelId, oneshot::Sender<()>>,
+}
+
+/// Which channels a connection has open, and which of them already ran a
+/// command (each may run one).
+struct Channels<K> {
+    open: HashSet<K>,
+    started: HashSet<K>,
+}
+
+impl<K> Default for Channels<K> {
+    fn default() -> Self {
+        Self { open: HashSet::new(), started: HashSet::new() }
+    }
+}
+
+impl<K: Eq + Hash + Copy> Channels<K> {
+    /// Whether `id` may open, staying within [`MAX_CHANNELS`].
+    fn open(&mut self, id: K) -> bool {
+        self.open.len() < MAX_CHANNELS && self.open.insert(id)
+    }
+
+    /// Whether `id` may run a command: once per open channel.
+    fn start(&mut self, id: K) -> bool {
+        self.open.contains(&id) && self.started.insert(id)
+    }
+
+    fn close(&mut self, id: K) {
+        self.open.remove(&id);
+        self.started.remove(&id);
+    }
 }
 
 /// A parsed `git-upload-pack 'owner/repo.git'` command.
@@ -255,11 +298,21 @@ impl Connection {
         let core = self.core.clone();
         let pusher = self.user.as_ref().map(|u| u.id);
         let service = request.service;
+        let (running, mut stop) = oneshot::channel();
+        self.running.insert(channel, running);
         tokio::spawn(async move {
             let out = pump(stdout, handle.clone(), channel, None);
             let err = pump(stderr, handle.clone(), channel, Some(1));
-            let _ = tokio::join!(out, err);
-            let code = match child.wait().await {
+            let done = async {
+                let _ = tokio::join!(out, err);
+                child.wait().await
+            };
+            let status = tokio::select! {
+                status = done => status,
+                // Nobody to talk to any more: dropping `child` kills git.
+                _ = &mut stop => return,
+            };
+            let code = match status {
                 Ok(status) => status.code().unwrap_or(1) as u32,
                 Err(e) => {
                     tracing::error!("waiting for git: {e}");
@@ -331,11 +384,15 @@ impl russh::server::Handler for Connection {
 
     async fn channel_open_session(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        reply.accept().await;
+        if self.channels.open(channel.id()) {
+            reply.accept().await;
+        } else {
+            reply.reject(ChannelOpenFailure::ResourceShortage).await;
+        }
         Ok(())
     }
 
@@ -346,7 +403,7 @@ impl russh::server::Handler for Connection {
         value: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if name == "GIT_PROTOCOL" {
+        if name == "GIT_PROTOCOL" && value.len() < MAX_PROTOCOL {
             self.protocol.insert(channel, value.to_owned());
             session.channel_success(channel)?;
         } else {
@@ -356,6 +413,10 @@ impl russh::server::Handler for Connection {
     }
 
     async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+        if !self.channels.start(channel) {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         let name = self.user.as_ref().map(|u| u.username.as_str()).unwrap_or("there");
         let handle = session.handle();
@@ -373,6 +434,11 @@ impl russh::server::Handler for Connection {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // A second command on a channel would start another git.
+        if !self.channels.start(channel) {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         let command = String::from_utf8_lossy(data).into_owned();
         let handle = session.handle();
         if let Some(lfs) = parse_lfs_command(&command) {
@@ -412,6 +478,8 @@ impl russh::server::Handler for Connection {
     async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         self.stdin.remove(&channel);
         self.protocol.remove(&channel);
+        self.running.remove(&channel);
+        self.channels.close(channel);
         Ok(())
     }
 }
@@ -450,5 +518,19 @@ mod tests {
         assert_eq!(parse_lfs_command("git-lfs-authenticate 'ada/engine.git' upload"), Some(("ada".into(), "engine".into(), true)));
         assert_eq!(parse_lfs_command("git-lfs-authenticate /ada/engine download"), Some(("ada".into(), "engine".into(), false)));
         assert_eq!(parse_lfs_command("git-lfs-authenticate ada/engine.git delete"), None);
+    }
+
+    #[test]
+    fn channel_limits() {
+        let mut channels = Channels::default();
+        for id in 0..MAX_CHANNELS as u32 {
+            assert!(channels.open(id));
+        }
+        assert!(!channels.open(99), "too many");
+        assert!(channels.start(0));
+        assert!(!channels.start(0), "one command per channel");
+        assert!(!channels.start(98), "not open");
+        channels.close(0);
+        assert!(channels.open(99));
     }
 }

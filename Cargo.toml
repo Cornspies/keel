@@ -51,6 +51,7 @@ form_urlencoded = "1"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "hostname", "builder", "tokio1-rustls", "aws-lc-rs", "rustls-platform-verifier"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 flate2 = "1"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 russh = "0.64"
 # The version russh uses; for verifying SSH commit signatures.

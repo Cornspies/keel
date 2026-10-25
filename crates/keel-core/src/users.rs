@@ -4,6 +4,32 @@ use crate::auth::{hash_password, hash_token, new_token, verify_password};
 use crate::{Core, Result, invalid, now, validate_username};
 
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+/// Wrong passwords allowed per account (or unknown name) in
+/// `LOGIN_WINDOW_SECS`; then signing in with a password is refused for a
+/// while.
+const MAX_LOGIN_FAILURES: usize = 10;
+const LOGIN_WINDOW_SECS: i64 = 15 * 60;
+
+/// Times of recent wrong passwords, by lowercased account name. In memory:
+/// a restart forgets them, which is fine for slowing down guessing.
+#[derive(Default)]
+pub(crate) struct LoginFailures(std::collections::HashMap<String, Vec<i64>>);
+
+impl LoginFailures {
+    /// Seconds until `key` may try again, if it's locked out.
+    fn locked(&mut self, key: &str, now: i64) -> Option<i64> {
+        let times = self.0.get_mut(key)?;
+        times.retain(|&t| t > now - LOGIN_WINDOW_SECS);
+        (times.len() >= MAX_LOGIN_FAILURES).then(|| times[0] + LOGIN_WINDOW_SECS - now)
+    }
+
+    fn failed(&mut self, key: &str, now: i64) {
+        if self.0.len() > 100_000 {
+            self.0.retain(|_, times| times.last().is_some_and(|&t| t > now - LOGIN_WINDOW_SECS));
+        }
+        self.0.entry(key.to_owned()).or_default().push(now);
+    }
+}
 
 /// A user account or an organization (`kind == "org"`), which share one
 /// namespace.
@@ -128,6 +154,16 @@ impl Core {
         .bind(login.trim())
         .fetch_optional(&self.db)
         .await?;
+        // Counted by account, whichever name or email is used to sign in.
+        let key = user.as_ref().map_or_else(|| login.trim(), |u| &u.username).to_lowercase();
+        let wait = self.login_failures.lock().unwrap_or_else(|e| e.into_inner()).locked(&key, now());
+        if let Some(wait) = wait {
+            let minutes = (wait + 59) / 60;
+            return invalid(format!(
+                "Too many failed attempts; try again in {minutes} minute{}.",
+                if minutes == 1 { "" } else { "s" }
+            ));
+        }
         // Verify against a dummy hash for unknown users so response times
         // don't reveal which accounts exist.
         static DUMMY: OnceLock<String> = OnceLock::new();
@@ -142,6 +178,12 @@ impl Core {
             },
         };
         let ok = verify_password(password.to_owned(), hash).await?;
+        let mut failures = self.login_failures.lock().unwrap_or_else(|e| e.into_inner());
+        if ok && user.is_some() {
+            failures.0.remove(&key);
+        } else {
+            failures.failed(&key, now());
+        }
         Ok(user.filter(|_| ok))
     }
 
@@ -159,10 +201,17 @@ impl Core {
     /// Changes a password after checking the current one, and signs out all
     /// sessions; the caller should start a new one for the current browser.
     pub async fn change_password(&self, user: &User, current: &str, new: &str) -> Result<()> {
-        if !verify_password(current.to_owned(), user.password_hash.clone()).await? {
+        if !self.confirm_password(user, current).await? {
             return invalid("Your current password is incorrect.");
         }
         self.set_password(user.id, new).await
+    }
+
+    /// Whether `password` is a signed-in user's, before a sensitive change.
+    /// Wrong ones count like failed sign-ins, so a stolen session can't be
+    /// used to guess it.
+    pub async fn confirm_password(&self, user: &User, password: &str) -> Result<bool> {
+        Ok(self.authenticate(&user.username, password).await?.is_some_and(|u| u.id == user.id))
     }
 
     /// Sets a password and signs out all sessions.
@@ -181,12 +230,22 @@ impl Core {
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
+        // A second sign-in step started with the old password.
+        sqlx::query("DELETE FROM login_challenges WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Changes the email address, which then needs verifying again.
-    pub async fn change_email(&self, user_id: i64, email: &str) -> Result<()> {
+    /// Changes the email address, which then needs verifying again, after
+    /// checking the password: password resets go to the new address.
+    pub async fn change_email(&self, user: &User, password: &str, email: &str) -> Result<()> {
+        if !self.confirm_password(user, password).await? {
+            return invalid("Your password is incorrect.");
+        }
+        let user_id = user.id;
         let email = email.trim();
         if !email.contains('@') || email.len() > 254 {
             return invalid("Please enter a valid email address.");
@@ -310,8 +369,43 @@ mod tests {
         assert!(core.session_user(&token).await.unwrap().is_none(), "sessions revoked");
         assert!(core.authenticate("ada", "new password").await.unwrap().is_some());
 
-        assert!(core.change_email(ada.id, "bob@example.com").await.is_err());
-        core.change_email(ada.id, "lovelace@example.com").await.unwrap();
+        let err = core.change_email(&ada, "wrong", "lovelace@example.com").await.unwrap_err();
+        assert!(err.to_string().contains("password is incorrect"), "{err}");
+        assert_eq!(core.user_by_id(ada.id).await.unwrap().unwrap().email, "ada@example.com");
+        assert!(core.change_email(&ada, "new password", "bob@example.com").await.is_err());
+        core.change_email(&ada, "new password", "lovelace@example.com").await.unwrap();
         assert!(core.authenticate("lovelace@example.com", "new password").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn limits_wrong_passwords() {
+        let (core, _dir) = Core::for_tests().await;
+        core.register("ada", "ada@example.com", "correct horse").await.unwrap();
+        core.register("bob", "bob@example.com", "battery staple").await.unwrap();
+        // A success clears earlier failures.
+        for _ in 0..9 {
+            assert!(core.authenticate("ada", "wrong").await.unwrap().is_none());
+        }
+        assert!(core.authenticate("ada", "correct horse").await.unwrap().is_some());
+        // Ten in a row, by name or email, lock the account out.
+        for i in 0..10 {
+            let login = if i % 2 == 0 { "Ada" } else { "ada@example.com" };
+            assert!(core.authenticate(login, "wrong").await.unwrap().is_none());
+        }
+        for password in ["wrong", "correct horse"] {
+            let err = core.authenticate("ada", password).await.unwrap_err();
+            assert!(err.to_string().contains("Too many failed attempts; try again in 15 minutes"), "{err}");
+        }
+        assert!(core.authenticate("bob", "battery staple").await.unwrap().is_some(), "others aren't");
+        // Unknown names are limited too.
+        for _ in 0..10 {
+            assert!(core.authenticate("nobody", "x").await.unwrap().is_none());
+        }
+        assert!(core.authenticate("NOBODY", "x").await.is_err());
+        // Until the failures are old enough.
+        for times in core.login_failures.lock().unwrap().0.values_mut() {
+            times.iter_mut().for_each(|t| *t -= super::LOGIN_WINDOW_SECS);
+        }
+        assert!(core.authenticate("ada", "correct horse").await.unwrap().is_some());
     }
 }

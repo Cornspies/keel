@@ -79,6 +79,8 @@ pub async fn account(
 #[derive(Deserialize)]
 pub struct EmailForm {
     email: String,
+    #[serde(default)]
+    password: String,
 }
 
 pub async fn change_email(
@@ -86,7 +88,7 @@ pub async fn change_email(
     SignedIn(user): SignedIn,
     Form(f): Form<EmailForm>,
 ) -> AppResult {
-    match state.core.change_email(user.id, &f.email).await {
+    match state.core.change_email(&user, &f.password, &f.email).await {
         Ok(()) => {
             if let Some(user) = state.core.user_by_id(user.id).await? {
                 state.core.send_verification(&user).await?;
@@ -273,6 +275,17 @@ pub async fn keys(State(state): State<AppState>, SignedIn(user): SignedIn) -> Ap
 #[derive(Deserialize)]
 pub struct GpgKeyForm {
     key: String,
+    #[serde(default)]
+    password: String,
+}
+
+/// Adding keys and tokens needs the password: they grant access that
+/// outlasts a stolen session.
+async fn confirm(state: &AppState, user: &User, password: &str) -> keel_core::Result<()> {
+    if !state.core.confirm_password(user, password).await? {
+        return Err(keel_core::Error::Invalid("Your password is incorrect.".into()));
+    }
+    Ok(())
 }
 
 pub async fn add_gpg_key(
@@ -280,7 +293,12 @@ pub async fn add_gpg_key(
     SignedIn(user): SignedIn,
     Form(f): Form<GpgKeyForm>,
 ) -> AppResult {
-    match state.core.add_gpg_key(user.id, &f.key).await {
+    let added = async {
+        confirm(&state, &user, &f.password).await?;
+        state.core.add_gpg_key(user.id, &f.key).await
+    }
+    .await;
+    match added {
         Ok(_) => Ok(Redirect::to("/settings/keys#gpg").into_response()),
         Err(keel_core::Error::Invalid(msg)) => {
             keys_page(&state, user, KeyForms { gpg_error: Some(msg), gpg_key: f.key, ..Default::default() }).await
@@ -303,6 +321,8 @@ pub struct KeyForm {
     #[serde(default)]
     name: String,
     key: String,
+    #[serde(default)]
+    password: String,
 }
 
 pub async fn add_key(
@@ -310,7 +330,12 @@ pub async fn add_key(
     SignedIn(user): SignedIn,
     Form(f): Form<KeyForm>,
 ) -> AppResult {
-    match state.core.add_ssh_key(user.id, &f.name, &f.key).await {
+    let added = async {
+        confirm(&state, &user, &f.password).await?;
+        state.core.add_ssh_key(user.id, &f.name, &f.key).await
+    }
+    .await;
+    match added {
         Ok(_) => Ok(Redirect::to("/settings/keys").into_response()),
         Err(keel_core::Error::Invalid(msg)) => {
             keys_page(&state, user, KeyForms { error: Some(msg), name: f.name, key: f.key, ..Default::default() }).await
@@ -396,6 +421,8 @@ pub struct TokenForm {
     /// Days until expiry; empty for never.
     #[serde(default)]
     expires: String,
+    #[serde(default)]
+    password: String,
 }
 
 pub async fn create_token(
@@ -404,7 +431,12 @@ pub async fn create_token(
     Form(f): Form<TokenForm>,
 ) -> AppResult {
     let expires = f.expires.trim().parse::<i64>().ok().filter(|d| *d > 0);
-    match state.core.create_token(user.id, &f.name, f.write.is_some(), expires).await {
+    let created = async {
+        confirm(&state, &user, &f.password).await?;
+        state.core.create_token(user.id, &f.name, f.write.is_some(), expires).await
+    }
+    .await;
+    match created {
         // Rendered directly rather than redirecting: the secret must not
         // end up in a URL or be retrievable again.
         Ok((_, secret)) => tokens_page(&state, user, None, Some(secret)).await,

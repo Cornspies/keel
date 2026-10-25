@@ -44,6 +44,8 @@ pub fn parse_pointer(data: &[u8]) -> Option<(String, u64)> {
 impl Core {
     /// Where an object is stored.
     pub fn lfs_path(&self, oid: &str) -> PathBuf {
+        // Callers check (`valid_oid`, `parse_lfs_pointer`).
+        debug_assert!(valid_oid(oid), "{oid}");
         self.config.data_dir.join("lfs").join(&oid[..2]).join(&oid[2..4]).join(oid)
     }
 

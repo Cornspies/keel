@@ -347,11 +347,15 @@ impl Core {
     }
 
     pub async fn delete_release_asset(&self, release: &Release, asset_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM release_assets WHERE release_id = ?1 AND id = ?2")
+        let deleted = sqlx::query("DELETE FROM release_assets WHERE release_id = ?1 AND id = ?2")
             .bind(release.id)
             .bind(asset_id)
             .execute(&self.db)
             .await?;
+        // Only the file of this release's own asset.
+        if deleted.rows_affected() != 1 {
+            return Err(Error::NotFound);
+        }
         let _ = tokio::fs::remove_file(self.release_asset_path(asset_id)).await;
         Ok(())
     }
@@ -466,5 +470,37 @@ mod tests {
         // Deleting prunes in the background too; either way it's gone.
         core.prune_release_assets().await.unwrap();
         assert!(!core.release_asset_path(a2.id).exists());
+    }
+
+    #[tokio::test]
+    async fn only_deletes_own_files() {
+        let (core, dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(work.path()).env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Ada").env("GIT_AUTHOR_EMAIL", "a@x").env("GIT_COMMITTER_NAME", "Ada")
+                .env("GIT_COMMITTER_EMAIL", "a@x").output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        let mut assets = Vec::new();
+        for (user, name) in [(&ada, "a"), (&bob, "b")] {
+            let repo = core.create_repo(user, name, "", false).await.unwrap();
+            git(&["push", "-q", core.repo_path(&repo).to_str().unwrap(), "main"]);
+            let release = core.create_release(&repo, user, "v1", "main", "", "", true, false).await.unwrap();
+            let tmp = dir.path().join(name);
+            std::fs::write(&tmp, name).unwrap();
+            let asset = core.add_release_asset(&release, user, "x.bin", "", &tmp, 1).await.unwrap();
+            assets.push((release, asset));
+        }
+        let [(a_release, a_asset), (_, b_asset)] = &assets[..] else { unreachable!() };
+        let err = core.delete_release_asset(a_release, b_asset.id).await.unwrap_err();
+        assert!(matches!(err, Error::NotFound), "{err}");
+        assert_eq!(std::fs::read(core.release_asset_path(b_asset.id)).unwrap(), b"b");
+        core.delete_release_asset(a_release, a_asset.id).await.unwrap();
+        assert!(!core.release_asset_path(a_asset.id).exists());
     }
 }

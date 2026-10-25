@@ -38,6 +38,10 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     if out.exists() && std::fs::read_dir(out)?.next().is_some() {
         bail!("{} isn't empty", out.display());
     }
+    // The database holds secrets (TOTP and webhook secrets, mirror
+    // passwords, import tokens): for the server's account only.
+    std::fs::create_dir_all(out)?;
+    private(out, 0o700)?;
     std::fs::create_dir_all(out.join("repos"))?;
 
     // 1. The database.
@@ -51,6 +55,7 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
         .await
         .context("copying the database")?;
     conn.close().await?;
+    private(&snapshot, 0o600)?;
 
     // 2. The repositories it knows.
     let mut copy = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&snapshot).read_only(true)).await?;
@@ -82,6 +87,7 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     let key = data_dir.join("ssh_host_ed25519_key");
     if key.is_file() {
         std::fs::copy(&key, out.join("ssh_host_ed25519_key"))?;
+        private(&out.join("ssh_host_ed25519_key"), 0o600)?;
     }
     let lfs_objects = copy_files(&data_dir.join("lfs"), &out.join("lfs"))?;
     let release_files = copy_files(&data_dir.join("releases"), &out.join("releases"))?;
@@ -90,8 +96,21 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
     Ok(BackupReport { repos, wikis, skipped, lfs_objects, release_files, bytes: dir_size(out)?, took: started.elapsed() })
 }
 
+/// Restricts `path` to `mode` (Unix only).
+pub(crate) fn private(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
 /// Copies stored files (not uploads in progress, which are in `tmp` or
-/// named `upload-…`). Returns how many.
+/// named `upload-…`), but not symlinks: keel makes none, so they'd be
+/// someone else's. Returns how many.
 fn copy_files(src: &Path, dst: &Path) -> anyhow::Result<usize> {
     if !src.is_dir() {
         return Ok(0);
@@ -106,7 +125,11 @@ fn copy_files(src: &Path, dst: &Path) -> anyhow::Result<usize> {
             if rel.starts_with("tmp") || entry.file_name().to_string_lossy().starts_with("upload-") {
                 continue;
             }
-            if entry.file_type()?.is_dir() {
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
                 std::fs::create_dir_all(dst.join(rel))?;
                 stack.push(path);
             } else {
@@ -149,6 +172,8 @@ mod tests {
         std::fs::write(dir.path().join("lfs/ab/cd/abcd1234"), "big").unwrap();
         std::fs::create_dir_all(dir.path().join("lfs/tmp")).unwrap();
         std::fs::write(dir.path().join("lfs/tmp/upload"), "partial").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("lfs/ab/cd/elsewhere")).unwrap();
 
         let out = tempfile::tempdir().unwrap();
         let target = out.path().join("backup");
@@ -157,6 +182,14 @@ mod tests {
         assert!(report.bytes > 0);
         assert!(backup(dir.path(), &target).await.is_err(), "won't overwrite");
         assert!(!target.join("lfs/tmp").exists());
+        assert!(!target.join("lfs/ab/cd/elsewhere").exists(), "symlinks are skipped");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&target), 0o700);
+            assert_eq!(mode(&target.join("keel.db")), 0o600);
+        }
 
         // The copy is a working data directory.
         let restored = Core::open(crate::Config { data_dir: target.clone(), ..crate::Config::default() }).await.unwrap();

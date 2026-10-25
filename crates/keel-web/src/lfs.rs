@@ -69,6 +69,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap, owner: &str, name: &st
             Ok(None) => (None, false),
             Err(CredentialError::Wrong) => return Err(fail(StatusCode::UNAUTHORIZED, "Wrong username or password")),
             Err(CredentialError::TwoFactor) => return Err(fail(StatusCode::FORBIDDEN, TWO_FACTOR)),
+            Err(CredentialError::Locked(msg)) => return Err(fail(StatusCode::TOO_MANY_REQUESTS, &msg)),
             Err(CredentialError::Internal(e)) => return Err(internal(e)),
         },
     };

@@ -45,9 +45,8 @@ fn git(path: &Path, remote: &Remote<'_>) -> Command {
     cmd.arg("--git-dir")
         .arg(path)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    crate::standard_env(&mut cmd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ALLOW_PROTOCOL", "http:https")
         // As environment, not arguments, so credentials don't show in `ps`.

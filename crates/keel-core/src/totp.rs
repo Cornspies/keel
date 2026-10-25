@@ -229,7 +229,11 @@ impl Core {
     pub async fn start_login_challenge(&self, user_id: i64) -> Result<String> {
         let token = new_token()?;
         let now = now();
-        sqlx::query("DELETE FROM login_challenges WHERE expires_at < ?1").bind(now).execute(&self.db).await?;
+        // Expired challenges still count towards the lockout for a while.
+        sqlx::query("DELETE FROM login_challenges WHERE created_at < ?1")
+            .bind(now - LOCK_SECS)
+            .execute(&self.db)
+            .await?;
         sqlx::query("INSERT INTO login_challenges (token_hash, user_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)")
             .bind(hash_token(&token))
             .bind(user_id)
@@ -253,31 +257,35 @@ impl Core {
     /// Completes a sign-in with the second factor.
     pub async fn complete_login_challenge(&self, token: &str, code: &str) -> Result<SecondStep> {
         let now = now();
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            "SELECT user_id, attempts FROM login_challenges WHERE token_hash = ?1 AND expires_at > ?2",
+        // Count the try before checking the code, so parallel requests
+        // can't get more tries than allowed.
+        let row: Option<(i64,)> = sqlx::query_as(
+            "UPDATE login_challenges SET attempts = attempts + 1
+             WHERE token_hash = ?1 AND expires_at > ?2 AND attempts < ?3 RETURNING user_id",
         )
         .bind(hash_token(token))
         .bind(now)
+        .bind(CHALLENGE_ATTEMPTS)
         .fetch_optional(&self.db)
         .await?;
-        let Some((user_id, attempts)) = row else { return Ok(SecondStep::Expired) };
-        if attempts >= CHALLENGE_ATTEMPTS {
-            return Ok(SecondStep::Expired);
-        }
-        let (failures,): (i64,) =
+        let Some((user_id,)) = row else { return Ok(SecondStep::Expired) };
+        // Tries so far (successful ones delete their challenge), this one
+        // included.
+        let (tries,): (i64,) =
             sqlx::query_as("SELECT COALESCE(SUM(attempts), 0) FROM login_challenges WHERE user_id = ?1 AND created_at > ?2")
                 .bind(user_id)
                 .bind(now - LOCK_SECS)
                 .fetch_one(&self.db)
                 .await?;
-        if failures >= MAX_FAILURES {
-            return Ok(SecondStep::Locked);
-        }
-        if !self.verify_second_factor(user_id, code).await? {
-            sqlx::query("UPDATE login_challenges SET attempts = attempts + 1 WHERE token_hash = ?1")
+        if tries > MAX_FAILURES {
+            // Not a try: the code wasn't checked.
+            sqlx::query("UPDATE login_challenges SET attempts = attempts - 1 WHERE token_hash = ?1")
                 .bind(hash_token(token))
                 .execute(&self.db)
                 .await?;
+            return Ok(SecondStep::Locked);
+        }
+        if !self.verify_second_factor(user_id, code).await? {
             return Ok(SecondStep::WrongCode);
         }
         sqlx::query("DELETE FROM login_challenges WHERE token_hash = ?1").bind(hash_token(token)).execute(&self.db).await?;
@@ -355,6 +363,43 @@ mod tests {
         }
         let t = core.start_login_challenge(ada.id).await.unwrap();
         assert!(matches!(core.complete_login_challenge(&t, &codes[2]).await.unwrap(), SecondStep::Locked));
+        assert!(matches!(core.complete_login_challenge(&t, &codes[2]).await.unwrap(), SecondStep::Locked), "still");
+
+        // Failures count for the whole lockout period, also once their
+        // challenges expired.
+        sqlx::query("DELETE FROM login_challenges").execute(&core.db).await.unwrap();
+        for (i, created) in [now() - 899, now() - 700].into_iter().enumerate() {
+            sqlx::query("INSERT INTO login_challenges (token_hash, user_id, attempts, created_at, expires_at) VALUES (?1, ?2, 5, ?3, ?4)")
+                .bind(vec![i as u8])
+                .bind(ada.id)
+                .bind(created)
+                .bind(created + CHALLENGE_SECS)
+                .execute(&core.db)
+                .await
+                .unwrap();
+        }
+        let t = core.start_login_challenge(ada.id).await.unwrap();
+        assert!(matches!(core.complete_login_challenge(&t, &codes[2]).await.unwrap(), SecondStep::Locked));
+        sqlx::query("DELETE FROM login_challenges").execute(&core.db).await.unwrap();
+
+        // Parallel tries on one challenge get no more than five.
+        let t = core.start_login_challenge(ada.id).await.unwrap();
+        let tries: Vec<_> = (0..10)
+            .map(|_| {
+                let (core, t) = (core.clone(), t.clone());
+                tokio::spawn(async move { core.complete_login_challenge(&t, "000001").await.unwrap() })
+            })
+            .collect();
+        let mut wrong = 0;
+        for t in tries {
+            wrong += i32::from(matches!(t.await.unwrap(), SecondStep::WrongCode));
+        }
+        assert_eq!(wrong, 5);
+
+        // Changing the password ends pending challenges.
+        let t = core.start_login_challenge(ada.id).await.unwrap();
+        core.change_password(&ada, "password1", "password2").await.unwrap();
+        assert!(!core.login_challenge_valid(&t).await.unwrap());
 
         core.disable_totp(ada.id).await.unwrap();
         assert!(!core.user_by_id(ada.id).await.unwrap().unwrap().totp_enabled);

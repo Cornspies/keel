@@ -377,7 +377,8 @@ impl Core {
             let r = keel_git::Remote {
                 url: &url,
                 auth: (!user.is_empty() || !pass.is_empty()).then_some((user.as_str(), pass.as_str())),
-                pin: Some((host.as_str(), port, ip)),
+                // IP literals can't resolve to anything else.
+                pin: host.parse::<std::net::IpAddr>().is_err().then_some((host.as_str(), port, ip)),
             };
             f(&r)
         })

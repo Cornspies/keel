@@ -144,17 +144,26 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
                 || (a == 100 && (64..128).contains(&b)) // carrier-grade NAT
                 || a >= 224 // multicast and reserved
         }
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => is_private_ip(IpAddr::V4(v4)),
-            None => {
-                let first = v6.segments()[0];
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (first & 0xfe00) == 0xfc00 // unique local
-                    || (first & 0xffc0) == 0xfe80 // link-local
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let [.., a, b, c, d] = v6.octets();
+            let embedded = |a, b, c, d| is_private_ip(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(IpAddr::V4(v4));
             }
-        },
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
+                || s[..6] == [0; 6] && embedded(a, b, c, d) // IPv4-compatible
+                || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] && embedded(a, b, c, d) // NAT64
+                || s[..3] == [0x64, 0xff9b, 1] // local-use NAT64
+                || s[0] == 0x2002 && embedded((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8) // 6to4
+                || s[..2] == [0x2001, 0] // Teredo
+                || s[..2] == [0x2001, 0xdb8] // documentation
+        }
     }
 }
 
@@ -495,7 +504,13 @@ mod tests {
         for ip in ["127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.0.1", "169.254.169.254", "0.0.0.0", "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
             assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["1.1.1.1", "93.184.216.34", "2606:4700::1111"] {
+        for ip in [
+            "::7f00:1", "::a01:203", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b:1::1", "2002:7f00:1::1",
+            "2002:a00:1::", "2001::1", "2001:0:4136:e378::1", "2001:db8::1", "fec0::1",
+        ] {
+            assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["1.1.1.1", "93.184.216.34", "2606:4700::1111", "64:ff9b::101:101", "2002:101:101::1", "2001:4860::8888"] {
             assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
         }
         assert!(validate_url("https://ci.example.com/hook", false).is_ok());

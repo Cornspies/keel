@@ -520,10 +520,34 @@ fn same_origin(req: &Request, base_url: &str) -> bool {
         (Some(source), _) if source == base_url || source.starts_with(&format!("{base_url}/")) => {
             true
         }
-        (Some(source), Some(host)) => source
-            .split_once("://")
-            .map(|(_, rest)| rest.split('/').next() == Some(host))
-            .unwrap_or(false),
+        // Behind TLS, a page on plain HTTP (where anyone on the way can
+        // change it) doesn't count.
+        (Some(source), Some(host)) => source.split_once("://").is_some_and(|(scheme, rest)| {
+            (scheme == "https" || !base_url.starts_with("https://")) && rest.split('/').next() == Some(host)
+        }),
         (Some(_), None) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origins() {
+        let req = |host: &str, origin: Option<&str>| {
+            let mut r = Request::builder().header(header::HOST, host);
+            if let Some(o) = origin {
+                r = r.header(header::ORIGIN, o);
+            }
+            r.body(axum::body::Body::empty()).unwrap()
+        };
+        let base = "https://git.example";
+        assert!(same_origin(&req("git.example", None), base));
+        assert!(same_origin(&req("git.example", Some("https://git.example")), base));
+        assert!(same_origin(&req("internal:3000", Some("https://internal:3000")), base), "behind a proxy");
+        assert!(!same_origin(&req("git.example", Some("http://git.example")), base), "plain HTTP");
+        assert!(!same_origin(&req("git.example", Some("https://evil.example")), base));
+        assert!(same_origin(&req("localhost:3000", Some("http://localhost:3000")), "http://localhost:3000"));
     }
 }

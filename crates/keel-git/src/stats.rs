@@ -1,7 +1,5 @@
 //! Who committed when, for contributor and activity graphs.
 
-use std::process::Command;
-
 use git2::Oid;
 
 use crate::{Error, GitRepo, Result};
@@ -23,10 +21,9 @@ impl GitRepo {
     /// Uses `git log`, which reads the commit-graph and is several times
     /// faster than walking with libgit2.
     pub fn commit_stamps(&self, tip: Oid, since: Option<Oid>) -> Result<Vec<CommitStamp>> {
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::command();
         cmd.arg("--git-dir")
             .arg(self.repo.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .arg("-c")
             .arg(format!("mailmap.blob={tip}:.mailmap"))
             .args(["log", "--no-merges", "--format=%at%x00%aN%x00%aE", &tip.to_string()]);

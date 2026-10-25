@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use keel_git::{Oid, SignedCommit};
-use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
+use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey, SignedPublicSubKey};
+use pgp::packet::SignatureType;
 use pgp::types::KeyDetails;
 
 use crate::{Core, Error, Result, invalid, now};
@@ -65,7 +66,8 @@ pub fn parse_gpg_key(armored: &str) -> Result<ParsedGpgKey> {
     }
     let fingerprint = format!("{:X}", key.primary_key.fingerprint());
     let mut ids = vec![hex::encode_upper(key.primary_key.legacy_key_id()), fingerprint.clone()];
-    for sub in &key.public_subkeys {
+    // Signatures from other subkeys are then from an unknown key.
+    for sub in key.public_subkeys.iter().filter(|s| subkey_state(s, now()) == SubkeyState::Usable) {
         ids.push(hex::encode_upper(sub.key.legacy_key_id()));
         ids.push(format!("{:X}", sub.key.fingerprint()));
     }
@@ -99,6 +101,36 @@ pub fn parse_gpg_key(armored: &str) -> Result<ParsedGpgKey> {
     Ok(ParsedGpgKey { fingerprint, ids, emails, expires_at })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubkeyState {
+    Usable,
+    Expired,
+    /// Revoked, or not for signing.
+    Unusable,
+}
+
+/// Whether `sub` can make signatures at time `at`, going by its latest
+/// binding signature.
+fn subkey_state(sub: &SignedPublicSubKey, at: i64) -> SubkeyState {
+    if sub.signatures.iter().any(|s| s.typ() == Some(SignatureType::SubkeyRevocation)) {
+        return SubkeyState::Unusable;
+    }
+    let binding = sub
+        .signatures
+        .iter()
+        .filter(|s| s.typ() == Some(SignatureType::SubkeyBinding))
+        .max_by_key(|s| s.created().map(|t| t.as_secs()));
+    let Some(binding) = binding else { return SubkeyState::Unusable };
+    if !binding.key_flags().sign() {
+        return SubkeyState::Unusable;
+    }
+    let created = i64::from(sub.key.created_at().as_secs());
+    match binding.key_expiration_time().map(|d| i64::from(d.as_secs())) {
+        Some(d) if d > 0 && at > created + d => SubkeyState::Expired,
+        _ => SubkeyState::Usable,
+    }
+}
+
 /// Whether a signed commit is verified, and if not, why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verification {
@@ -125,6 +157,9 @@ impl Verification {
             "valid" => format!("Signed with {signer}’s {kind} key {key}."),
             "unknown_key" => format!("Signed with {kind} key {key}, which nobody here has added."),
             "invalid" => format!("The {kind} signature doesn’t match the commit."),
+            "bad_email" if kind == "GPG" => format!(
+                "Signed with {signer}’s {kind} key {key}, but the committer email isn’t their verified email, or isn’t on the key."
+            ),
             "bad_email" => format!("Signed with {signer}’s {kind} key {key}, but the committer email isn’t their verified email."),
             "expired_key" => format!("Signed with {signer}’s {kind} key {key} after it expired."),
             "unknown_signature_type" => format!("Signed with an {kind} signature, which keel doesn’t check."),
@@ -275,7 +310,8 @@ impl Core {
             match p {
                 Parsed::Ssh { fingerprint, .. } if !ssh_owners.contains_key(fingerprint) => {
                     let owner: Option<(String,)> = sqlx::query_as(
-                        "SELECT u.username FROM ssh_keys k JOIN users u ON u.id = k.user_id WHERE k.fingerprint = ?1",
+                        "SELECT u.username FROM ssh_keys k JOIN users u ON u.id = k.user_id
+                         WHERE k.fingerprint = ?1 AND u.disabled_at IS NULL",
                     )
                     .bind(fingerprint)
                     .fetch_optional(&self.db)
@@ -290,9 +326,9 @@ impl Core {
                             continue;
                         }
                         let key: Option<GpgKeyRow> = sqlx::query_as(
-                            "SELECT u.username, k.fingerprint, k.public_key, k.expires_at
+                            "SELECT u.username, k.fingerprint, k.public_key, k.expires_at, k.emails
                              FROM gpg_key_ids i JOIN gpg_keys k ON k.id = i.gpg_key_id JOIN users u ON u.id = k.user_id
-                             WHERE i.key_id = ?1",
+                             WHERE i.key_id = ?1 AND u.disabled_at IS NULL",
                         )
                         .bind(id)
                         .fetch_optional(&self.db)
@@ -336,8 +372,9 @@ impl Core {
     }
 }
 
-/// A stored GPG key: owner, fingerprint, the key, and when it expires.
-type GpgKeyRow = (String, String, String, Option<i64>);
+/// A stored GPG key: owner, fingerprint, the key, when it expires, and its
+/// emails (one per line).
+type GpgKeyRow = (String, String, String, Option<i64>, String);
 
 fn check(
     s: &SignedCommit,
@@ -372,15 +409,14 @@ fn check(
         }
         Parsed::Gpg { sig, ids } => {
             let shown = ids.iter().find(|i| i.len() == 16).or(ids.first()).cloned().unwrap_or_default();
-            let Some((owner, fingerprint, armored, expires_at)) = ids.iter().find_map(|i| gpg_keys.get(i)) else {
+            let Some((owner, fingerprint, armored, expires_at, emails)) = ids.iter().find_map(|i| gpg_keys.get(i)) else {
                 return unverified("unknown_key", "GPG", shown, None);
             };
-            let checked = cache.get_or(s.id, fingerprint, || {
-                let key = parsed_keys
-                    .entry(fingerprint.clone())
-                    .or_insert_with(|| SignedPublicKey::from_string(armored).ok().map(|(k, _)| k));
-                key.as_ref().and_then(|k| check_gpg(&sig, &ids, k, &s.payload))
-            });
+            let key = parsed_keys
+                .entry(fingerprint.clone())
+                .or_insert_with(|| SignedPublicKey::from_string(armored).ok().map(|(k, _)| k))
+                .as_ref();
+            let checked = cache.get_or(s.id, fingerprint, || key.and_then(|k| check_gpg(&sig, &ids, k, &s.payload)));
             let Some(key_id) = checked else {
                 return unverified("invalid", "GPG", shown, Some(owner));
             };
@@ -389,6 +425,21 @@ fn check(
                 && at > *expires
             {
                 return unverified("expired_key", "GPG", key_id, Some(owner));
+            }
+            // Keys stored before keel checked subkeys, or subkeys that
+            // expired since.
+            let subkey = key
+                .into_iter()
+                .flat_map(|k| &k.public_subkeys)
+                .find(|sub| hex::encode_upper(sub.key.legacy_key_id()) == key_id);
+            match subkey.map(|sub| subkey_state(sub, signed_at.unwrap_or_else(now))) {
+                Some(SubkeyState::Unusable) => return unverified("invalid", "GPG", key_id, Some(owner)),
+                Some(SubkeyState::Expired) => return unverified("expired_key", "GPG", key_id, Some(owner)),
+                _ => {}
+            }
+            // As GitHub: the key must be for the committer's email.
+            if !emails.lines().any(|e| e == s.committer_email.to_lowercase()) {
+                return unverified("bad_email", "GPG", key_id, Some(owner));
             }
             Verification { verified: true, reason: "valid", kind: "GPG", key: key_id, signer: Some(owner.clone()) }
         }
@@ -455,24 +506,63 @@ mod tests {
         let gpg = Command::new("gpg").arg("--version").output().is_ok();
         let mut gpg_commit = None;
         let mut gpg_key = String::new();
+        // Signed with a subkey revoked since, and with a key for another
+        // email.
+        let mut more = Vec::new();
+        let (mut sub_key, mut sub_id, mut work_key) = (String::new(), String::new(), String::new());
         if gpg {
-            run(w, &home, &["gpg", "--batch", "--quiet", "--passphrase", "", "--quick-gen-key", "Ada <ada@example.com>", "ed25519", "sign", "never"]);
+            let gen_key = |uid: &str, usage: &str| {
+                run(w, &home, &["gpg", "--batch", "--quiet", "--passphrase", "", "--quick-gen-key", uid, "ed25519", usage, "never"]);
+            };
+            gen_key("Ada <ada@example.com>", "sign");
             gpg_key = run(w, &home, &["gpg", "--armor", "--export", "ada@example.com"]);
             let env = [as_ada[0], home[0]];
-            gpg_commit = Some(commit(&env, &["-c", "gpg.format=openpgp", "-c", "user.signingkey=ada@example.com", "-S"], "gpg"));
+            let sign_with = |key: &str, msg: &str| {
+                let key = format!("user.signingkey={key}");
+                commit(&env, &["-c", "gpg.format=openpgp", "-c", &key, "-S"], msg)
+            };
+            gpg_commit = Some(sign_with("ada@example.com", "gpg"));
+
+            gen_key("Sub <sub@example.com>", "cert");
+            let colons = run(w, &home, &["gpg", "--list-keys", "--with-colons", "sub@example.com"]);
+            let field = |kind: &str, n: usize| {
+                colons.lines().find(|l| l.starts_with(kind)).unwrap().split(':').nth(n).unwrap().to_owned()
+            };
+            let fpr = field("fpr", 9);
+            run(w, &home, &["gpg", "--batch", "--quiet", "--passphrase", "", "--quick-add-key", &fpr, "ed25519", "sign", "never"]);
+            let colons = run(w, &home, &["gpg", "--list-keys", "--with-colons", "sub@example.com"]);
+            sub_id = colons.lines().find(|l| l.starts_with("sub")).unwrap().split(':').nth(4).unwrap().to_owned();
+            more.push(sign_with(&format!("{sub_id}!"), "revoked subkey"));
+            let mut revoke = Command::new("gpg")
+                .args(["--batch", "--yes", "--command-fd", "0", "--pinentry-mode", "loopback", "--passphrase", ""])
+                .args(["--edit-key", &fpr])
+                .env("GNUPGHOME", gnupg.path())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(&mut revoke.stdin.take().unwrap(), b"key 1\nrevkey\ny\n0\n\ny\nsave\n").unwrap();
+            assert!(revoke.wait().unwrap().success());
+            sub_key = run(w, &home, &["gpg", "--armor", "--export", "sub@example.com"]);
+
+            gen_key("Ada <ada@work.example>", "sign");
+            work_key = run(w, &home, &["gpg", "--armor", "--export", "ada@work.example"]);
+            more.push(sign_with("ada@work.example", "work key"));
         }
         let remote = core.repo_path(&repo);
         run(w, &[], &["git", "push", "-q", remote.to_str().unwrap(), "main", "forged"]);
 
         let mut ids = vec![unsigned, ssh, ssh_bob, forged];
         ids.extend(gpg_commit);
+        ids.extend(&more);
         let reasons = |found: &HashMap<Oid, Verification>| -> Vec<&'static str> {
             ids.iter().map(|id| found.get(id).map_or("unsigned", |v| v.reason)).collect()
         };
         let found = core.verify_commits(repo.id, ids.clone()).await.unwrap();
         let mut want = vec!["unsigned", "unknown_key", "unknown_key", "unknown_key"];
         if gpg {
-            want.push("unknown_key");
+            want.extend(["unknown_key"; 3]);
         }
         assert_eq!(reasons(&found), want);
 
@@ -482,13 +572,32 @@ mod tests {
             assert_eq!(key.emails().collect::<Vec<_>>(), ["ada@example.com"]);
             assert_eq!(key.expires_at, None);
             assert!(core.add_gpg_key(bob.id, &gpg_key).await.is_err(), "taken");
+            // The revoked subkey isn't recorded.
+            assert!(!parse_gpg_key(&sub_key).unwrap().ids.contains(&sub_id));
+            core.add_gpg_key(ada.id, &sub_key).await.unwrap();
+            core.add_gpg_key(ada.id, &work_key).await.unwrap();
         }
         let found = core.verify_commits(repo.id, ids.clone()).await.unwrap();
         let mut want = vec!["unsigned", "valid", "bad_email", "invalid"];
         if gpg {
-            want.push("valid");
+            want.extend(["valid", "unknown_key", "bad_email"]);
         }
         assert_eq!(reasons(&found), want);
+        if gpg {
+            // As keys stored by older versions have it.
+            let (key,): (i64,) = sqlx::query_as("SELECT id FROM gpg_keys WHERE emails = 'sub@example.com'")
+                .fetch_one(&core.db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO gpg_key_ids (key_id, gpg_key_id) VALUES (?1, ?2)")
+                .bind(&sub_id)
+                .bind(key)
+                .execute(&core.db)
+                .await
+                .unwrap();
+            let found = core.verify_commits(repo.id, more.clone()).await.unwrap();
+            assert_eq!(found[&more[0]].reason, "invalid");
+        }
         let v = &found[&ssh];
         assert!(v.verified);
         assert_eq!((v.kind, v.signer.as_deref()), ("SSH", Some("ada")));
@@ -497,6 +606,12 @@ mod tests {
             assert_eq!((found[&id].kind, found[&id].key.len()), ("GPG", 16));
             let _ = Command::new("gpgconf").args(["--kill", "gpg-agent"]).env("GNUPGHOME", gnupg.path()).status();
         }
+
+        // Disabled accounts' keys don't verify.
+        sqlx::query("UPDATE users SET disabled_at = 1 WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
+        let found = core.verify_commits(repo.id, vec![ssh]).await.unwrap();
+        assert_eq!(found[&ssh].reason, "unknown_key");
+        sqlx::query("UPDATE users SET disabled_at = NULL WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
 
         // Removing the key unverifies.
         let gpg_keys = core.gpg_keys(ada.id).await.unwrap();

@@ -78,10 +78,12 @@ PY
 SMTP_PID=$!
 for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$SMTP_PORT) 2>/dev/null && break; sleep 0.1; done
 
-"$BIN" serve --data-dir "$T/data" --http-addr "127.0.0.1:$HTTP_PORT" \
+# A relative --data-dir, as by default: paths derived from it (such as the
+# hooks that enforce branch protection) must still work.
+(cd "$T" && exec "$BIN" serve --data-dir data --http-addr "127.0.0.1:$HTTP_PORT" \
     --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
     --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" \
-    --metrics-token smoke-metrics >"$T/server.log" 2>&1 &
+    --metrics-token smoke-metrics >"$T/server.log" 2>&1) &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -97,6 +99,8 @@ post() { # post <jar> <path> <data...>
 echo "== accounts"
 signup ada "$T/ada"
 signup bob "$T/bob"
+check "signing in redirects to local paths only" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=bob&password=password-bob&next=/%09/evil.example" "$B/login")" "$B/"
+check "non-ASCII ones are encoded" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" --data-urlencode "login=bob" --data-urlencode "password=password-bob" --data-urlencode "next=/ada/é" "$B/login")" "$B/ada/%C3%A9"
 check "cross-origin POST is rejected" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: http://evil.example' -d x=1 "$B/new")" 403
 check "create public repo" is "$(post "$T/ada" /new name=engine)" 303
 check "create private repo" is "$(post "$T/ada" /new name=secret private=on)" 303
@@ -110,13 +114,18 @@ git -C "$W" add -A && git -C "$W" commit -qm "Initial commit"
 check "push with password" git -C "$W" push -q "http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/engine.git" main
 check "anonymous clone" git clone -q "$B/ada/engine.git" "$T/c1"
 check "anonymous push is refused" bash -c "! git -C '$W' push -q '$B/ada/engine.git' main"
+python3 -c 'import gzip, sys; sys.stdout.buffer.write(gzip.compress(b"0" * (65 << 20)))' >"$T/bomb.gz"
+check "oversized gzip requests are refused" is "$(status -H 'Content-Encoding: gzip' -H 'Content-Type: application/x-git-upload-pack-request' --data-binary "@$T/bomb.gz" "$B/ada/engine.git/git-upload-pack")" 413
+check "small ones aren't" is "$(printf 0000 | gzip | status -H 'Content-Encoding: gzip' -H 'Content-Type: application/x-git-upload-pack-request' --data-binary @- "$B/ada/engine.git/git-upload-pack")" 200
 check "bob cannot push" bash -c "! git -C '$W' push -q 'http://bob:password-bob@127.0.0.1:$HTTP_PORT/ada/engine.git' main"
 
 echo "== access tokens"
-page=$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=ci" --data-urlencode "expires=30" "$B/settings/tokens")
+page=$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=ci" --data-urlencode "expires=30" --data-urlencode "password=password-ada" "$B/settings/tokens")
 RO=$(grep -o 'value="keel_[A-Za-z0-9_-]*"' <<<"$page" | cut -d'"' -f2)
-page=$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=laptop" --data-urlencode "write=on" "$B/settings/tokens")
+page=$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=laptop" --data-urlencode "write=on" --data-urlencode "password=password-ada" "$B/settings/tokens")
 RW=$(grep -o 'value="keel_[A-Za-z0-9_-]*"' <<<"$page" | cut -d'"' -f2)
+check "creating tokens needs the password" contains "$(curl -s -b "$T/ada" -H "$O" -d name=x "$B/settings/tokens")" "password is incorrect"
+check "so does changing the email" contains "$(curl -s -b "$T/ada" -H "$O" -d email=evil@example.com -d password=wrong "$B/settings/account/email")" "password is incorrect"
 check "tokens are shown once" bash -c "[ -n '$RO' ] && [ -n '$RW' ] && ! curl -s -b '$T/ada' '$B/settings/tokens' | grep -q '$RW'"
 check "read-only token clones private repo" git clone -q "http://ada:$RO@127.0.0.1:$HTTP_PORT/ada/secret.git" "$T/c2"
 echo change >>"$W/README.md" && git -C "$W" commit -qam "Second"
@@ -125,7 +134,8 @@ check "write token pushes (token as username)" git -C "$W" push -q "http://$RW:x
 check "wrong token is refused" bash -c "! git ls-remote -q 'http://ada:keel_nope@127.0.0.1:$HTTP_PORT/ada/secret.git'"
 
 echo "== git over SSH"
-check "add SSH key" is "$(post "$T/ada" /settings/keys "key=$(cat "$T/key.pub")")" 303
+check "adding SSH keys needs the password" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "key=$(cat "$T/key.pub")" --data-urlencode password=wrong "$B/settings/keys")" "password is incorrect"
+check "add SSH key" is "$(post "$T/ada" /settings/keys "key=$(cat "$T/key.pub")" password=password-ada)" 303
 echo ssh >>"$W/README.md" && git -C "$W" commit -qam "Over SSH"
 check "push over SSH" git -C "$W" push -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" main
 check "clone over SSH" git clone -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/c3"
@@ -194,6 +204,9 @@ check "duplicate pull request is refused" contains "$(curl -s -b "$T/bob" -H "$O
 check "issue URL redirects to pull" is "$(status "$B/ada/engine/issues/$PR")" 303
 check "pull ref is fetchable" git -C "$T/c1" fetch -q origin "refs/pull/$PR/head"
 check "pushing to pull refs is refused" bash -c "! git -C '$W' push -q '$ADA_HTTP' HEAD:refs/pull/$PR/head"
+git -C "$W" replace "$(git -C "$W" rev-parse HEAD~1)" HEAD
+check "pushing replace refs is refused" bash -c "! git -C '$W' push -q '$ADA_HTTP' 'refs/replace/*:refs/replace/*'"
+git -C "$W" replace -d "$(git -C "$W" rev-parse HEAD~1)"
 check "merge box offers merging" contains "$(curl -s -b "$T/ada" "$B/ada/engine/pull/$PR")" "no conflicts"
 check "bob can't merge" is "$(post "$T/bob" /ada/engine/pull/$PR/merge style=merge)" 403
 check "ada squash-merges" is "$(post "$T/ada" /ada/engine/pull/$PR/merge style=squash delete_branch=on)" 303
@@ -230,6 +243,7 @@ check "repo search finds content" eventually_contains "$B/ada/engine/search?q=fa
 check "matches are highlighted" contains "$(curl -s "$B/ada/engine/search?q=faster")" "<mark>faster</mark>"
 check "search is case-insensitive" contains "$(curl -s "$B/ada/engine/search?q=FN+MAIN")" "src/main.rs"
 check "global search finds public code" contains "$(curl -s -b "$T/eve" "$B/search?q=fn+main")" "ada/engine"
+check "long searches are refused" contains "$(curl -s "$B/search?q=$(printf 'abc%.0s' $(seq 100))")" "at most 256 characters"
 check "global search hides private repos" bash -c "! curl -s -b '$T/eve' '$B/search?q=fn+main' | grep -q 'ada/secret'"
 check "collaborators find private code" contains "$(curl -s -b "$T/bob" "$B/search?q=fn+main")" "ada/secret"
 check "short queries are explained" contains "$(curl -s "$B/search?q=fn")" "at least 3"
@@ -527,7 +541,7 @@ check "open a pull request" is "$(api_status "$RW" POST /repos/ada/engine/pulls 
 AP=$(api "$RW" GET /repos/ada/engine/pulls | field '[0]["number"]')
 check "it says why it can't be merged yet" contains "$(curl -s "$API/repos/ada/engine/pulls/$AP" | field '["merge_blocked_by"]')" "approving review"
 check "merging is refused" is "$(api_status "$RW" PUT "/repos/ada/engine/pulls/$AP/merge" -d '{}')" 405
-page=$(curl -s -b "$T/bob" -H "$O" --data-urlencode "name=api" --data-urlencode "write=on" "$B/settings/tokens")
+page=$(curl -s -b "$T/bob" -H "$O" --data-urlencode "name=api" --data-urlencode "write=on" --data-urlencode "password=password-new" "$B/settings/tokens")
 BOBTOK=$(grep -o 'value="keel_[A-Za-z0-9_-]*"' <<<"$page" | cut -d'"' -f2)
 check "bob approves through the API" is "$(api "$BOBTOK" POST "/repos/ada/engine/pulls/$AP/reviews" -d '{"event":"APPROVE"}' | field '["state"]')" APPROVED
 check "merge through the API" is "$(api "$RW" PUT "/repos/ada/engine/pulls/$AP/merge" -d '{"merge_method":"squash","delete_branch":true}' | field '["merged"]')" True
@@ -764,6 +778,10 @@ API_REL=$(api "$RW" GET /repos/ada/engine/releases/latest | field '["id"]')
 check "the latest release" is "$(api "$RW" GET /repos/ada/engine/releases/latest | field '["tag_name"]')" v1.1
 check "upload a file through the API" is "$(api "$RW" POST "/repos/ada/engine/releases/$API_REL/assets?name=notes.txt" --data-binary "release notes" | field '["size"]')" 13
 check "it downloads" is "$(curl -s "$B/ada/engine/releases/download/v1.1/notes.txt")" "release notes"
+ASSET=$(api "$RW" GET "/repos/ada/engine/releases/$API_REL" | field '["assets"][0]["id"]')
+SREL=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d tag=s1 -d target=main -d action=draft "$B/ada/secret/releases" | grep -o 'releases/[0-9]*/edit' | grep -o '[0-9]*')
+check "other repositories' release files can't be deleted" is "$(post "$T/ada" "/ada/secret/releases/$SREL/assets/$ASSET/delete" x=1)" 404
+check "so the file is still there" is "$(curl -s "$B/ada/engine/releases/download/v1.1/notes.txt")" "release notes"
 check "the tab counts releases" contains "$(curl -s "$B/ada/engine")" 'Releases <span class="count">2</span>'
 HOME_FEED=$(curl -s -b "$T/ada" "$B/")
 check "the home page shows activity" contains "$HOME_FEED" "released"
@@ -874,6 +892,7 @@ check "delete a file" is "$(post "$T/ada" /ada/tracker/delete/main/assets/copy.t
 check "it's gone" is "$(status "$B/ada/tracker/raw/main/assets/copy.txt")" 404
 check "web commits show in the feed" feed_has 'pushed 1 commit to <a href="/ada/tracker/tree/main">main</a>'
 check "protected branches need a pull request" contains "$(curl -s -b "$T/ada" -H "$O" -d path=README.md -d text=x -d target=direct "$B/ada/engine/edit/main/README.md")" "protected"
+check "also as a \"new branch\" named like it" contains "$(curl -s -b "$T/ada" -H "$O" -d path=README.md -d text=x -d target=branch -d new_branch=main "$B/ada/engine/edit/main/README.md")" "protected"
 check "so commit to a new branch" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d path=README.md -d text=Edited -d target=branch -d new_branch=ada-readme "$B/ada/engine/edit/main/README.md")" "$B/ada/engine/compare/main...ada-readme"
 check "which starts a pull request" contains "$(curl -s -b "$T/ada" "$B/ada/engine/compare/main...ada-readme")" "Create pull request"
 TB3=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
@@ -1151,11 +1170,11 @@ check "the API too" is "$(curl -s "$API/repos/ada/linear/commits/$SIGNED" | fiel
 check "and lists" is "$(curl -s "$API/repos/ada/linear/commits?sha=signed&per_page=3" | field '[1]["commit"]["verification"]["reason"]')" unknown_key
 check "SSH keys over the API" is "$(api "$RW" GET /user/keys | field '[0]["fingerprint"][:7]')" "SHA256:"
 check "GPG keys page" contains "$(curl -s -b "$T/ada" "$B/settings/keys")" "GPG keys"
-check "nonsense isn't a GPG key" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode key=nonsense "$B/settings/gpg-keys")" "doesn’t look like a GPG public key"
+check "nonsense isn't a GPG key" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode key=nonsense --data-urlencode password=password-ada "$B/settings/gpg-keys")" "doesn’t look like a GPG public key"
 if command -v gpg >/dev/null; then
     export GNUPGHOME=$T/gnupg && mkdir -m 700 "$GNUPGHOME"
     gpg --batch --quiet --passphrase "" --quick-gen-key "Ada <ada@example.com>" ed25519 sign never
-    check "add a GPG key" is "$(post "$T/ada" /settings/gpg-keys "key=$(gpg --armor --export ada@example.com)")" 303
+    check "add a GPG key" is "$(post "$T/ada" /settings/gpg-keys "key=$(gpg --armor --export ada@example.com)" password=password-ada)" 303
     check "it lists its emails" contains "$(curl -s -b "$T/ada" "$B/settings/keys")" "ada@example.com"
     git -C "$LW" -c gpg.format=openpgp -c user.signingkey=ada@example.com commit -S -q --allow-empty -m "signed with GPG"
     git -C "$LW" push -q "$LIN" signed

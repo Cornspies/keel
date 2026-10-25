@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 keel-core.workspace = true
+keel-git.workspace = true
 keel-web.workspace = true
 keel-ssh.workspace = true
 keel-hooks.workspace = true

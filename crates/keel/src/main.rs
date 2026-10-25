@@ -145,7 +145,7 @@ fn host_of(url: &str) -> Option<String> {
 }
 
 fn check_git() -> anyhow::Result<()> {
-    let out = std::process::Command::new("git")
+    let out = keel_git::command()
         .arg("--version")
         .output()
         .context("`git` was not found in PATH; keel needs it to serve clones and pushes")?;

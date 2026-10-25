@@ -36,6 +36,24 @@ pub use transport::{Service, git_command};
 
 pub use git2::Oid;
 
+/// `git`, with the environment every command keel runs uses:
+/// - replace refs (`refs/replace/*`) are ignored, as libgit2 ignores them,
+///   so merges, archives and ancestry checks see the same commits as diffs,
+///   file views and signature checks;
+/// - no system or user configuration applies, only the repository's.
+pub fn command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    standard_env(&mut cmd);
+    cmd
+}
+
+/// Sets [`command`]'s environment on `cmd`, e.g. after `env_clear`.
+pub(crate) fn standard_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+}
+
 /// Whether `name` can be a branch name.
 pub fn valid_branch_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('-') && name.len() <= 200 && valid_ref_name(&format!("refs/heads/{name}"))

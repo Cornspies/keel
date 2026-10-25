@@ -32,12 +32,15 @@ impl Api<'_> {
     fn request(&self, url: &str) -> Result<reqwest::RequestBuilder, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
         lfs::check_url(&parsed, self.allow_private)?;
-        let mut req = self.client.get(parsed).header("User-Agent", "keel");
+        let mut req = self.client.get(parsed.clone()).header("User-Agent", "keel");
         req = match self.service {
             ImportService::GitHub => req.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28"),
             ImportService::Gitea => req.header("Accept", "application/json"),
         };
-        if !self.token.is_empty() {
+        // Only to the source itself, not to URLs it sends (e.g. for files).
+        let ours = reqwest::Url::parse(&self.base).is_ok_and(|base| lfs::same_origin(&base, &parsed))
+            || (self.service == ImportService::GitHub && parsed.scheme() == "https" && parsed.host_str() == Some("api.github.com"));
+        if !self.token.is_empty() && ours {
             let auth = match self.service {
                 ImportService::GitHub => format!("Bearer {}", self.token),
                 ImportService::Gitea => format!("token {}", self.token),
@@ -430,6 +433,21 @@ mod tests {
     use serde_json::json;
 
     const WEB: &str = "https://github.com";
+
+    #[test]
+    fn token_only_to_the_source() {
+        let client = reqwest::Client::new();
+        let api = |service, base: &str| Api { client: &client, service, base: base.into(), token: "t0ken".into(), allow_private: false };
+        let auth = |api: &Api, url: &str| api.request(url).unwrap().build().unwrap().headers().contains_key("Authorization");
+        let gitea = api(ImportService::Gitea, "https://gitea.example/api/v1/repos/octo/engine");
+        assert!(auth(&gitea, "https://gitea.example/api/v1/repos/octo/engine/issues"));
+        assert!(auth(&gitea, "https://gitea.example/attachments/1"));
+        assert!(!auth(&gitea, "https://evil.example/attachments/1"));
+        assert!(!auth(&gitea, "http://gitea.example/attachments/1"));
+        let github = api(ImportService::GitHub, "https://api.github.com/repos/octo/engine");
+        assert!(auth(&github, "https://api.github.com/repos/octo/engine/releases/assets/1"));
+        assert!(!auth(&github, "https://objects.example/x"));
+    }
 
     #[test]
     fn github_json() {

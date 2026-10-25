@@ -69,12 +69,19 @@ struct ObjectError {
     message: String,
 }
 
+/// Whether two URLs have the same scheme, host and port, so credentials for
+/// one may go to the other.
+pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
+}
+
 /// A request to `url` with the action's headers, and the remote's
-/// credentials if the action brings none and it's the remote's host.
+/// credentials if the action brings none and it's the remote's origin
+/// (not, say, plain HTTP on the same host).
 fn request(client: &reqwest::Client, core: &Core, method: reqwest::Method, remote: &MirrorRemote, action: &Action) -> Result<reqwest::RequestBuilder, String> {
     let url = reqwest::Url::parse(&action.href).map_err(|_| "the server sent an invalid URL".to_owned())?;
     check_url(&url, core.config.webhook_allow_private)?;
-    let same_host = reqwest::Url::parse(&remote.url).ok().and_then(|r| r.host_str().map(str::to_owned)) == url.host_str().map(str::to_owned);
+    let same_host = reqwest::Url::parse(&remote.url).is_ok_and(|r| same_origin(&r, &url));
     let mut req = client.request(method, url);
     let mut has_auth = false;
     for (k, v) in &action.header {
@@ -266,5 +273,10 @@ mod tests {
         assert!(check_url(&url("http://[::1]/x"), false).is_err());
         assert!(check_url(&url("http://127.0.0.1/x"), true).is_ok());
         assert!(check_url(&url("file:///etc/passwd"), true).is_err());
+
+        assert!(same_origin(&url("https://git.example/a"), &url("https://git.example:443/b")));
+        assert!(!same_origin(&url("https://git.example/a"), &url("http://git.example/a")), "plain HTTP");
+        assert!(!same_origin(&url("https://git.example/a"), &url("https://git.example:8443/a")));
+        assert!(!same_origin(&url("https://git.example/a"), &url("https://media.example/a")));
     }
 }

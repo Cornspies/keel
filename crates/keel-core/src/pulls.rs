@@ -224,6 +224,7 @@ impl Core {
             }
         };
         let fork_tip = match &fork {
+            Some(_) if !self.may_fetch_head(issue, pull).await? => None,
             Some(path) => {
                 let (path, h) = (path.clone(), head_ref.clone());
                 let read = tokio::task::spawn_blocking(move || Ok::<_, keel_git::Error>(GitRepo::open(&path)?.branch_tip(&h)))
@@ -253,6 +254,27 @@ impl Core {
             Ok((base, head))
         })
         .await
+    }
+
+    /// Whether commits may still be copied from a pull request's head
+    /// repository into its base repository. Access was checked when the
+    /// pull request was opened, but may be gone since: a private head's
+    /// commits only go into a private base, and only while the author can
+    /// still read the head. Otherwise the head counts as deleted.
+    async fn may_fetch_head(&self, issue: &Issue, pull: &PullRequest) -> Result<bool> {
+        let Some(head) = self.repo_by_id(pull.head_repo_id.unwrap_or(-1)).await? else { return Ok(false) };
+        if !head.is_private || head.id == issue.repo_id {
+            return Ok(true);
+        }
+        let Some(base) = self.repo_by_id(issue.repo_id).await? else { return Ok(false) };
+        if !base.is_private {
+            return Ok(false);
+        }
+        let author = match issue.author_id {
+            Some(id) => self.user_by_id(id).await?,
+            None => None,
+        };
+        Ok(self.access(&head, author.as_ref()).await? >= Access::Read)
     }
 
     /// Records a merge: by `actor` through the web UI (with the merge base
@@ -595,6 +617,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pull_from_private_parent() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        let secret = core.create_repo(&ada, "secret", "", true).await.unwrap();
+        let work = push_branches(&core, &secret);
+        core.set_collaborator(&secret, "bob", Access::Read).await.unwrap();
+        let fork = core.fork_repo(&secret, &bob, "secret").await.unwrap();
+        assert!(fork.is_private);
+        // Upstream changes into Bob's fork.
+        let issue = core.create_pull(&fork, &bob, "Sync", "", "main", &secret, "feature", false).await.unwrap();
+        let pull = core.pull(issue.id).await.unwrap().unwrap();
+        let pinned = || core.git(fork.id, |g| Ok(g.ref_tip("refs/pull/1/head")));
+        let feature = core.git(secret.id, |g| Ok(g.branch_tip("feature"))).await.unwrap();
+        assert_eq!(pinned().await.unwrap(), feature);
+
+        // Bob loses access; Ada's new commits stay out of his fork.
+        core.remove_collaborator(secret.id, bob.id).await.unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(work.path()).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        std::fs::write(work.path().join("b"), "private").unwrap();
+        git(&["-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-qam", "private"]);
+        git(&["push", "-q", core.repo_path(&secret).to_str().unwrap(), "feature"]);
+        core.sync_pulls(secret.id, Some(ada.id)).await.unwrap();
+        assert_eq!(pinned().await.unwrap(), feature);
+        assert_eq!(core.pull_tips(&issue, &pull).await.unwrap().1, None);
+        let merged = core.merge_pull(&fork, &issue, &bob, keel_git::MergeStyle::Merge, false).await;
+        assert!(merged.is_err());
+        assert_eq!(pinned().await.unwrap(), feature);
+    }
+
+    #[tokio::test]
     async fn pull_from_fork() {
         let (core, _dir) = Core::for_tests().await;
         let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
@@ -658,6 +714,27 @@ mod tests {
         assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), None);
         core.merge_pull(&repo, &lfs_pull, &ada, keel_git::MergeStyle::Merge, false).await.unwrap();
         assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), Some(3));
+
+        // Making the fork private keeps its new commits out of the public
+        // base.
+        std::fs::write(work.path().join("c"), "3").unwrap();
+        git(&["checkout", "-q", "topic"]);
+        git(&["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-qam", "public"]);
+        git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "topic"]);
+        let open = core.create_pull(&repo, &bob, "Later", "", "main", &fork, "topic", false).await.unwrap();
+        let open_pull = core.pull(open.id).await.unwrap().unwrap();
+        let pinned = |n: i64| core.git(repo.id, move |g| Ok(g.ref_tip(&pull_ref(n))));
+        let before = pinned(open.number).await.unwrap();
+        assert!(before.is_some());
+        assert_eq!(core.pull_json(&repo, &open).await.unwrap()["head"]["repo"]["full_name"], "bob/engine");
+        core.update_repo(fork.id, "", true).await.unwrap();
+        assert!(core.pull_json(&repo, &open).await.unwrap()["head"]["repo"].is_null(), "private now");
+        std::fs::write(work.path().join("c"), "4").unwrap();
+        git(&["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-qam", "secret"]);
+        git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "topic"]);
+        core.sync_pulls(fork.id, Some(bob.id)).await.unwrap();
+        assert_eq!(core.pull_tips(&open, &open_pull).await.unwrap().1, None);
+        assert_eq!(pinned(open.number).await.unwrap(), before);
 
         // Deleting the fork keeps the pull request.
         core.delete_repo(&fork).await.unwrap();

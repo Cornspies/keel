@@ -33,6 +33,9 @@ const MAX_DIFF_FILES: usize = 5_000;
 /// How much file content a search without the index reads at most.
 const MAX_SCAN_BYTES: usize = 256 * 1024 * 1024;
 const MAX_LINE_CHARS: usize = 240;
+/// Longest query: each distinct trigram is a clause of the index query,
+/// and anyone can search public repositories.
+const MAX_QUERY_CHARS: usize = 256;
 
 pub fn open_index(state_dir: &std::path::Path) -> Option<Arc<SearchIndex>> {
     match SearchIndex::open(&state_dir.join("search")) {
@@ -214,6 +217,9 @@ impl Matcher {
     /// A regular expression if `regex` is set or the query is written
     /// `/like this/`, otherwise text. Errors explain unusable queries.
     fn parse(q: &str, regex: bool) -> Result<Self, String> {
+        if q.chars().count() > MAX_QUERY_CHARS {
+            return Err(format!("Searches are at most {MAX_QUERY_CHARS} characters long."));
+        }
         let slashed = q.len() > 2 && q.starts_with('/') && q.ends_with('/');
         if !(regex || slashed) {
             let n = q.chars().count();
@@ -549,6 +555,11 @@ mod tests {
         let text = Matcher::parse("Main(", false).unwrap();
         assert_eq!(text.find("fn main() {}"), [(3, 8)]);
         assert!(Matcher::parse("ab", false).is_err(), "too short");
+        assert!(Matcher::parse(&"é".repeat(MAX_QUERY_CHARS), false).is_ok());
+        let long = "abc".repeat(100);
+        for regex in [false, true] {
+            assert!(Matcher::parse(&long, regex).unwrap_err().contains("at most 256 characters"));
+        }
 
         let re = Matcher::parse(r"fn\s+\w+\(", true).unwrap();
         assert_eq!(re.find("pub fn  run(x)"), [(4, 12)]);

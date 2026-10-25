@@ -4,7 +4,6 @@
 
 use std::io::BufRead;
 use std::path::Path;
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +28,7 @@ pub struct BranchRule {
     pub required_approvals: i64,
     /// Reviews only count for the commit they were given on.
     pub dismiss_stale: bool,
-    /// Allow force pushes and deleting the branch.
+    /// Allow force pushes, and deleting the branch unless `require_pull`.
     pub allow_force_push: bool,
     /// Status contexts that must succeed before merging, comma-separated.
     pub required_checks: String,
@@ -62,17 +61,47 @@ fn normalize_checks(s: &str) -> Result<String> {
     Ok(checks.join(","))
 }
 
-/// `*` matches any run of characters other than `/`.
+/// `*` matches any run of characters other than `/`. As it never matches
+/// `/`, the pattern and the name match segment by segment.
 fn glob_match(pattern: &str, name: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == name,
-        Some((prefix, rest)) => {
-            let Some(name) = name.strip_prefix(prefix) else { return false };
-            // Try every split of `name` at which the star's match ends.
-            let stop = name.find('/').unwrap_or(name.len());
-            (0..=stop).any(|i| glob_match(rest, &name[i..]))
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
+    let (mut patterns, mut names) = (pattern.split('/'), name.split('/'));
+    loop {
+        match (patterns.next(), names.next()) {
+            (None, None) => return true,
+            (Some(p), Some(n)) if segment_match(p, n) => {}
+            _ => return false,
         }
     }
+}
+
+/// Matches one segment without backtracking into earlier stars: on a
+/// mismatch, only the last star takes one more character. Never more than
+/// `pattern.len() * name.len()` steps, without recursion.
+fn segment_match(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut i, mut j) = (0, 0);
+    // After the last star: where the pattern goes on, and where in `name`
+    // the rest of the pattern is tried.
+    let mut star = None;
+    while j < n.len() {
+        if p.get(i) == Some(&'*') {
+            i += 1;
+            star = Some((i, j));
+        } else if p.get(i) == Some(&n[j]) {
+            i += 1;
+            j += 1;
+        } else if let Some((after, from)) = star {
+            i = after;
+            j = from + 1;
+            star = Some((after, j));
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|&c| c == '*')
 }
 
 /// The rule for `branch`: an exact match, otherwise the longest matching
@@ -278,7 +307,7 @@ impl Core {
     /// (`via_pull` false), or delete it.
     pub async fn may_update_branch(&self, repo_id: i64, branch: &str, via_pull: bool, delete: bool) -> Result<bool> {
         let Some(rule) = self.branch_rule(repo_id, branch).await? else { return Ok(true) };
-        Ok(if delete { rule.allow_force_push } else { via_pull || !rule.require_pull })
+        Ok(if delete { may_delete(&rule) } else { via_pull || !rule.require_pull })
     }
 
     /// Settings for `git receive-pack` into `repo_id` so the hook enforces
@@ -319,6 +348,13 @@ pub(crate) fn install_hooks(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether branches under `rule` may be deleted. Not when they need pull
+/// requests, even if force pushes are allowed: deleting and pushing anew
+/// would replace the branch without one.
+fn may_delete(rule: &BranchRule) -> bool {
+    rule.allow_force_push && !rule.require_pull
+}
+
 /// Why one ref update breaks `rules`, if it does. `fast_forward` tells
 /// whether `old` is an ancestor of `new`.
 pub fn check_update(
@@ -332,7 +368,7 @@ pub fn check_update(
     let rule = rule_for(rules, branch)?;
     match (old, new) {
         (None, _) => None,
-        (Some(_), None) if !rule.allow_force_push => Some(format!("{branch} is protected and can't be deleted.")),
+        (Some(_), None) if !may_delete(rule) => Some(format!("{branch} is protected and can't be deleted.")),
         (Some(_), None) => None,
         (Some(_), Some(_)) if rule.require_pull => {
             Some(format!("{branch} is protected: changes must be made through a pull request."))
@@ -368,7 +404,9 @@ pub fn pre_receive() -> i32 {
         let (old, new) = ((!zero(old)).then_some(old), (!zero(new)).then_some(new));
         let ff = || {
             let (Some(old), Some(new)) = (old, new) else { return false };
-            Command::new("git")
+            // Without replace refs: one could give `new` a fake parent
+            // `old` and make any rewrite pass as a fast-forward.
+            keel_git::command()
                 .args(["merge-base", "--is-ancestor", old, new])
                 .status()
                 .is_ok_and(|s| s.success())
@@ -416,6 +454,18 @@ mod tests {
         assert!(!glob_match("*", "a/b"));
         assert!(glob_match("v*-stable", "v2-stable"));
         assert!(glob_match("*/*", "a/b"));
+        assert!(glob_match("release/*", "release/v1-β"));
+        assert!(glob_match("*", "β"));
+        assert!(glob_match("*β*", "αβγ"));
+        assert!(!glob_match("*-β", "α-βx"));
+        assert!(glob_match("a*b*c", "aXbYbZc"));
+        assert!(!glob_match("a*b*c", "aXbYbZ"));
+        assert!(glob_match("**", ""));
+        assert!(!glob_match("*/*", "a"));
+        let started = std::time::Instant::now();
+        assert!(!glob_match(&("a*".repeat(50) + "b"), &"a".repeat(200)));
+        assert!(!glob_match(&"*a".repeat(100), &"a".repeat(99)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "{:?}", started.elapsed());
 
         let rules = [rule("*", false, true), rule("release/*", true, false), rule("main", true, false)];
         assert_eq!(rule_for(&rules, "main").unwrap().pattern, "main");
@@ -433,7 +483,12 @@ mod tests {
     fn updates() {
         let a = Some("1111");
         let b = Some("2222");
-        let rules = [rule("main", true, false), rule("dev", false, false), rule("wild", false, true)];
+        let rules = [
+            rule("main", true, false),
+            rule("dev", false, false),
+            rule("wild", false, true),
+            rule("reviewed", true, true),
+        ];
         let check = |r: &str, old, new, ff: bool| check_update(&rules, r, old, new, || ff);
         assert!(check("refs/heads/main", None, b, true).is_none(), "creating is fine");
         assert!(check("refs/heads/main", a, b, true).unwrap().contains("pull request"));
@@ -443,6 +498,9 @@ mod tests {
         assert!(check("refs/heads/wild", a, b, false).is_none());
         assert!(check("refs/heads/wild", a, None, false).is_none());
         assert!(check("refs/heads/other", a, None, false).is_none());
+        // Deleting and pushing anew would skip the pull requests.
+        assert!(check("refs/heads/reviewed", a, None, false).unwrap().contains("deleted"));
+        assert!(check("refs/heads/reviewed", None, b, false).is_none(), "creating still is");
         assert!(check("refs/tags/main", a, None, false).is_none(), "tags aren't branches");
     }
 

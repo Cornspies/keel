@@ -10,6 +10,18 @@ use std::collections::HashMap;
 
 use crate::{Core, Issue, Result, User, now};
 
+/// SQL condition: the notification's user `n.user_id` can (still) read
+/// repository `r`, as [`Core::access`] decides. Removed collaborators and
+/// members keep their notifications, but don't see them.
+macro_rules! still_readable {
+    () => {
+        "(r.is_private = 0 OR r.owner_id = n.user_id
+          OR EXISTS (SELECT 1 FROM users me WHERE me.id = n.user_id AND me.is_admin)
+          OR EXISTS (SELECT 1 FROM collaborators c WHERE c.repo_id = r.id AND c.user_id = n.user_id)
+          OR EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = r.owner_id AND m.user_id = n.user_id))"
+    };
+}
+
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct Notification {
     pub id: i64,
@@ -251,7 +263,7 @@ impl Core {
 
     /// A user's notifications, most recent first.
     pub async fn notifications(&self, user_id: i64, unread_only: bool, offset: i64, limit: i64) -> Result<Vec<Notification>> {
-        Ok(sqlx::query_as(
+        Ok(sqlx::query_as(concat!(
             "SELECT n.id, n.issue_id, o.username AS owner, r.name AS repo, i.number, i.title, i.is_pull, i.state,
                 n.reason, n.activity, a.username AS actor, n.unread, n.updated_at
              FROM notifications n
@@ -259,9 +271,10 @@ impl Core {
              JOIN repositories r ON r.id = i.repo_id
              JOIN users o ON o.id = r.owner_id
              LEFT JOIN users a ON a.id = n.actor_id
-             WHERE n.user_id = ?1 AND (n.unread = 1 OR NOT ?2)
-             ORDER BY n.updated_at DESC, n.id DESC LIMIT ?3 OFFSET ?4",
-        )
+             WHERE n.user_id = ?1 AND (n.unread = 1 OR NOT ?2) AND ",
+            still_readable!(),
+            " ORDER BY n.updated_at DESC, n.id DESC LIMIT ?3 OFFSET ?4",
+        ))
         .bind(user_id)
         .bind(unread_only)
         .bind(limit)
@@ -271,10 +284,16 @@ impl Core {
     }
 
     pub async fn unread_notifications(&self, user_id: i64) -> Result<i64> {
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND unread = 1")
-            .bind(user_id)
-            .fetch_one(&self.db)
-            .await?;
+        let (n,): (i64,) = sqlx::query_as(concat!(
+            "SELECT COUNT(*) FROM notifications n
+             JOIN issues i ON i.id = n.issue_id
+             JOIN repositories r ON r.id = i.repo_id
+             WHERE n.user_id = ?1 AND n.unread = 1 AND ",
+            still_readable!(),
+        ))
+        .bind(user_id)
+        .fetch_one(&self.db)
+        .await?;
         Ok(n)
     }
 
@@ -378,6 +397,15 @@ mod tests {
         // Mentions in private repositories reach only those with access.
         core.create_issue(secret.id, &ada, "Plans", "@eve look").await.unwrap();
         assert!(inbox(eve.id).await.is_empty());
+
+        // Losing access hides them again.
+        core.set_collaborator(&secret, "eve", crate::Access::Read).await.unwrap();
+        core.create_issue(secret.id, &ada, "More plans", "@eve look").await.unwrap();
+        assert_eq!(inbox(eve.id).await[0].title, "More plans");
+        assert_eq!(core.unread_notifications(eve.id).await.unwrap(), 1);
+        core.remove_collaborator(secret.id, eve.id).await.unwrap();
+        assert!(inbox(eve.id).await.is_empty());
+        assert_eq!(core.unread_notifications(eve.id).await.unwrap(), 0);
 
         core.mark_issue_read(dan.id, issue.id).await.unwrap();
         assert_eq!(core.unread_notifications(dan.id).await.unwrap(), 0);

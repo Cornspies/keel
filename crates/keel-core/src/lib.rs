@@ -167,13 +167,24 @@ pub struct Core {
     /// Signs short-lived tokens (Git LFS).
     token_secret: Arc<String>,
     metrics: Arc<Metrics>,
+    /// See [`users::LoginFailures`].
+    login_failures: Arc<std::sync::Mutex<users::LoginFailures>>,
 }
 
 impl Core {
     /// Opens (creating if needed) the data directory and database and runs
     /// migrations.
-    pub async fn open(config: Config) -> anyhow::Result<Self> {
+    pub async fn open(mut config: Config) -> anyhow::Result<Self> {
+        if !config.data_dir.exists() {
+            // Holds secrets; see `backup`.
+            std::fs::create_dir_all(&config.data_dir)?;
+            backup::private(&config.data_dir, 0o700)?;
+        }
         std::fs::create_dir_all(config.repos_dir())?;
+        // Every path is built from `data_dir`; keep them all absolute. Git
+        // resolves a relative `core.hooksPath` from the repository it runs
+        // in, finds no hook there and silently skips branch protection.
+        config.data_dir = std::fs::canonicalize(&config.data_dir)?;
         protection::install_hooks(&config.hooks_dir())?;
         let options = SqliteConnectOptions::new()
             .filename(config.db_path())
@@ -202,6 +213,7 @@ impl Core {
             settings: Arc::default(),
             token_secret,
             metrics: Arc::default(),
+            login_failures: Arc::default(),
         };
         core.load_settings().await?;
         core.delete_expired_sessions().await?;
@@ -232,5 +244,29 @@ impl Core {
             ..Config::default()
         };
         (Self::open(config).await.unwrap(), dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relative_data_dir_becomes_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        // The same directory as a path relative to the current directory,
+        // without changing it (tests run in parallel).
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in 1..cwd.components().count() {
+            relative.push("..");
+        }
+        relative.push(dir.path().strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        let config = Config { data_dir: relative, ..Config::default() };
+        let core = Core::open(config).await.unwrap();
+        assert!(core.config.data_dir.is_absolute());
+        assert_eq!(core.config.data_dir, std::fs::canonicalize(dir.path()).unwrap());
+        assert!(core.config.hooks_dir().is_absolute());
     }
 }

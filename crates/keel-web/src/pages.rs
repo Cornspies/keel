@@ -109,7 +109,7 @@ pub async fn login_form(
     Viewer(viewer): Viewer,
     Query(q): Query<NextQuery>,
 ) -> AppResult {
-    let next = safe_next(q.next.as_deref()).to_owned();
+    let next = safe_next(q.next.as_deref());
     if viewer.is_some() {
         return Ok(Redirect::to(&next).into_response());
     }
@@ -129,16 +129,20 @@ pub struct LoginForm {
 }
 
 pub async fn login(State(state): State<AppState>, Form(f): Form<LoginForm>) -> AppResult {
-    let next = safe_next(f.next.as_deref()).to_owned();
-    match state.core.authenticate(&f.login, &f.password).await? {
-        Some(user) => crate::twofactor::sign_in(&state, &user, &next).await,
-        None => html(LoginPage {
-            page: Page::new(&state, None, "Sign in"),
-            error: Some("Incorrect username or password.".into()),
-            login: f.login,
-            next,
-        }),
-    }
+    let next = safe_next(f.next.as_deref());
+    let error = match state.core.authenticate(&f.login, &f.password).await {
+        Ok(Some(user)) => return crate::twofactor::sign_in(&state, &user, &next).await,
+        Ok(None) => "Incorrect username or password.".to_owned(),
+        // Too many wrong passwords.
+        Err(keel_core::Error::Invalid(msg)) => msg,
+        Err(e) => return Err(e.into()),
+    };
+    html(LoginPage {
+        page: Page::new(&state, None, "Sign in"),
+        error: Some(error),
+        login: f.login,
+        next,
+    })
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppResult {

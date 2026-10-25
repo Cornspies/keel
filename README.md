@@ -114,7 +114,10 @@ consistent snapshot, then every repository and wiki, LFS file, release file
 and the SSH host key. The
 copy is a data directory itself, so restoring is `keel serve --data-dir
 /backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
-backup tool of choice.
+backup tool of choice. The database holds secrets (two-factor and webhook
+secrets, mirror passwords), so the copy's directory is readable only by its
+owner (`0700`, the database `0600`), like a new data directory; symlinks in
+the data directory aren't followed.
 
 `GET /healthz` answers `200 {"status":"ok",…}` while the server can use its
 database and `503` otherwise, for load balancers and uptime monitors.
@@ -320,7 +323,8 @@ branch, and for the default branch right after a push. Regular expressions
 (`fn \w+\(`, or a query written `/like this/`) use the trigrams of the
 literal text every match must contain; one without any (like `\d+`) can only
 search within a repository, by scanning it. The `regex` crate guarantees
-linear-time matching, so no pattern can stall the server.
+linear-time matching, so no pattern can stall the server. Queries are at most
+256 characters.
 
 **Forks** are `git clone --bare --local` copies whose objects are hardlinked,
 so forking git.git takes about 40 ms and almost no disk space, and a fork
@@ -337,7 +341,12 @@ temporary libgit2 alternate instead of copying anything. Merging happens
 without a working tree: `git merge-tree --write-tree`, `git commit-tree`, then
 `git update-ref` with the expected old value, so a concurrent push is never
 overwritten. Pushing a branch's commits into the base by hand marks the pull
-request as merged.
+request as merged. Commits of a private head repository (other than the base
+itself) are only fetched into a private base, and only while the pull
+request's author can still read the head; otherwise the head counts as
+deleted. So someone who lost access to a private parent doesn't keep getting
+its commits through a pull request into their fork, and making a fork private
+keeps its new commits out of a public parent.
 
 **Line comments** record the file, side, line number and the blob of that side
 they were made on. While that side of the file is unchanged in the current
@@ -430,7 +439,9 @@ requests. The editor remembers the commit it was opened at; if someone
 changed the same file since, the commit is refused (changes to other files
 are fine). Protected branches that require pull requests only offer
 committing to a new branch, which leads straight to opening the pull
-request. Line endings are kept (browsers send `\r\n`), as is the executable
+request; a "new branch" named like the protected one is refused. A new branch
+must not exist yet, but may match a protected pattern, as with pushes.
+Line endings are kept (browsers send `\r\n`), as is the executable
 bit when editing or renaming. Uploads are up to 25 MiB per file and 100 MiB
 in all and go into git directly; push big files with Git LFS instead.
 
@@ -458,8 +469,9 @@ the API brings the rest. Imported issues, comments and releases keep their
 dates and are shown with their author's name, linked to their profile on the
 source, never to a local account with the same name; nothing notifies
 anyone. Line comments on pull requests become comments quoting the line.
-The access token is forgotten when the import ends; an import interrupted by
-a restart is marked as failed.
+The access token is only sent to the source's own scheme, host and port (not
+to other URLs it names), and is forgotten when the import ends; an import
+interrupted by a restart is marked as failed.
 
 **Avatars** are served from `/avatars/<name>` with an ETag: an uploaded PNG,
 JPEG, GIF or WebP (checked by its first bytes, at most 1 MiB, kept in
@@ -476,6 +488,17 @@ keel points `git receive-pack` at its own hook directory (`data/hooks`) and
 passes the repository's rules in the environment; the hook (`keel hook
 pre-receive`) refuses updates to protected branches that aren't allowed, with
 a message for the person pushing. Repositories without rules don't run it.
+The data directory is made absolute when the server starts, since git looks
+for a relative hook directory inside each repository and would silently skip
+the hook. "Allow force pushes" also allows deleting the branch, except when the
+rule requires pull requests: deleting it and pushing it anew would replace it
+without one. Creating branches is always allowed, also ones matching a rule.
+Patterns match segment by segment in linear time, on any characters.
+
+Pushes can't create or change `refs/replace/*` (nor fetch them), and keel runs
+every git command with replace refs off: libgit2, which shows diffs and files,
+ignores them, so they could otherwise make merges, downloads or the
+fast-forward check see different commits than people reviewed.
 
 **Commit statuses** keep the latest state per context and commit (up to 100
 contexts per commit). A commit's overall state is failure if any status
@@ -542,9 +565,12 @@ stop syncing.
 in pure Rust (SSH signatures with `ssh-key`, OpenPGP with `pgp`), against
 the SSH and GPG keys people added. A commit is verified when the signature
 is good, made by someone's key (and before it expired), and its committer
-email is that person's verified email. SSH keys sign as well as
-authenticate. Uploaded GPG keys must carry valid self-signatures, so nobody
-can attach someone else's address; subkeys are looked up by their key IDs.
+email is that person's verified email (and, for GPG, one of the key's). SSH
+keys sign as well as authenticate. Uploaded GPG keys must carry valid
+self-signatures, so nobody can attach someone else's address; subkeys are
+looked up by their key IDs, but only subkeys that can sign and aren't revoked
+or expired are recorded, and a subkey's expiry is checked against the
+signature's time. Keys of disabled accounts don't verify anything.
 Whether a signature matches a key can't change, so that result is kept in
 memory (the cryptography is the slow part: about 0.4 ms for an RSA-3072
 signature); who owns the key, and their email, are looked up every time.
@@ -621,7 +647,17 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 
 - Passwords: Argon2id. Session tokens are 256-bit random values, stored only
   as SHA-256 hashes, sent in `HttpOnly; SameSite=Lax` cookies.
-- State-changing requests must come from the same origin (CSRF).
+- After ten wrong passwords for an account (by name or email) within 15
+  minutes, signing in with its password (on the web and over git HTTP) is
+  refused for the rest of those 15 minutes. The count is kept in memory.
+- Changing the email address, adding SSH or GPG keys and creating access
+  tokens ask for the password, so a stolen session can't be turned into
+  lasting access.
+- State-changing requests must come from the same origin (CSRF); behind
+  `https://`, an origin on plain HTTP doesn't count.
+- Redirects after signing in only go to local paths, and never to anything
+  with control characters, spaces or backslashes, which browsers could turn
+  into another host.
 - Password reset and verification links are single-use, expire (1 hour and
   7 days), are stored only as SHA-256 hashes and are sent at most once a
   minute per account. Asking for a reset says the same thing whether or not an
@@ -637,9 +673,13 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 - Private repositories return 404 (web) or 401 (git) to anyone who can't see
   them, so their names don't leak. That includes fork lists and the
   repositories offered on the compare page.
-- Only `git-upload-pack` and `git-receive-pack` can be run over SSH.
-  Repositories never run their own hooks (only keel's branch protection
-  hook), and `GIT_PROTOCOL` values are validated before being passed to git.
+- Only `git-upload-pack` and `git-receive-pack` can be run over SSH, once
+  per channel, with at most ten channels per connection; git stops when its
+  channel or connection closes. Repositories never run their own hooks (only
+  keel's branch protection hook), and `GIT_PROTOCOL` values are validated
+  before being passed to git.
+- Gzip-compressed git requests are decompressed as they stream into git, and
+  refused (`413`) past 64 MiB.
 - The API only accepts access tokens, never passwords or cookies, so it can't
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,
@@ -650,7 +690,8 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   operation, and expire after an hour.
 - Two-factor authentication uses TOTP (RFC 6238; any authenticator app).
   Each code works once, five wrong codes end a sign-in attempt, and ten in 15
-  minutes lock the second step for a while. Ten single-use recovery codes are
+  minutes lock the second step for a while (also with parallel requests, and
+  for expired attempts). Changing the password ends pending second steps. Ten single-use recovery codes are
   stored hashed. With it on, git over HTTP no longer accepts the password
   (use a token or SSH key), and a password reset still asks for a code.
   Administrators can turn it off for someone who lost their phone and codes.

@@ -113,6 +113,11 @@ impl Core {
         if message.is_empty() {
             return invalid("Commits need a message.");
         }
+        // "A new branch" named like the branch itself is that branch, and
+        // its protection applies.
+        let new_branch = edit.new_branch.take().filter(|name| name.trim() != edit.branch);
+        edit.new_branch = new_branch;
+        let to_new_branch = edit.new_branch.is_some();
         let target = match edit.new_branch.as_deref().map(str::trim) {
             Some(name) => {
                 if !keel_git::valid_branch_name(name) {
@@ -139,7 +144,7 @@ impl Core {
                 if tip.is_none() && (edit.base.is_some() || g.has_branches()?) {
                     return Ok(Err(format!("The branch {} doesn't exist (any more).", edit.branch)));
                 }
-                if to != edit.branch && g.branch_tip(&to).is_some() {
+                if to_new_branch && g.branch_tip(&to).is_some() {
                     return Ok(Err(format!("A branch named {to} already exists.")));
                 }
                 if let Some(why) = conflict(g, edit.base, tip, &edit.files)? {
@@ -154,7 +159,7 @@ impl Core {
                     changes.push(FileChange { path: &f.path, content: f.content.as_deref(), mode_of });
                 }
                 let who = Identity { name: &name, email: &email };
-                let old = if to == edit.branch { tip } else { None };
+                let old = if to_new_branch { None } else { tip };
                 match g.commit_changes(&to, tip, old, &changes, &message, &who) {
                     Ok(commit) => Ok(Ok(commit)),
                     Err(keel_git::Error::Other(msg)) => Ok(Err(format!("Can't commit: {msg}."))),
@@ -243,6 +248,15 @@ mod tests {
             .unwrap();
         let direct = core.commit_file_edit(&repo, &ada, edit("main", Some(third), vec![write("x", "1")])).await.unwrap_err();
         assert!(direct.to_string().contains("protected"), "{direct}");
+        // Also when "committing to a new branch" named like the protected one.
+        for name in ["main", " main "] {
+            let mut sneaky = edit("main", Some(third), vec![write("x", "1")]);
+            sneaky.new_branch = Some(name.into());
+            let err = core.commit_file_edit(&repo, &ada, sneaky).await.unwrap_err();
+            assert!(err.to_string().contains("protected"), "{err}");
+        }
+        let g = GitRepo::open(&core.repo_path(&repo)).unwrap();
+        assert_eq!(g.branch_tip("main"), Some(third));
         let mut branched = edit("main", Some(third), vec![write("x", "1")]);
         branched.new_branch = Some("ada-patch-1".into());
         let (branch, commit) = core.commit_file_edit(&repo, &ada, branched.clone()).await.unwrap();

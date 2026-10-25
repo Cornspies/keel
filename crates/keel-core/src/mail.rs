@@ -376,7 +376,7 @@ mod tests {
         assert!(core.verify_email(&token).await.is_err(), "single use");
 
         // Changing the address needs verifying again.
-        core.change_email(ada.id, "lovelace@example.com").await.unwrap();
+        core.change_email(&ada, "password1", "lovelace@example.com").await.unwrap();
         assert!(!core.user_by_id(ada.id).await.unwrap().unwrap().email_verified);
 
         // Resets: nothing is revealed about unknown addresses.
