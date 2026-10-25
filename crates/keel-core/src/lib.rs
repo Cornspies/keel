@@ -42,6 +42,7 @@ mod releases;
 mod repos;
 mod reviews;
 mod signatures;
+mod signing;
 mod ssh_keys;
 mod statuses;
 mod tokens;
@@ -79,7 +80,7 @@ pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::{ExploreQuery, ExploreSort, IssueHit, IssueQuery, IssueSort, MAX_PINS, MAX_TOPICS, Repo, Stargazer, StateFilter, parse_topics};
 pub use reviews::{InlineAnchor, Verdict, suggestion};
-pub use projects::{IssueCard, KANBAN, Project, ProjectCard, ProjectColumn};
+pub use projects::{IssueCard, KANBAN, Project, ProjectCard, ProjectColumn, ProjectOwner, card_repo};
 pub use signatures::{GpgKey, Verification, parse_gpg_key};
 pub use ssh_keys::{SshKey, parse_public_key};
 pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
@@ -169,6 +170,8 @@ pub struct Core {
     metrics: Arc<Metrics>,
     /// See [`users::LoginFailures`].
     login_failures: Arc<std::sync::Mutex<users::LoginFailures>>,
+    /// Signs the commits keel makes.
+    signing_key: Arc<signing::SigningKey>,
 }
 
 impl Core {
@@ -199,7 +202,33 @@ impl Core {
             .await?;
         sqlx::migrate!("./migrations").run(&db).await?;
         let token_secret = Arc::new(Self::load_token_secret(&db).await?);
-        let core = Self {
+        let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), true)?;
+        let core = Self::assemble(db, config, token_secret, signing_key);
+        core.load_settings().await?;
+        core.delete_expired_sessions().await?;
+        core.prune_notifications(180).await?;
+        core.prune_mail().await?;
+        core.prune_lfs().await?;
+        core.prune_release_assets().await?;
+        core.prune_events().await?;
+        Ok(core)
+    }
+
+    /// Opens an existing data directory read-only, without migrations or
+    /// cleaning up: for the `pre-receive` hook, which runs in its own
+    /// process while the server does.
+    pub(crate) async fn open_read_only(config: Config) -> anyhow::Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(config.db_path())
+            .read_only(true)
+            .busy_timeout(Duration::from_secs(5));
+        let db = SqlitePoolOptions::new().max_connections(2).connect_with(options).await?;
+        let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), false)?;
+        Ok(Self::assemble(db, config, Arc::default(), signing_key))
+    }
+
+    fn assemble(db: SqlitePool, config: Config, token_secret: Arc<String>, signing_key: signing::SigningKey) -> Self {
+        Self {
             db,
             config: Arc::new(config),
             events: tokio::sync::broadcast::channel(256).0,
@@ -214,15 +243,19 @@ impl Core {
             token_secret,
             metrics: Arc::default(),
             login_failures: Arc::default(),
-        };
-        core.load_settings().await?;
-        core.delete_expired_sessions().await?;
-        core.prune_notifications(180).await?;
-        core.prune_mail().await?;
-        core.prune_lfs().await?;
-        core.prune_release_assets().await?;
-        core.prune_events().await?;
-        Ok(core)
+            signing_key: Arc::new(signing_key),
+        }
+    }
+
+    /// The public key commits keel makes are signed with, in OpenSSH's
+    /// format, for `allowed_signers` files.
+    pub fn signing_public_key(&self) -> &str {
+        &self.signing_key.public
+    }
+
+    /// What signs the commits keel makes, to move into blocking git work.
+    pub(crate) fn signer(&self) -> Arc<signing::SigningKey> {
+        self.signing_key.clone()
     }
 
     /// Subscribes to repository events. Slow subscribers may miss events

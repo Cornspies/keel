@@ -5,7 +5,9 @@
 //! `label:x` (all of them), `-label:x`, `author:`, `assignee:`,
 //! `review-requested:`, `involves:` (author, assignee, commenter or
 //! reviewer), `milestone:"v1.0"`, `no:label|assignee|milestone`,
-//! `repo:owner/name`, `user:`/`org:` (the owner), `sort:created-desc`
+//! `repo:owner/name`, `user:`/`org:` (the owner), `project:owner/name/1`
+//! (a repository's board) or `project:org/1` (an organization's),
+//! `sort:created-desc`
 //! (also `-asc`, `updated-…`, `comments-…`), and words to find in titles
 //! and bodies. `@me` is the viewer. Values with spaces go in quotes.
 
@@ -94,6 +96,8 @@ pub struct IssueQuery {
     /// `owner/name`.
     pub repo: Option<String>,
     pub owner: Option<String>,
+    /// A board: `owner/name/number`, or `org/number`.
+    pub project: Option<String>,
     pub sort: IssueSort,
     /// Words to find in titles and bodies.
     pub text: Vec<String>,
@@ -177,6 +181,7 @@ impl IssueQuery {
                 ("no", "milestone") => out.no_milestone = true,
                 ("repo", _) if value.contains('/') => out.repo = Some(value.to_owned()),
                 ("user" | "org" | "owner", _) => out.owner = Some(value.to_owned()),
+                ("project", _) if value.contains('/') => out.project = Some(value.to_owned()),
                 ("sort", v) if IssueSort::parse(v).is_some() => out.sort = IssueSort::parse(v).unwrap_or_default(),
                 _ => out.text.push(token),
             }
@@ -199,7 +204,8 @@ pub struct IssueHit {
 // review requested, ?9 involves (user ids; -2 for unknown names), ?10
 // milestone title, ?11 labels and ?12 excluded labels (JSON arrays), ?13
 // no label, ?14 no assignee, ?15 no milestone, ?16 owner id, ?17 words
-// (JSON array of LIKE patterns), ?18 drafts (NULL: either).
+// (JSON array of LIKE patterns), ?18 drafts (NULL: either), ?19 the id of
+// a board the issue must be on (NULL: any).
 macro_rules! issue_search_where {
     () => {
         concat!(
@@ -230,6 +236,7 @@ macro_rules! issue_search_where {
                AND (NOT ?15 OR i.milestone_id IS NULL)
                AND (?16 IS NULL OR r.owner_id = ?16)
                AND (?18 IS NULL OR EXISTS (SELECT 1 FROM pull_requests p WHERE p.issue_id = i.id AND p.is_draft = ?18))
+               AND (?19 IS NULL OR EXISTS (SELECT 1 FROM project_cards pc WHERE pc.issue_id = i.id AND pc.project_id = ?19))
                AND NOT EXISTS (SELECT 1 FROM json_each(?17) j
                     WHERE i.title NOT LIKE j.value ESCAPE '\\' AND i.body NOT LIKE j.value ESCAPE '\\')
                AND ",
@@ -248,7 +255,7 @@ macro_rules! issue_search_page {
             issue_search_where!(),
             " ORDER BY ",
             $order,
-            " LIMIT ?19 OFFSET ?20"
+            " LIMIT ?20 OFFSET ?21"
         )
     };
 }
@@ -266,12 +273,34 @@ struct Bound {
     not_labels: String,
     owner: Option<i64>,
     text: String,
+    project: Option<i64>,
 }
 
 /// Unknown names match nobody.
 const NOBODY: i64 = -2;
 
 impl Core {
+    /// The board `project:` names, if `viewer` can see it: `owner/name/1`
+    /// or `org/1`.
+    async fn project_id_for(&self, viewer: Option<&User>, project: &Option<String>) -> Result<Option<i64>> {
+        let Some(spec) = project else { return Ok(None) };
+        let parts: Vec<&str> = spec.split('/').collect();
+        let found = match parts[..] {
+            [owner, name, number] => match (self.repo_or_redirect(owner, name).await?, number.parse()) {
+                (Some(repo), Ok(n)) => self.project(crate::ProjectOwner::Repo(repo.id), n).await?,
+                _ => None,
+            },
+            [org, number] => match (self.user_by_name(org).await?.filter(User::is_org), number.parse()) {
+                (Some(org), Ok(n)) if self.org_board_access(&org, viewer).await? >= crate::Access::Read => {
+                    self.project(crate::ProjectOwner::Org(org.id), n).await?
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        Ok(Some(found.map_or(NOBODY, |p| p.id)))
+    }
+
     async fn user_id_for(&self, name: &Option<String>) -> Result<Option<i64>> {
         Ok(match name {
             Some(n) => Some(self.user_by_name(n).await?.map_or(NOBODY, |u| u.id)),
@@ -320,6 +349,7 @@ impl Core {
             not_labels: json!(q.not_labels).to_string(),
             owner: self.user_id_for(&q.owner).await?,
             text: json!(q.text.iter().map(like).collect::<Vec<_>>()).to_string(),
+            project: self.project_id_for(viewer, &q.project).await?,
         };
         macro_rules! bind_all {
             ($query:expr) => {
@@ -342,6 +372,7 @@ impl Core {
                     .bind(b.owner)
                     .bind(&b.text)
                     .bind(q.draft)
+                    .bind(b.project)
             };
         }
         let sql = match q.sort {

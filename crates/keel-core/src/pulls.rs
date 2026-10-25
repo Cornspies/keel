@@ -313,7 +313,7 @@ impl Core {
         insert_comment(&mut tx, issue.id, actor, "merged", "").await?;
         tx.commit().await?;
         self.record(Activity::Issue { issue_id: issue.id, actor, action: IssueAction::Merged }).await;
-        self.move_cards_of(issue.id, false).await
+        self.move_cards_of(issue.id, false, actor).await
     }
 
     /// After refs of `repo_id` changed: updates the open pull requests into
@@ -390,8 +390,19 @@ impl Core {
             return invalid("A branch is missing.");
         };
         let head_str = head.to_string();
-        if let Some(blocked) = self.merge_check(repo, issue, &pull, Some(&head_str)).await?.blocked() {
+        let check = self.merge_check(repo, issue, &pull, Some(&head_str)).await?;
+        if let Some(blocked) = check.blocked() {
             return invalid(format!("{} is protected: {blocked}", pull.base_ref));
+        }
+        // keel signs the commits it makes; a merge commit (or a
+        // fast-forward) also brings the pull request's own.
+        let brings_commits = style == MergeStyle::Merge
+            || (style == MergeStyle::Rebase && self.git(repo.id, move |g| g.is_ancestor(base, head)).await?);
+        if check.rule.as_ref().is_some_and(|r| r.require_signed)
+            && brings_commits
+            && let Some(why) = self.unverified(repo.id, &pull.base_ref, base, head).await?
+        {
+            return invalid(format!("{why} Squash and merge instead, which makes one new, signed commit."));
         }
         let number = issue.number;
         let head_label = pull.head_label(issue);
@@ -406,12 +417,12 @@ impl Core {
             MergeStyle::Rebase => String::new(),
         };
         let base_ref = pull.base_ref.clone();
-        let (name, email) = (user.username.clone(), user.email.clone());
+        let (name, email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let before = self.ref_snapshot(repo.id).await?;
         let merged = self
             .git(repo.id, move |g| {
                 let merge_base = g.merge_base(base, head)?;
-                let who = Identity { name: &name, email: &email };
+                let who = Identity::new(&name, &email).signed_by(&*signer);
                 let commit = match g.merge(&base_ref, base, head, style, &message, &who) {
                     Err(keel_git::Error::Rebase(why)) => return Ok(Err(why)),
                     commit => commit?,
@@ -596,6 +607,7 @@ mod tests {
             dismiss_stale: false,
             allow_force_push: false,
             required_checks: String::new(),
+            require_signed: false,
         })
         .await
         .unwrap();
@@ -614,6 +626,54 @@ mod tests {
         assert_eq!(core.git(repo.id, |g| Ok(g.ref_tip("refs/pull/1/head"))).await.unwrap(), Some(commit));
         let err = core.apply_suggestion(&issue, &c, &ada).await.unwrap_err();
         assert!(err.to_string().contains("changed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verified_commits() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
+        let _work = push_branches(&core, &repo);
+        let tip = |b: &'static str| core.git(repo.id, move |g| Ok(g.branch_tip(b).unwrap()));
+        let verification = |id: Oid| {
+            let core = core.clone();
+            async move { core.verify_commits(repo.id, vec![id]).await.unwrap().remove(&id) }
+        };
+        assert!(verification(tip("feature").await.unwrap()).await.is_none(), "pushed unsigned");
+
+        // Commits keel makes are signed with its key.
+        let write = crate::FileWrite { path: "c".into(), content: Some(b"c".to_vec()), from: None, new: true };
+        let edit = crate::FileEdit { branch: "main".into(), base: None, new_branch: None, message: "Add c".into(), files: vec![write] };
+        let (_, edited) = core.commit_file_edit(&repo, &ada, edit).await.unwrap();
+        let v = verification(edited).await.unwrap();
+        assert!(v.verified, "{v:?}");
+        assert_eq!(v.made_on.as_deref(), Some("keel"));
+        assert_eq!(v.describe(), format!("Made on keel and signed with its key {}.", v.key));
+
+        // A rule requiring verified commits: a merge commit would bring the
+        // pull request's unsigned ones; a squash is one new, signed commit.
+        core.save_branch_rule(repo.id, &crate::BranchRule {
+            id: 0,
+            pattern: "main".into(),
+            require_pull: false,
+            required_approvals: 0,
+            dismiss_stale: false,
+            allow_force_push: false,
+            required_checks: String::new(),
+            require_signed: true,
+        })
+        .await
+        .unwrap();
+        let env = core.receive_pack_env(repo.id).await.unwrap();
+        assert!(env.iter().any(|(k, _)| k == "KEEL_DATA_DIR"));
+        let issue = core.create_pull(&repo, &ada, "Feature", "", "main", &repo, "feature", false).await.unwrap();
+        let err = core.merge_pull(&repo, &issue, &ada, MergeStyle::Merge, false).await.unwrap_err().to_string();
+        assert!(err.contains("main requires verified commits; not verified: "), "{err}");
+        assert!(err.contains("(unsigned)"), "{err}");
+        assert_eq!(tip("main").await.unwrap(), edited);
+        let squashed = core.merge_pull(&repo, &issue, &ada, MergeStyle::Squash, false).await.unwrap();
+        assert!(verification(squashed).await.unwrap().verified);
+        assert_eq!(core.unverified(repo.id, "main", edited, squashed).await.unwrap(), None);
     }
 
     #[tokio::test]

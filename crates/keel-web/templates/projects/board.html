@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-{% include "repo/header.html" %}
+{% include "projects/header.html" %}
 <div class="board-head">
   <div>
     <h2 class="board-title">{{ project.title }}{% if !project.is_open %} <span class="badge">Closed</span>{% endif %}</h2>
@@ -55,7 +55,7 @@
         <div class="board-issue">
           <span class="state-icon state-{{ card.state }}" title="{% if card.is_pull %}Pull request{% else %}Issue{% endif %}, {{ card.state }}" aria-label="{% if card.is_pull %}Pull request{% else %}Issue{% endif %}, {{ card.state }}"></span>
           <div>
-            <a href="{{ card.url }}">{{ card.title }}</a> <span class="muted small">#{{ card.number }}</span>
+            <a href="{{ card.url }}">{{ card.title }}</a> <span class="muted small">{% if let Some(r) = card.repo %}{{ r }}{% endif %}#{{ card.number }}</span>
             {% if !card.labels.is_empty() %}<div>{% for l in card.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}</div>{% endif %}
             {% if !card.assignees.is_empty() %}<div class="muted small">{{ card.assignees.join(", ") }}</div>{% endif %}
           </div>
@@ -92,7 +92,7 @@
       <summary class="muted small">+ Add a card</summary>
       <form method="post" action="{{ project.url }}/cards" class="form">
         <input type="hidden" name="column" value="{{ col.id }}">
-        <textarea name="text" rows="2" required aria-label="Card" placeholder="#12 for an issue or pull request, or a note"></textarea>
+        <textarea name="text" rows="2" required aria-label="Card" placeholder="{{ issue_hint }} for an issue or pull request, or a note"></textarea>
         <button class="btn btn-small btn-primary">Add</button>
       </form>
     </details>

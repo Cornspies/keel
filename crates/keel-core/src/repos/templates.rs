@@ -18,14 +18,29 @@ impl Core {
     }
 
     /// Archives `repo_id` (makes it read-only: see
-    /// [`access`](Self::access)), or unarchives it.
-    pub async fn set_archived(&self, repo_id: i64, archived: bool) -> Result<()> {
-        sqlx::query("UPDATE repositories SET archived_at = CASE WHEN ?2 THEN COALESCE(archived_at, ?3) END WHERE id = ?1")
-            .bind(repo_id)
-            .bind(archived)
-            .bind(now())
-            .execute(&self.db)
-            .await?;
+    /// [`access`](Self::access)), or unarchives it, as `actor`; webhooks
+    /// hear of it.
+    pub async fn set_archived(&self, repo_id: i64, archived: bool, actor: Option<i64>) -> Result<()> {
+        let changed = sqlx::query(
+            "UPDATE repositories SET archived_at = CASE WHEN ?2 THEN COALESCE(archived_at, ?3) END
+             WHERE id = ?1 AND (archived_at IS NOT NULL) != ?2",
+        )
+        .bind(repo_id)
+        .bind(archived)
+        .bind(now())
+        .execute(&self.db)
+        .await?;
+        if changed.rows_affected() == 1
+            && let Some(repo) = self.repo_by_id(repo_id).await?
+        {
+            let action = if archived { "archived" } else { "unarchived" };
+            let payload = serde_json::json!({
+                "action": action,
+                "repository": self.repo_json(&repo),
+                "sender": self.sender_json(actor).await?,
+            });
+            self.enqueue_webhooks(repo_id, "repository", action, &payload).await?;
+        }
         Ok(())
     }
 
@@ -71,7 +86,7 @@ impl Core {
 
     async fn fill_from_template(&self, template: &Repo, repo: &Repo, actor: &User, all_branches: bool) -> Result<()> {
         let (from, to) = (self.repo_path(template), self.repo_path(repo));
-        let (name, email) = (actor.username.clone(), actor.email.clone());
+        let (name, email, signer) = (actor.username.clone(), actor.email.clone(), self.signer());
         tokio::task::spawn_blocking(move || {
             let template = GitRepo::open(&from)?;
             let Some(head) = template.default_branch()? else { return Ok(()) };
@@ -80,7 +95,7 @@ impl Core {
             } else {
                 vec![head.clone()]
             };
-            let who = Identity { name: &name, email: &email };
+            let who = Identity::new(&name, &email).signed_by(&*signer);
             GitRepo::open(&to)?.start_from_template(&template, &branches, &head, "Initial commit", &who)
         })
         .await
@@ -145,7 +160,7 @@ mod tests {
         let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         let issue = core.create_issue(repo.id, &bob, "Bug", "").await.unwrap();
-        core.set_archived(repo.id, true).await.unwrap();
+        core.set_archived(repo.id, true, Some(ada.id)).await.unwrap();
         let repo = core.repo_by_id(repo.id).await.unwrap().unwrap();
         assert!(repo.is_archived());
         assert_eq!(core.access(&repo, Some(&ada)).await.unwrap(), Access::Read);
@@ -163,7 +178,7 @@ mod tests {
         let q = crate::ExploreQuery { archived: true, ..q };
         assert_eq!(core.explore(None, &q, 0, 10).await.unwrap().1, 1);
 
-        core.set_archived(repo.id, false).await.unwrap();
+        core.set_archived(repo.id, false, Some(ada.id)).await.unwrap();
         let repo = core.repo_by_id(repo.id).await.unwrap().unwrap();
         assert_eq!(core.access(&repo, Some(&ada)).await.unwrap(), Access::Admin);
         core.add_comment(&issue, &bob, "Hi").await.unwrap();

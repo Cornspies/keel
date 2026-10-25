@@ -241,6 +241,7 @@ mod tests {
             dismiss_stale: false,
             allow_force_push: false,
             required_checks: "ci".into(),
+            require_signed: false,
         })
         .await
         .unwrap();

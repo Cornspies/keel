@@ -316,6 +316,20 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/projects/{number}/cards/{id}/move", post(projects::move_card))
         .route("/{owner}/{repo}/projects/{number}/cards/{id}/note", post(projects::edit_note))
         .route("/{owner}/{repo}/projects/{number}/cards/{id}/delete", post(projects::delete_card))
+        .route("/org/{org}/projects", get(projects::index).post(projects::create))
+        .route("/org/{org}/projects/new", get(projects::new_form))
+        .route("/org/{org}/projects/{number}", get(projects::board))
+        .route("/org/{org}/projects/{number}/edit", get(projects::edit_form).post(projects::edit))
+        .route("/org/{org}/projects/{number}/state", post(projects::set_state))
+        .route("/org/{org}/projects/{number}/delete", post(projects::delete))
+        .route("/org/{org}/projects/{number}/columns", post(projects::add_column))
+        .route("/org/{org}/projects/{number}/columns/{id}", post(projects::edit_column))
+        .route("/org/{org}/projects/{number}/columns/{id}/move", post(projects::move_column))
+        .route("/org/{org}/projects/{number}/columns/{id}/delete", post(projects::delete_column))
+        .route("/org/{org}/projects/{number}/cards", post(projects::add_card))
+        .route("/org/{org}/projects/{number}/cards/{id}/move", post(projects::move_card))
+        .route("/org/{org}/projects/{number}/cards/{id}/note", post(projects::edit_note))
+        .route("/org/{org}/projects/{number}/cards/{id}/delete", post(projects::delete_card))
         .route("/{owner}/{repo}/issues/{number}/reviewers", post(labels::set_reviewers))
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/apply", post(pulls::apply_suggestion))
         .route("/{owner}/{repo}/releases", get(releases::list).post(releases::create))
@@ -379,7 +393,8 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks).post(lfs::create_lock))
         .route("/{owner}/{repo}/info/lfs/locks/{id}/unlock", post(lfs::unlock))
         .route("/healthz", get(health))
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        .route("/signing-key.pub", get(signing_key));
 
     // The API authenticates with tokens only, so needs no CSRF check.
     let api = api::routes().layer(CompressionLayer::new());
@@ -441,6 +456,13 @@ async fn health(State(state): State<AppState>) -> Response {
     });
     let status = if database { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, [(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
+}
+
+/// The public key commits keel makes are signed with, for git's
+/// `gpg.ssh.allowedSignersFile`.
+async fn signing_key(State(state): State<AppState>) -> Response {
+    let headers = [(header::CONTENT_TYPE, "text/plain; charset=utf-8")];
+    (headers, format!("{}\n", state.core.signing_public_key())).into_response()
 }
 
 /// Security headers for HTML pages, plus CSRF protection: state-changing

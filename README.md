@@ -11,7 +11,8 @@ One binary, one data directory, no external services.
   with diffs, branches and tags, and downloading any of them as `.zip` or
   `.tar.gz`.
 - **Verified commits:** commits signed with SSH or GPG keys people added show
-  as verified (or say why not).
+  as verified (or say why not), and so do the commits keel makes itself
+  (merges, squashes, rebases, edits in the browser), signed with its own key.
 - **Changing files in the browser:** edit, create, rename, upload and delete
   files, committed to the branch or to a new one with a pull request.
 - **Releases:** notes and files for a tag, with drafts and pre-releases.
@@ -31,7 +32,8 @@ One binary, one data directory, no external services.
   qualifiers (`is:open label:bug author:@me`), also across repositories.
 - **Project boards:** issues, pull requests and notes as cards in columns,
   moved by dragging (or with each card's menu); closing an issue moves its
-  card to Done.
+  card to Done. Boards of a repository, or of an organization with issues
+  from all its repositories; changes show in the issues' timelines.
 - **Code review:** pull requests from branches or forks, review requests,
   comments on lines of the diff (with replies, marked outdated once the line
   changes), suggested changes that can be applied with one click, approvals
@@ -39,9 +41,9 @@ One binary, one data directory, no external services.
   with conflict detection. Draft pull requests can't be merged until they're
   marked ready for review; auto-merge merges once checks pass and reviews are
   in.
-- **Branch protection:** require pull requests, a number of approvals and
-  passing checks, and refuse force pushes and deletion, for branches by name
-  or pattern.
+- **Branch protection:** require pull requests, a number of approvals,
+  passing checks and verified commits, and refuse force pushes and deletion,
+  for branches by name or pattern.
 - **Commit statuses:** CI reports results through the API (GitHub's status
   API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
@@ -57,8 +59,9 @@ One binary, one data directory, no external services.
   on, are assigned to or mentioned in, or whose repository you watch; with
   per-thread subscribe/unsubscribe, and optionally by email.
 - **Webhooks** for repositories and whole organizations: pushes, issues,
-  comments, pull requests, reviews, releases, wiki edits and stars, in
-  GitHub's payload format and signed, with retries and a delivery log.
+  comments, pull requests, reviews, releases, wiki edits, stars, board
+  changes and archiving, in GitHub's payload format and signed, with retries
+  and a delivery log.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
 - **People:** accounts with optional two-factor authentication (authenticator
@@ -110,8 +113,8 @@ repositories), `lfs/` (Git LFS files), the generated SSH host key, and
 ```
 
 copies the data directory while the server keeps running: the database as a
-consistent snapshot, then every repository and wiki, LFS file, release file
-and the SSH host key. The
+consistent snapshot, then every repository and wiki, LFS file and release
+file, the SSH host key and the key keel signs its commits with. The
 copy is a data directory itself, so restoring is `keel serve --data-dir
 /backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
 backup tool of choice. The database holds secrets (two-factor and webhook
@@ -219,6 +222,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge`, `squash` or `rebase`; `delete_branch` |
 | `GET /repos/{owner}/{repo}/projects[/{n}]` | boards; one board with its `columns` and their `cards` |
 | `POST /repos/{owner}/{repo}/projects/{n}/cards`, `…/cards/{id}/moves` | `column_id` and `issue_number` or `note`; `column_id` and `position` |
+| `GET /orgs/{org}/projects[/{n}]`, `POST …/{n}/cards`, `…/cards/{id}/moves` | an organization's boards, for its members; cards also take `repository` (`name`) |
 | `GET`, `POST /repos/{owner}/{repo}/releases` | `tag_name`, `target_commitish`, `name`, `body`, `draft`, `prerelease` |
 | `GET /repos/{owner}/{repo}/releases/latest`, `/releases/tags/{tag}` | |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}/releases/{id}` | `"draft": false` publishes |
@@ -456,7 +460,7 @@ when the issue is opened, even by people who can't set them themselves.
 
 **Searching issues** parses GitHub's qualifiers (`is:`, `label:`/`-label:`,
 `author:`, `assignee:`, `review-requested:`, `involves:`, `milestone:`, `no:`,
-`repo:`, `user:`, `sort:`; `@me` is you; other words are looked for in titles
+`repo:`, `user:`, `project:`, `sort:`; `@me` is you; other words are looked for in titles
 and descriptions) into one static SQL query that only ever sees repositories
 the viewer can read. `/issues` and `/pulls` show what involves you across
 repositories.
@@ -488,6 +492,12 @@ keel points `git receive-pack` at its own hook directory (`data/hooks`) and
 passes the repository's rules in the environment; the hook (`keel hook
 pre-receive`) refuses updates to protected branches that aren't allowed, with
 a message for the person pushing. Repositories without rules don't run it.
+A rule can require verified commits: the hook checks the commits a push
+brings to the branch (from its old tip, or for a new branch those not on
+another branch requiring them yet), reading keys from the database
+read-only, and refuses unverified ones by name. Merging into such a branch
+with a merge commit (or a fast-forward rebase) needs the pull request's own
+commits verified too; a squash makes one new, signed commit.
 The data directory is made absolute when the server starts, since git looks
 for a relative hook directory inside each repository and would silently skip
 the hook. "Allow force pushes" also allows deleting the branch, except when the
@@ -559,7 +569,8 @@ branch, stops it with a message saying which; the base is only moved
 check every push, merge and edit goes through. Issues, comments and
 reactions, which readers can otherwise add, are refused where they're
 written. Settings stay open to admins, so they can unarchive it; pull mirrors
-stop syncing.
+stop syncing. Webhooks get GitHub's `repository` event (`archived`,
+`unarchived`).
 
 **Verified commits:** a commit's `gpgsig` header is checked when it's shown,
 in pure Rust (SSH signatures with `ssh-key`, OpenPGP with `pgp`), against
@@ -571,15 +582,36 @@ self-signatures, so nobody can attach someone else's address; subkeys are
 looked up by their key IDs, but only subkeys that can sign and aren't revoked
 or expired are recorded, and a subkey's expiry is checked against the
 signature's time. Keys of disabled accounts don't verify anything.
+The commits keel makes (merge commits, squashes, rebased commits, edits in
+the browser, applied suggestions, wiki edits, repositories from templates)
+are signed with the server's own SSH key (`data/signing_ed25519_key`,
+created on first start and kept in backups), and show as "made on" the
+site; keel vouches for who made them, so the committer email isn't checked.
+Its public key is at `/signing-key.pub`, so git can check them too:
+
+```sh
+echo "* namespaces=\"git\" $(curl -s https://git.example.com/signing-key.pub)" >> ~/.ssh/allowed_signers
+git -c gpg.ssh.allowedSignersFile=~/.ssh/allowed_signers verify-commit HEAD
+```
 Whether a signature matches a key can't change, so that result is kept in
 memory (the cryptography is the slow part: about 0.4 ms for an RSA-3072
 signature); who owns the key, and their email, are looked up every time.
 
 **Project boards** belong to a repository and hold its issues, pull requests
-and notes. Cards are moved with forms (each card's menu), or dragged; the
-script posts the move and then reloads the board's markup. A column can be
-the done column: closing or merging an issue moves its cards there, and
-reopening it moves them back to the first column.
+and notes, or to an organization (`/org/<name>/projects`) and hold issues and
+pull requests of any of its repositories (`repo#12` adds one). Organization
+boards are for its members (and site administrators): others get a 404, and
+don't see them on issues or in their timelines; cards of repositories that
+left the organization since are hidden from those who can't read them. Cards
+are moved with forms (each card's menu), or dragged; the script posts the
+move and then reloads the board's markup. A column can be the done column:
+closing or merging an issue moves its cards there, and reopening it moves them
+back to the first column. Adding a card, moving it to another column and
+removing it show in the issue's timeline. Webhooks get GitHub's (classic
+projects) `project`, `project_column` and `project_card` events: a
+repository's boards go to the repository's and its organization's hooks, an
+organization's boards to the organization's hooks. `project:ada/engine/1`
+or `project:acme/1` finds a board's issues.
 
 **Labels** come from a fixed palette of ten colors, so they read well in light
 and dark mode without inline styles (which the Content Security Policy
@@ -707,14 +739,3 @@ RUST_LOG=debug cargo run -- serve --data-dir /tmp/keel-dev
 
 Database changes go in new files under `crates/keel-core/migrations/`; they
 run automatically at startup.
-
-## Ideas
-
-- Sign the commits keel makes (merges, squashes, rebases, edits in the
-  browser) with the server's key, so they show as verified too; and a branch
-  rule that requires verified commits.
-- Organization boards with issues from several repositories, and `project:`
-  in issue search.
-- Board changes in issue timelines and in webhooks, and webhooks for
-  archiving.
-- A container image registry (the OCI distribution API).

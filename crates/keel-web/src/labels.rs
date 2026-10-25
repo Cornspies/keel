@@ -23,9 +23,14 @@ pub(crate) struct LabelView {
 
 impl LabelView {
     pub(crate) fn new(repo: &Repo, l: &Label, pulls: bool) -> Self {
+        Self::at(&repo.owner, &repo.name, l, pulls)
+    }
+
+    /// A label of repository `owner/name`.
+    pub(crate) fn at(owner: &str, name: &str, l: &Label, pulls: bool) -> Self {
         Self {
             id: l.id,
-            url: label_url(repo, &l.name, pulls),
+            url: label_url_at(owner, name, &l.name, pulls),
             name: l.name.clone(),
             color: l.color.clone(),
             description: l.description.clone(),
@@ -34,8 +39,12 @@ impl LabelView {
 }
 
 pub(crate) fn label_url(repo: &Repo, name: &str, pulls: bool) -> String {
+    label_url_at(&repo.owner, &repo.name, name, pulls)
+}
+
+fn label_url_at(owner: &str, repo: &str, name: &str, pulls: bool) -> String {
     let kind = if pulls { "pulls" } else { "issues" };
-    format!("/{}/{}/{kind}?label={}", repo.owner, repo.name, encode_path(name).replace('/', "%2F"))
+    format!("/{owner}/{repo}/{kind}?label={}", encode_path(name).replace('/', "%2F"))
 }
 
 /// The values of every `key` in a form body (for checkbox lists, which

@@ -267,11 +267,11 @@ impl Core {
         self.ensure_wiki(repo.id).await?;
         let old = edit.page.map(str::to_owned);
         let (message, base) = (edit.message.trim().to_owned(), edit.base);
-        let (who_name, who_email) = (user.username.clone(), user.email.clone());
+        let (who_name, who_email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let new_name = name.clone();
         let saved = self
             .wiki_git(repo.id, move |g| {
-                let who = Identity { name: &who_name, email: &who_email };
+                let who = Identity::new(&who_name, &who_email).signed_by(&*signer);
                 for _ in 0..ATTEMPTS {
                     let (branch, tip) = match wiki_tip(g)? {
                         Some(t) => t,
@@ -344,10 +344,10 @@ impl Core {
             return Err(Error::NotFound);
         }
         let name = name.to_owned();
-        let (who_name, who_email) = (user.username.clone(), user.email.clone());
+        let (who_name, who_email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let deleted = self
             .wiki_git(repo.id, move |g| {
-                let who = Identity { name: &who_name, email: &who_email };
+                let who = Identity::new(&who_name, &who_email).signed_by(&*signer);
                 for _ in 0..ATTEMPTS {
                     let Some((branch, tip)) = wiki_tip(g)? else { return Ok(None) };
                     let Some(page) = find_page(&pages_at(g, tip)?, &name) else { return Ok(None) };

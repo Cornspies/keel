@@ -26,7 +26,7 @@ pub use read::{
 };
 pub use edit::{FileChange, replace_line};
 pub use files::{FileChanges, FileRef};
-pub use merge::{Identity, MergeStyle, Mergeability};
+pub use merge::{Identity, MergeStyle, Mergeability, Signer};
 pub use mirror::{Remote, import_fetch, ls_remote, mirror_fetch, mirror_push, parse_lfs_pointer};
 pub use push::{RefChange, Refs, ref_changes};
 pub use signed::SignedCommit;

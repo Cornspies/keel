@@ -40,6 +40,7 @@ fn default_rule() -> BranchRule {
         dismiss_stale: true,
         allow_force_push: false,
         required_checks: String::new(),
+        require_signed: false,
     }
 }
 
@@ -93,6 +94,7 @@ fn rule_from_form(id: i64, body: &[u8]) -> BranchRule {
         dismiss_stale: field("dismiss_stale").is_some(),
         allow_force_push: field("allow_force_push").is_some(),
         required_checks: field("required_checks").unwrap_or_default(),
+        require_signed: field("require_signed").is_some(),
     }
 }
 

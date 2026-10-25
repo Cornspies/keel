@@ -54,6 +54,16 @@
     <strong>{{ item.author }}</strong> {% if item.kind == "milestoned" %}added this to the{% else %}removed this from the{% endif %} <a href="{{ item.target_url }}"><strong>{{ item.target }}</strong></a> milestone
     <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
   </div>
+  {% else if item.kind == "added_to_project" || item.kind == "moved_columns_in_project" || item.kind == "removed_from_project" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-label" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong>
+    {% if item.kind == "added_to_project" %}added this to <strong>{{ item.column }}</strong> in
+    {% else if item.kind == "moved_columns_in_project" %}moved this from <strong>{{ item.from_column }}</strong> to <strong>{{ item.column }}</strong> in
+    {% else %}removed this from{% endif %}
+    <a href="{{ item.target_url }}"><strong>{{ item.target }}</strong></a>
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
   {% else if item.kind == "ready_for_review" || item.kind == "converted_to_draft" %}
   <div class="event" id="event-{{ item.id }}">
     <span class="state-dot state-{% if item.kind == "ready_for_review" %}open{% else %}draft{% endif %}" aria-hidden="true"></span>

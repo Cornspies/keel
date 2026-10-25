@@ -182,6 +182,12 @@ impl GitRepo {
         })
     }
 
+    /// Opens the repository git runs in (`GIT_DIR`), seeing the objects of
+    /// a push in progress (`GIT_QUARANTINE_PATH` alternates): for hooks.
+    pub fn open_from_env() -> Result<Self> {
+        Ok(Self { repo: Repository::open_from_env()? })
+    }
+
     /// Opens `path` so it can also read the objects of the repository at
     /// `other` (e.g. a fork), for comparing across repositories without
     /// copying anything. Only this handle sees them; nothing is written.

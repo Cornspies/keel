@@ -69,7 +69,7 @@ impl GitRepo {
             .create_updated(&self.repo, &tree)?;
         let new_tree = self.repo.find_tree(new_tree)?;
         let sig = git2::Signature::now(who.name, who.email)?;
-        let commit = self.repo.commit(None, &sig, &sig, message, &new_tree, &[&parent])?;
+        let commit = self.create_commit(&sig, &sig, message, &new_tree, &[&parent], who)?;
         // Compare-and-swap, so a concurrent push isn't overwritten.
         self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(tip))?;
         Ok(commit)
@@ -146,7 +146,7 @@ impl GitRepo {
         }
         let sig = git2::Signature::now(who.name, who.email)?;
         let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
-        let commit = self.repo.commit(None, &sig, &sig, message, &tree, &parents)?;
+        let commit = self.create_commit(&sig, &sig, message, &tree, &parents, who)?;
         // Compare-and-swap; the zero id means "must not exist yet".
         self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(old_tip.unwrap_or(Oid::ZERO_SHA1)))?;
         Ok(commit)
@@ -179,7 +179,7 @@ impl GitRepo {
         let sig = git2::Signature::now(who.name, who.email)?;
         for (branch, tree) in trees {
             let tree = self.repo.find_tree(tree)?;
-            let commit = self.repo.commit(None, &sig, &sig, message, &tree, &[])?;
+            let commit = self.create_commit(&sig, &sig, message, &tree, &[], who)?;
             self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(Oid::ZERO_SHA1))?;
         }
         self.repo.set_head(&format!("refs/heads/{head}"))?;
@@ -209,7 +209,7 @@ mod tests {
         let path = dir.path().join("wiki.git");
         crate::create_bare(&path, "main").unwrap();
         let repo = GitRepo::open(&path).unwrap();
-        let who = Identity { name: "Ada", email: "ada@example.com" };
+        let who = Identity::new("Ada", "ada@example.com");
         let first = repo.commit_files("main", None, &[("Home.md", Some(b"# Hi"))], "Create Home", &who).unwrap();
         assert!(repo.commit_files("main", None, &[("x.md", Some(b""))], "Again", &who).is_err(), "exists now");
         let second = repo
@@ -251,7 +251,7 @@ mod tests {
         s.write("src/lib.rs", "one\ntwo\n");
         let tip = s.commit("first");
         let repo = s.open();
-        let who = Identity { name: "Ada", email: "ada@example.com" };
+        let who = Identity::new("Ada", "ada@example.com");
         let edit = |text: &[u8], _: Oid| Ok(replace_line(std::str::from_utf8(text).unwrap(), 2, "2").unwrap().into_bytes());
         let commit = repo.commit_file_edit("main", tip, "src/lib.rs", "Apply", &who, edit).unwrap();
         assert_eq!(repo.branch_tip("main"), Some(commit));
@@ -262,6 +262,32 @@ mod tests {
         assert!(repo.commit_file_edit("main", tip, "src/lib.rs", "Again", &who, edit).is_err());
         assert_eq!(repo.branch_tip("main"), Some(commit));
         assert!(repo.commit_file_edit("main", commit, "src", "Dir", &who, edit).is_err());
+    }
+
+    /// Signs with a made-up signature that says what it signed.
+    struct Fake;
+
+    impl crate::Signer for Fake {
+        fn sign(&self, commit: &[u8]) -> std::result::Result<String, String> {
+            let hex: String = commit.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            Ok(format!("-----BEGIN SSH SIGNATURE-----\n{hex}\n-----END SSH SIGNATURE-----"))
+        }
+    }
+
+    #[test]
+    fn signed_commits() {
+        let s = Scratch::new();
+        s.write("a.txt", "a\n");
+        let tip = s.commit("first");
+        let repo = s.open();
+        let who = Identity::new("Ada", "ada@example.com").signed_by(&Fake);
+        let commit = repo.commit_files("main", Some(tip), &[("b.txt", Some(b"b"))], "Add b", &who).unwrap();
+        let found = repo.signed_commits(&[commit]).unwrap();
+        assert_eq!(found.len(), 1);
+        // The signature covers the commit as git checks it: without itself.
+        assert_eq!(found[0].signature, crate::Signer::sign(&Fake, &found[0].payload).unwrap().into_bytes());
+        assert_eq!(s.git(&["show", "-s", "--format=%s %an", &commit.to_string()]), "Add b Ada");
+        s.git(&["fsck", "--strict"]);
     }
 
     #[test]
@@ -281,7 +307,7 @@ mod tests {
         let path = dir.path().join("new.git");
         crate::create_bare(&path, "main").unwrap();
         let repo = GitRepo::open(&path).unwrap();
-        let who = Identity { name: "Bob", email: "bob@example.com" };
+        let who = Identity::new("Bob", "bob@example.com");
         let branches = ["main".to_owned(), "docs".to_owned()];
         repo.start_from_template(&template, &branches, "docs", "Initial commit", &who).unwrap();
         let main = repo.branch_tip("main").unwrap();

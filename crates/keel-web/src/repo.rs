@@ -183,7 +183,7 @@ impl RepoView {
             url: m.url,
         });
         let import = state.core.import(repo.id).await?.filter(|i| i.worth_showing());
-        let (open_projects, closed_projects) = state.core.project_counts(repo.id).await?;
+        let (open_projects, closed_projects) = state.core.project_counts(keel_core::ProjectOwner::Repo(repo.id)).await?;
         Ok(Self {
             import: import.map(|i| ImportView {
                 running: i.in_progress(),
@@ -1491,7 +1491,7 @@ pub async fn archive(
     Form(f): Form<ArchiveForm>,
 ) -> AppResult {
     let repo = writable(&state, &user, &owner, &name).await?;
-    state.core.set_archived(repo.id, f.to == "on").await?;
+    state.core.set_archived(repo.id, f.to == "on", Some(user.id)).await?;
     Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
 }
 

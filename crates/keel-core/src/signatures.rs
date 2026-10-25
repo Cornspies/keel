@@ -145,6 +145,9 @@ pub struct Verification {
     pub key: String,
     /// Whose key it is, if keel knows the key.
     pub signer: Option<String>,
+    /// Signed with the server's own key, as commits keel makes are: the
+    /// site's name.
+    pub made_on: Option<String>,
 }
 
 impl Verification {
@@ -153,6 +156,9 @@ impl Verification {
         let signer = self.signer.as_deref().unwrap_or("someone");
         let kind = self.kind;
         let key = &self.key;
+        if let Some(site) = self.made_on.as_ref().filter(|_| self.verified) {
+            return format!("Made on {site} and signed with its key {key}.");
+        }
         match self.reason {
             "valid" => format!("Signed with {signer}’s {kind} key {key}."),
             "unknown_key" => format!("Signed with {kind} key {key}, which nobody here has added."),
@@ -293,6 +299,11 @@ impl Core {
     /// are signed.
     pub async fn verify_commits(&self, repo_id: i64, ids: Vec<Oid>) -> Result<HashMap<Oid, Verification>> {
         let signed = self.git(repo_id, move |g| g.signed_commits(&ids)).await?;
+        self.verify_signed(signed).await
+    }
+
+    /// Checks signatures read from a repository.
+    pub(crate) async fn verify_signed(&self, signed: Vec<SignedCommit>) -> Result<HashMap<Oid, Verification>> {
         if signed.is_empty() {
             return Ok(HashMap::new());
         }
@@ -343,26 +354,29 @@ impl Core {
         }
         // The cryptography, off the async threads.
         let cache = self.signature_cache.clone();
+        let server = (self.signing_key.fingerprint.clone(), self.config.site_name.clone());
         let checked: Vec<(Oid, String, Verification)> = tokio::task::spawn_blocking(move || {
             // Each GPG key is parsed once, however many commits it signed.
             let mut keys = HashMap::new();
             parsed
                 .into_iter()
                 .map(|(s, p)| {
-                    let v = check(&s, p, &ssh_owners, &gpg_keys, &mut keys, &cache);
+                    let v = check(&s, p, &server, &ssh_owners, &gpg_keys, &mut keys, &cache);
                     (s.id, s.committer_email.to_lowercase(), v)
                 })
                 .collect()
         })
         .await
         .map_err(anyhow::Error::from)?;
-        // Good signatures also need the committer to be the key's owner.
-        let emails: Vec<&str> = checked.iter().filter(|(_, _, v)| v.verified).map(|(_, e, _)| e.as_str()).collect();
+        // Good signatures also need the committer to be the key's owner
+        // (keel vouches for the commits it made itself).
+        let emails: Vec<&str> =
+            checked.iter().filter(|(_, _, v)| v.verified && v.made_on.is_none()).map(|(_, e, _)| e.as_str()).collect();
         let owners = self.commit_authors(&emails).await?;
         Ok(checked
             .into_iter()
             .map(|(id, email, mut v)| {
-                if v.verified && owners.get(&email) != v.signer.as_ref() {
+                if v.verified && v.made_on.is_none() && owners.get(&email) != v.signer.as_ref() {
                     v.verified = false;
                     v.reason = "bad_email";
                 }
@@ -379,6 +393,7 @@ type GpgKeyRow = (String, String, String, Option<i64>, String);
 fn check(
     s: &SignedCommit,
     parsed: Parsed,
+    (server_key, site): &(String, String),
     ssh_owners: &HashMap<String, String>,
     gpg_keys: &HashMap<String, GpgKeyRow>,
     parsed_keys: &mut HashMap<String, Option<SignedPublicKey>>,
@@ -390,10 +405,28 @@ fn check(
         kind,
         key,
         signer: signer.cloned(),
+        made_on: None,
     };
     match parsed {
         Parsed::Malformed(kind) => unverified("malformed_signature", kind, String::new(), None),
         Parsed::X509 => unverified("unknown_signature_type", "X.509", String::new(), None),
+        Parsed::Ssh { sig, fingerprint } if fingerprint == *server_key => {
+            let good = cache.get_or(s.id, &fingerprint, || {
+                let key = ssh_key::PublicKey::from(sig.public_key().clone());
+                key.verify("git", &s.payload, &sig).ok().map(|()| String::new())
+            });
+            match good {
+                Some(_) => Verification {
+                    verified: true,
+                    reason: "valid",
+                    kind: "SSH",
+                    key: fingerprint,
+                    signer: None,
+                    made_on: Some(site.clone()),
+                },
+                None => unverified("invalid", "SSH", fingerprint, None),
+            }
+        }
         Parsed::Ssh { sig, fingerprint } => {
             let Some(owner) = ssh_owners.get(&fingerprint) else {
                 return unverified("unknown_key", "SSH", fingerprint, None);
@@ -403,7 +436,14 @@ fn check(
                 key.verify("git", &s.payload, &sig).ok().map(|()| String::new())
             });
             match good {
-                Some(_) => Verification { verified: true, reason: "valid", kind: "SSH", key: fingerprint, signer: Some(owner.clone()) },
+                Some(_) => Verification {
+                    verified: true,
+                    reason: "valid",
+                    kind: "SSH",
+                    key: fingerprint,
+                    signer: Some(owner.clone()),
+                    made_on: None,
+                },
                 None => unverified("invalid", "SSH", fingerprint, Some(owner)),
             }
         }
@@ -441,7 +481,7 @@ fn check(
             if !emails.lines().any(|e| e == s.committer_email.to_lowercase()) {
                 return unverified("bad_email", "GPG", key_id, Some(owner));
             }
-            Verification { verified: true, reason: "valid", kind: "GPG", key: key_id, signer: Some(owner.clone()) }
+            Verification { verified: true, reason: "valid", kind: "GPG", key: key_id, signer: Some(owner.clone()), made_on: None }
         }
     }
 }
