@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
-use keel_core::{Core, MirrorRemote, is_private_ip};
+use keel_core::{Core, MirrorRemote, Outbound};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -24,13 +24,13 @@ pub fn endpoint(url: &str) -> String {
 
 /// Only http(s), and no literal private addresses (names are checked by
 /// the client's resolver).
-pub(crate) fn check_url(url: &reqwest::Url, allow_private: bool) -> Result<(), String> {
+pub(crate) fn check_url(url: &reqwest::Url, outbound: &Outbound) -> Result<(), String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("{} isn't an http(s) URL", url.scheme()));
     }
     let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
-    if !allow_private && host.parse::<IpAddr>().is_ok_and(is_private_ip) {
-        return Err("private network addresses may not be reached".into());
+    if host.parse::<IpAddr>().is_ok_and(|ip| !outbound.allows(ip)) {
+        return Err("that address may not be reached".into());
     }
     Ok(())
 }
@@ -80,7 +80,7 @@ pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
 /// (not, say, plain HTTP on the same host).
 fn request(client: &reqwest::Client, core: &Core, method: reqwest::Method, remote: &MirrorRemote, action: &Action) -> Result<reqwest::RequestBuilder, String> {
     let url = reqwest::Url::parse(&action.href).map_err(|_| "the server sent an invalid URL".to_owned())?;
-    check_url(&url, core.config.webhook_allow_private)?;
+    check_url(&url, &core.config.outbound())?;
     let same_host = reqwest::Url::parse(&remote.url).is_ok_and(|r| same_origin(&r, &url));
     let mut req = client.request(method, url);
     let mut has_auth = false;
@@ -96,7 +96,7 @@ fn request(client: &reqwest::Client, core: &Core, method: reqwest::Method, remot
 
 async fn batch(client: &reqwest::Client, core: &Core, remote: &MirrorRemote, operation: &str, objects: &[(String, u64)]) -> Result<Vec<BatchObject>, String> {
     let url = reqwest::Url::parse(&format!("{}/objects/batch", endpoint(&remote.url))).map_err(|e| e.to_string())?;
-    check_url(&url, core.config.webhook_allow_private)?;
+    check_url(&url, &core.config.outbound())?;
     let body = json!({
         "operation": operation,
         "transfers": ["basic"],
@@ -178,6 +178,7 @@ async fn fetch(core: &Core, client: &reqwest::Client, repo_id: i64, remote: &Mir
     if size > max {
         return Err(format!("{oid} is larger than this server's limit of {} MiB", max >> 20));
     }
+    core.check_repo_storage(repo_id, size).await.map_err(|e| e.to_string())?;
     let res = request(client, core, reqwest::Method::GET, remote, action)?
         .send()
         .await
@@ -268,11 +269,15 @@ mod tests {
         assert_eq!(endpoint("https://github.com/a/b"), "https://github.com/a/b.git/info/lfs");
         assert_eq!(endpoint("https://github.com/a/b/"), "https://github.com/a/b.git/info/lfs");
         let url = |s: &str| reqwest::Url::parse(s).unwrap();
-        assert!(check_url(&url("https://media.example.com/x"), false).is_ok());
-        assert!(check_url(&url("http://127.0.0.1/x"), false).is_err());
-        assert!(check_url(&url("http://[::1]/x"), false).is_err());
-        assert!(check_url(&url("http://127.0.0.1/x"), true).is_ok());
-        assert!(check_url(&url("file:///etc/passwd"), true).is_err());
+        let (strict, open) = (Outbound::default(), Outbound { allow_private: true, ..Outbound::default() });
+        assert!(check_url(&url("https://media.example.com/x"), &strict).is_ok());
+        assert!(check_url(&url("http://127.0.0.1/x"), &strict).is_err());
+        assert!(check_url(&url("http://[::1]/x"), &strict).is_err());
+        assert!(check_url(&url("http://127.0.0.1/x"), &open).is_ok());
+        assert!(check_url(&url("file:///etc/passwd"), &open).is_err());
+        let blocked = Outbound { blocked: vec![keel_core::Network::parse("203.0.113.0/24").unwrap()], ..open };
+        assert!(check_url(&url("http://203.0.113.7/x"), &blocked).is_err());
+        assert!(check_url(&url("http://198.51.100.7/x"), &blocked).is_ok());
 
         assert!(same_origin(&url("https://git.example/a"), &url("https://git.example:443/b")));
         assert!(!same_origin(&url("https://git.example/a"), &url("http://git.example/a")), "plain HTTP");

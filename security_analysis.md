@@ -16,6 +16,8 @@ anyone who can sign up, a cheap unauthenticated way to exhaust memory and CPU,
 and git accepting objects without checking them. Most of them are closed by
 deployment settings (section 1) plus a few small code changes (section 2).
 
+*Update:* the code changes of section 5 are in 0.17; see the status there.
+
 ## Summary
 
 | ID | Finding | Who can do it | Severity | Fixed by |
@@ -421,6 +423,23 @@ Run `cargo audit` again before each release; the database changes.
 ---
 
 ## 5. Suggested code changes, in order
+
+**Status:** all nine are done in 0.17:
+
+- D-1: the first account needs a setup code that `keel serve` logs at startup.
+- D-3: as many password hashes run at once as there are CPUs.
+- G-1, G-2: objects are checked, and pushes are limited (`--max-push-size`).
+- S-1: searches are limited to 256 characters.
+- D-2: `--quota` and `--max-repos`.
+- D-4: a warning at startup.
+- G-3: keel refuses to start with git older than 2.38.
+- N-1: `--block-outbound`.
+- Dependencies: everything is at its newest release; russh went to 0.65. The
+  advisories left are inside the newest `pgp`, `askama` and `syntect`, with
+  the exposure described in section 4. syntect no longer pulls in
+  `yaml-rust`.
+
+The original list:
 
 1. D-1: create the first admin from the command line (or with a setup token).
 2. D-3: a semaphore around Argon2.

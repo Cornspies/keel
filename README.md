@@ -86,8 +86,9 @@ commit statuses.
 
 ## Quick start
 
-Requirements: a Rust toolchain (1.91+) to build, and `git` (2.38+, for
-`merge-tree --write-tree`) on the `PATH` at runtime.
+Requirements: a Rust toolchain (1.94+) to build, and `git` (2.38+, for
+`merge-tree --write-tree`) on the `PATH` at runtime; keel won't start with
+an older one.
 
 ```sh
 cargo build --release
@@ -95,7 +96,15 @@ cargo build --release
 ```
 
 Open http://localhost:3000 and create an account. The first account becomes
-the administrator. Then:
+the administrator, so signing up for it needs the setup code keel logs at
+startup while there are no accounts:
+
+```
+WARN no accounts yet: sign up at http://localhost:3000/register with the setup code K7QD-M2XA-9TPW-RC4F to become the administrator
+```
+
+Whoever reaches a new server first can't take it over without it. The code
+is new every start and stops working once the administrator exists. Then:
 
 ```sh
 git push http://localhost:3000/<you>/<repo>.git main       # HTTP: username + password or access token
@@ -154,6 +163,10 @@ Every flag can also be set as an environment variable.
 | `--site-name` | `KEEL_SITE_NAME` | `keel` |
 | `--webhook-allow-private` | `KEEL_WEBHOOK_ALLOW_PRIVATE` | off: webhooks and mirrors can't reach loopback/private addresses |
 | `--lfs-max-file-size` | `KEEL_LFS_MAX_FILE_SIZE` | `2048` (MiB); also limits release files |
+| `--max-push-size` | `KEEL_MAX_PUSH_SIZE` | `4096` (MiB) per push |
+| `--quota` | `KEEL_QUOTA` | no limit; MiB each account may store (git data, wikis, LFS and release files) |
+| `--max-repos` | `KEEL_MAX_REPOS` | no limit; repositories per account (and organizations a person may own) |
+| `--block-outbound` | `KEEL_BLOCK_OUTBOUND` | none; more networks webhooks, mirrors and imports can't reach, e.g. `203.0.113.0/24,2001:db8::/32` |
 | `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
 | `--smtp-url` | `KEEL_SMTP_URL` | no email |
 | `--mail-from` | `KEEL_MAIL_FROM` | `<site name> <noreply@<host of --base-url>>` |
@@ -172,7 +185,13 @@ server. Without email everything else works; only notification emails and
 password resets are unavailable.
 
 Behind a reverse proxy with TLS, set `--base-url https://git.example.com`:
-clone URLs use it, and session cookies are marked `Secure`.
+clone URLs use it, and session cookies are marked `Secure`. Also listen on
+localhost only (`--http-addr 127.0.0.1:3000`), so nobody can reach keel
+past the proxy; keel warns at startup if it listens on all interfaces with
+an `https://` base URL. With open sign-ups, set `--quota` and `--max-repos`
+(keel warns otherwise). Add the server's own public addresses to
+`--block-outbound`: they count as public, so without it webhooks and mirrors
+can reach services listening on them.
 
 ### JSON API
 
@@ -711,7 +730,21 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   keel's branch protection hook), and `GIT_PROTOCOL` values are validated
   before being passed to git.
 - Gzip-compressed git requests are decompressed as they stream into git, and
-  refused (`413`) past 64 MiB.
+  refused (`413`) past 64 MiB. Pushes are limited to `--max-push-size`
+  (`receive.maxInputSize`), and git checks every pushed and fetched object
+  (`receive.fsckObjects`, `fetch.fsckObjects`), so malformed objects and
+  trees with `.git` entries are refused.
+- Quotas (`--quota`, `--max-repos`; off by default, and site administrators'
+  accounts are exempt): repositories, forks, mirrors, imports and transfers
+  past the repository limit are refused; pushes (over HTTP and SSH), LFS
+  uploads, release files, forks, mirror syncs and imports are refused once
+  an account is out of storage. Git data is measured after each push, so a
+  push can go over by at most `--max-push-size`. LFS files count once per
+  account, however many of its repositories have them.
+- At most as many password hashes (Argon2id, 19 MiB each) are computed at
+  once as there are CPUs; other sign-ins wait their turn, so a flood of
+  sign-in attempts can't exhaust memory. Issue and Explore searches are
+  limited to 256 characters (10 words, 10 labels).
 - The API only accepts access tokens, never passwords or cookies, so it can't
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,

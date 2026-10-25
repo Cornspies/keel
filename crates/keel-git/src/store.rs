@@ -16,6 +16,12 @@ const REPO_CONFIG: &[(&str, &str)] = &[
     // to do maintenance.
     ("gc.auto", "0"),
     ("receive.autogc", "false"),
+    // Refuse malformed objects, and the path and `.gitmodules` tricks behind
+    // git client vulnerabilities, in pushes and in what mirrors and imports
+    // fetch, so nobody can serve them to people cloning from here.
+    ("receive.fsckObjects", "true"),
+    ("fetch.fsckObjects", "true"),
+    ("transfer.fsckObjects", "true"),
 ];
 
 /// Config keys with several values, all of which every repository keel
@@ -211,6 +217,36 @@ mod tests {
     }
     use super::*;
     use crate::read::tests::Scratch;
+
+    #[test]
+    fn checks_pushed_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let bare = root.path().join("r.git");
+        create_bare(&bare, "main").unwrap();
+        let s = Scratch::new();
+        s.write("x", "1");
+        let good = s.commit("good");
+        // A tree with a `.git` entry, which would write into the git
+        // directory of whoever checks it out on a case-insensitive system.
+        let blob = git2::Oid::from_str(&s.git(&["rev-parse", "HEAD:x"])).unwrap();
+        let mut tree = b"100644 .GIT\0".to_vec();
+        tree.extend_from_slice(blob.as_bytes());
+        std::fs::write(s.dir.path().join("tree"), &tree).unwrap();
+        let tree = s.git(&["hash-object", "-t", "tree", "--literally", "-w", "tree"]);
+        let bad = s.git(&["commit-tree", &tree, "-p", &good.to_string(), "-m", "bad"]);
+        let push = |rev: &str| {
+            std::process::Command::new("git")
+                .current_dir(s.dir.path())
+                .args(["push", "-q", bare.to_str().unwrap(), &format!("{rev}:refs/heads/main")])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap()
+        };
+        let refused = push(&bad);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("hasDotgit"), "{}", String::from_utf8_lossy(&refused.stderr));
+        assert!(push(&good.to_string()).status.success());
+    }
 
     #[test]
     fn hidden_refs() {

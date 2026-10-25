@@ -335,18 +335,15 @@ impl Core {
     pub async fn receive_pack_env(&self, repo_id: i64) -> Result<Vec<(String, String)>> {
         let rules = self.branch_rules(repo_id).await?;
         if rules.is_empty() {
-            return Ok(Vec::new());
+            return Ok(self.push_limits_env(&[]));
         }
         let exe = std::env::current_exe().map_err(anyhow::Error::from)?;
-        let hooks = self.config.hooks_dir();
+        let hooks = self.config.hooks_dir().to_string_lossy().into_owned();
         let mut env = vec![
             (RULES_ENV.into(), serde_json::to_string(&rules).map_err(anyhow::Error::from)?),
             (EXE_ENV.into(), exe.to_string_lossy().into_owned()),
-            // `-c core.hooksPath=…` as environment (git 2.31+).
-            ("GIT_CONFIG_COUNT".into(), "1".into()),
-            ("GIT_CONFIG_KEY_0".into(), "core.hooksPath".into()),
-            ("GIT_CONFIG_VALUE_0".into(), hooks.to_string_lossy().into_owned()),
         ];
+        env.extend(self.push_limits_env(&[("core.hooksPath", &hooks)]));
         if rules.iter().any(|r| r.require_signed) {
             env.push((DATA_ENV.into(), self.config.data_dir.to_string_lossy().into_owned()));
             if !self.mail_enabled() {
@@ -354,6 +351,20 @@ impl Core {
             }
         }
         Ok(env)
+    }
+
+    /// Environment for any `git receive-pack`: the push size limit, and
+    /// `extra` settings, as `-c key=value` options in the environment (git
+    /// 2.31+).
+    pub(crate) fn push_limits_env(&self, extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let limit = self.config.max_push_bytes.to_string();
+        let config: Vec<(&str, &str)> = std::iter::once(("receive.maxInputSize", limit.as_str())).chain(extra.iter().copied()).collect();
+        let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), config.len().to_string())];
+        for (i, (key, value)) in config.iter().enumerate() {
+            env.push((format!("GIT_CONFIG_KEY_{i}"), (*key).to_owned()));
+            env.push((format!("GIT_CONFIG_VALUE_{i}"), (*value).to_owned()));
+        }
+        env
     }
 
     /// Why `branch` (requiring verified commits) can't get the commits
@@ -706,6 +717,8 @@ mod tests {
         assert!(core.merge_check(&repo, &issue, &pull, Some(&"d".repeat(40))).await.unwrap().blocked().is_some(), "per commit");
 
         core.delete_branch_rule(repo.id, r.id).await.unwrap();
-        assert!(core.receive_pack_env(repo.id).await.unwrap().is_empty());
+        let env = core.receive_pack_env(repo.id).await.unwrap();
+        assert!(!env.iter().any(|(k, _)| k == RULES_ENV), "no rules, no hook");
+        assert!(env.iter().any(|(k, v)| k == "GIT_CONFIG_KEY_0" && v == "receive.maxInputSize"), "but a size limit");
     }
 }

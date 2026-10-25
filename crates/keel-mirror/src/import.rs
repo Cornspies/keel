@@ -25,13 +25,13 @@ struct Api<'a> {
     /// The repository's API, e.g. `https://api.github.com/repos/ada/engine`.
     base: String,
     token: String,
-    allow_private: bool,
+    outbound: keel_core::Outbound,
 }
 
 impl Api<'_> {
     fn request(&self, url: &str) -> Result<reqwest::RequestBuilder, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
-        lfs::check_url(&parsed, self.allow_private)?;
+        lfs::check_url(&parsed, &self.outbound)?;
         let mut req = self.client.get(parsed.clone()).header("User-Agent", "keel");
         req = match self.service {
             ImportService::GitHub => req.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28"),
@@ -297,7 +297,7 @@ async fn import(core: &Core, client: &reqwest::Client, repo_id: i64) -> Result<V
         service: source.service,
         base: source.api_url.clone(),
         token: core.import_token(repo_id).await.map_err(message)?,
-        allow_private: core.config.webhook_allow_private,
+        outbound: core.config.outbound(),
     };
     if import.with_issues {
         progress("Labels and milestones".into()).await;
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn token_only_to_the_source() {
         let client = reqwest::Client::new();
-        let api = |service, base: &str| Api { client: &client, service, base: base.into(), token: "t0ken".into(), allow_private: false };
+        let api = |service, base: &str| Api { client: &client, service, base: base.into(), token: "t0ken".into(), outbound: Default::default() };
         let auth = |api: &Api, url: &str| api.request(url).unwrap().build().unwrap().headers().contains_key("Authorization");
         let gitea = api(ImportService::Gitea, "https://gitea.example/api/v1/repos/octo/engine");
         assert!(auth(&gitea, "https://gitea.example/api/v1/repos/octo/engine/issues"));

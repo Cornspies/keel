@@ -37,6 +37,7 @@ mod permissions;
 mod projects;
 mod protection;
 mod pulls;
+mod quotas;
 mod reactions;
 mod releases;
 mod repos;
@@ -62,7 +63,7 @@ pub use backup::{BackupReport, backup};
 pub use activity::{Activity, IssueAction, label_json, time as json_time};
 pub use admin::{AdminUser, SiteSettings, SiteStats};
 pub use cache::EntryCommits;
-pub use config::{Config, MailConfig, SshConfig};
+pub use config::{Config, MailConfig, Network, SshConfig};
 pub use insights::{Contributor, DAY, RepoActivity};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
@@ -96,7 +97,7 @@ pub use imports::{
 pub use issue_templates::{IssueTemplate, IssueTemplates, parse_issue_template};
 pub use reactions::{REACTIONS, Reaction, ReactionGroup, group_reactions, reaction_kind};
 pub use wiki::{GitSession, GitTarget, SPECIAL as WIKI_SPECIAL, WikiAction, WikiContent, WikiEdit, WikiPage, page_name, page_title};
-pub use webhooks::{Attempt, Delivery, HookOwner, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
+pub use webhooks::{Attempt, Delivery, HookOwner, Outbound, WEBHOOK_EVENTS, Webhook, is_private_ip, sign};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -172,6 +173,8 @@ pub struct Core {
     login_failures: Arc<std::sync::Mutex<users::LoginFailures>>,
     /// Signs the commits keel makes.
     signing_key: Arc<signing::SigningKey>,
+    /// See [`Core::setup_code`].
+    setup_code: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Core {
@@ -205,6 +208,7 @@ impl Core {
         let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), true)?;
         let core = Self::assemble(db, config, token_secret, signing_key);
         core.load_settings().await?;
+        core.announce_setup_code().await?;
         core.delete_expired_sessions().await?;
         core.prune_notifications(180).await?;
         core.prune_mail().await?;
@@ -244,6 +248,7 @@ impl Core {
             metrics: Arc::default(),
             login_failures: Arc::default(),
             signing_key: Arc::new(signing_key),
+            setup_code: Arc::default(),
         }
     }
 

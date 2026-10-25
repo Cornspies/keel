@@ -139,9 +139,11 @@ async fn authorize(
             if service.is_write() && !target.wiki && state.core.is_mirror(target.repo.id).await.map_err(internal)? {
                 return Err(text(StatusCode::FORBIDDEN, "This repository is a mirror; push to the repository it mirrors"));
             }
-            match state.core.git_session(&target, service.is_write()).await.map_err(internal)? {
-                Some(session) => Ok((target, session, user)),
-                None => Err(text(StatusCode::NOT_FOUND, "This wiki has no pages yet; push to it or create one on the web")),
+            match state.core.git_session(&target, service.is_write()).await {
+                Err(keel_core::Error::Invalid(msg)) => Err(text(StatusCode::FORBIDDEN, &msg)),
+                Err(e) => Err(internal(e)),
+                Ok(Some(session)) => Ok((target, session, user)),
+                Ok(None) => Err(text(StatusCode::NOT_FOUND, "This wiki has no pages yet; push to it or create one on the web")),
             }
         }
         (_, None) => Err(unauthorized()),

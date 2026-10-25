@@ -12,6 +12,8 @@
     <label>Email <input name="email" type="email" value="{{ email }}" autocomplete="email" required></label>
     <label>Password <input name="password" type="password" minlength="8" autocomplete="new-password" required>
       <span class="hint">At least 8 characters.</span></label>
+    {% if needs_code %}<label>Setup code <input name="setup_code" class="mono" autocomplete="off" placeholder="XXXX-XXXX-XXXX-XXXX" required>
+      <span class="hint">keel printed it when it started (look for “setup code” in its output or log). It proves you run this server.</span></label>{% endif %}
     <button class="btn btn-primary">Create account</button>
   </form>
   <p class="muted">Already have an account? <a href="/login">Sign in</a>.</p>

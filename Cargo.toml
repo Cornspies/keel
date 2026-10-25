@@ -6,7 +6,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.94"
 
 [workspace.dependencies]
 regex = "1.11"
@@ -36,7 +36,7 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "compression-br", "trace"] }
 askama = "0.16"
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "html", "regex-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 ammonia = "4"
@@ -53,7 +53,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 flate2 = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
-russh = "0.64"
+russh = "0.65"
 # The version russh uses; for verifying SSH commit signatures.
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["std", "ed25519", "p256", "p384", "p521", "rsa"] }
 pgp = { version = "0.21", default-features = false }

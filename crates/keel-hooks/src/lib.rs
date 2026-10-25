@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::{Attempt, Core, Delivery, Webhook, is_private_ip, sign};
+use keel_core::{Attempt, Core, Delivery, Outbound, Webhook, sign};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// Deliveries sent at the same time.
@@ -19,16 +19,18 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Response bytes kept for the delivery log.
 const MAX_RESPONSE: usize = 4096;
 
-/// Resolves names, dropping private addresses unless they are allowed.
-struct PublicOnly;
+/// Resolves names, dropping addresses `Outbound` doesn't allow (private
+/// ones, unless they are allowed, and blocked networks).
+struct Allowed(Arc<Outbound>);
 
-impl Resolve for PublicOnly {
+impl Resolve for Allowed {
     fn resolve(&self, name: Name) -> Resolving {
+        let outbound = self.0.clone();
         Box::pin(async move {
             let addrs: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
-            let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| !is_private_ip(a.ip())).collect();
+            let public: Vec<SocketAddr> = addrs.into_iter().filter(|a| outbound.allows(a.ip())).collect();
             if public.is_empty() {
-                return Err(format!("{} resolves only to private addresses, which may not be reached", name.as_str()).into());
+                return Err(format!("{} resolves only to private or blocked addresses", name.as_str()).into());
             }
             Ok(Box::new(public.into_iter()) as Addrs)
         })
@@ -36,37 +38,35 @@ impl Resolve for PublicOnly {
 }
 
 /// An HTTP client builder for requests to addresses people enter: no
-/// redirects, no proxies, and unless `allow_private`, no private addresses
-/// (checked on the addresses actually connected to). Literal IP addresses
-/// in URLs don't go through the resolver; callers check those.
-pub fn safe_client_builder(allow_private: bool) -> reqwest::ClientBuilder {
-    let mut builder = reqwest::Client::builder()
+/// redirects, no proxies, and only addresses `outbound` allows (checked on
+/// the addresses actually connected to). Literal IP addresses in URLs don't
+/// go through the resolver; callers check those.
+pub fn safe_client_builder(outbound: &Outbound) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .user_agent(concat!("keel/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .connect_timeout(Duration::from_secs(5));
-    if !allow_private {
-        builder = builder.dns_resolver(Arc::new(PublicOnly));
-    }
-    builder
+        .connect_timeout(Duration::from_secs(5))
+        .dns_resolver(Arc::new(Allowed(Arc::new(outbound.clone()))))
 }
 
-pub fn client(allow_private: bool) -> reqwest::Client {
-    safe_client_builder(allow_private).timeout(TIMEOUT).build().expect("valid HTTP client configuration")
+pub fn client(outbound: &Outbound) -> reqwest::Client {
+    safe_client_builder(outbound).timeout(TIMEOUT).build().expect("valid HTTP client configuration")
 }
 
 /// Starts the delivery worker (needs a Tokio runtime).
 pub fn start(core: Core) {
-    let client = client(core.config.webhook_allow_private);
+    let outbound = Arc::new(core.config.outbound());
+    let client = client(&outbound);
     tokio::spawn(async move {
         let wakeup = core.hook_wakeup();
         loop {
             match core.claim_deliveries(BATCH).await {
                 Ok(batch) if !batch.is_empty() => {
                     let sends = batch.into_iter().map(|(delivery, hook)| {
-                        let (core, client) = (core.clone(), client.clone());
+                        let (core, client, outbound) = (core.clone(), client.clone(), outbound.clone());
                         async move {
-                            let attempt = deliver(&client, &delivery, &hook, core.config.webhook_allow_private).await;
+                            let attempt = deliver(&client, &delivery, &hook, &outbound).await;
                             if !attempt.succeeded() {
                                 tracing::info!(hook = hook.id, delivery = delivery.id, "webhook delivery failed: {}",
                                     attempt.error.clone().unwrap_or_else(|| format!("HTTP {}", attempt.status.unwrap_or(0))));
@@ -113,7 +113,7 @@ fn describe(e: &dyn std::error::Error) -> String {
 }
 
 /// POSTs one delivery.
-pub async fn deliver(client: &reqwest::Client, d: &Delivery, hook: &Webhook, allow_private: bool) -> Attempt {
+pub async fn deliver(client: &reqwest::Client, d: &Delivery, hook: &Webhook, outbound: &Outbound) -> Attempt {
     let started = Instant::now();
     let failed = |error: String| Attempt {
         status: None,
@@ -127,8 +127,8 @@ pub async fn deliver(client: &reqwest::Client, d: &Delivery, hook: &Webhook, all
     };
     // Literal addresses don't go through the resolver.
     let literal = url.host_str().map(|h| h.trim_start_matches('[').trim_end_matches(']'));
-    if !allow_private && literal.and_then(|h| h.parse::<IpAddr>().ok()).is_some_and(is_private_ip) {
-        return failed("webhooks may not reach private addresses".into());
+    if literal.and_then(|h| h.parse::<IpAddr>().ok()).is_some_and(|ip| !outbound.allows(ip)) {
+        return failed("webhooks may not reach private or blocked addresses".into());
     }
 
     let mut request = client
