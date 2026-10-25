@@ -153,6 +153,40 @@ impl GitRepo {
     }
 }
 
+impl GitRepo {
+    /// Starts this empty repository from `template`'s files: for each of
+    /// its `branches`, a branch here with a single commit holding the same
+    /// files, without the template's history. HEAD points at `head`.
+    pub fn start_from_template(&self, template: &GitRepo, branches: &[String], head: &str, message: &str, who: &Identity<'_>) -> Result<()> {
+        let src = &template.repo;
+        let mut trees = Vec::new();
+        let mut pack = src.packbuilder()?;
+        for branch in branches {
+            let tree = src.find_reference(&format!("refs/heads/{branch}"))?.peel_to_commit()?.tree_id();
+            // Recursively, skipping submodules.
+            pack.insert_tree(tree)?;
+            trees.push((branch, tree));
+        }
+        if trees.is_empty() {
+            return Ok(());
+        }
+        let mut buf = git2::Buf::new();
+        pack.write_buf(&mut buf)?;
+        let odb = self.repo.odb()?;
+        let mut writer = odb.packwriter()?;
+        std::io::Write::write_all(&mut writer, &buf)?;
+        writer.commit()?;
+        let sig = git2::Signature::now(who.name, who.email)?;
+        for (branch, tree) in trees {
+            let tree = self.repo.find_tree(tree)?;
+            let commit = self.repo.commit(None, &sig, &sig, message, &tree, &[])?;
+            self.update_ref(&format!("refs/heads/{branch}"), Some(commit), Some(Oid::ZERO_SHA1))?;
+        }
+        self.repo.set_head(&format!("refs/heads/{head}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +262,37 @@ mod tests {
         assert!(repo.commit_file_edit("main", tip, "src/lib.rs", "Again", &who, edit).is_err());
         assert_eq!(repo.branch_tip("main"), Some(commit));
         assert!(repo.commit_file_edit("main", commit, "src", "Dir", &who, edit).is_err());
+    }
+
+    #[test]
+    fn starting_from_a_template() {
+        let s = Scratch::new();
+        s.write("README.md", "# Template");
+        s.write("src/main.rs", "fn main() {}");
+        s.commit("one");
+        s.write("README.md", "# Template v2");
+        s.commit("two");
+        s.git(&["checkout", "-qb", "docs"]);
+        s.write("docs/index.md", "docs");
+        s.commit("docs");
+        let template = s.open();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.git");
+        crate::create_bare(&path, "main").unwrap();
+        let repo = GitRepo::open(&path).unwrap();
+        let who = Identity { name: "Bob", email: "bob@example.com" };
+        let branches = ["main".to_owned(), "docs".to_owned()];
+        repo.start_from_template(&template, &branches, "docs", "Initial commit", &who).unwrap();
+        let main = repo.branch_tip("main").unwrap();
+        assert_eq!(repo.repo.find_commit(main).unwrap().parent_count(), 0);
+        let c = repo.commit_summary(main).unwrap();
+        assert_eq!((c.summary.as_str(), c.author.name.as_str()), ("Initial commit", "Bob"));
+        assert_eq!(repo.blob(main, "README.md").unwrap().unwrap().data, b"# Template v2");
+        assert_eq!(repo.blob(main, "src/main.rs").unwrap().unwrap().data, b"fn main() {}");
+        let docs = repo.branch_tip("docs").unwrap();
+        assert_eq!(repo.blob(docs, "docs/index.md").unwrap().unwrap().data, b"docs");
+        assert_eq!(repo.default_branch().unwrap().as_deref(), Some("docs"));
+        assert!(repo.repo.revparse_single("HEAD~1").is_err(), "no history");
     }
 }

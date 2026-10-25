@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en"{% if page.theme != "auto" %} data-theme="{{ page.theme }}"{% endif %}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -42,5 +42,13 @@
 <main class="wrap">
 {% block content %}{% endblock %}
 </main>
+<footer class="wrap site-footer">
+  <form method="post" action="/theme" class="theme-switch">
+    <span class="muted small" id="theme-label">Theme</span>
+    <span class="segmented" role="group" aria-labelledby="theme-label">
+      {% for (value, label) in [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")] %}<button name="theme" value="{{ value }}" aria-pressed="{% if page.theme == *value %}true{% else %}false{% endif %}"{% if *value == "auto" %} title="Follow the system"{% endif %}>{{ label }}</button>{% endfor %}
+    </span>
+  </form>
+</footer>
 </body>
 </html>

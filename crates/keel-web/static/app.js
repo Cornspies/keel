@@ -141,3 +141,15 @@ document.addEventListener("submit", (event) => {
 // Pages that show work in progress (like an import) reload until it's done.
 const refresh = document.querySelector("[data-refresh]");
 if (refresh) setTimeout(() => location.reload(), Number(refresh.dataset.refresh) * 1000);
+
+// The theme switch takes effect at once instead of reloading the page.
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest(".theme-switch");
+  if (!form || !event.submitter) return;
+  event.preventDefault();
+  const theme = event.submitter.value;
+  if (theme === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  for (const b of form.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === event.submitter));
+  fetch(form.action, { method: "POST", body: new URLSearchParams({ theme, js: "1" }) }).catch(() => {});
+});

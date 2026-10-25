@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+{% include "repo/insights_nav.html" %}
+{% if total == 0 %}
+<p class="empty">No commits yet.</p>
+{% else %}
+<p class="muted">{{ total }} {% if total == 1 %}commit{% else %}commits{% endif %} by {{ people }} {% if people == 1 %}person{% else %}people{% endif %} on <span class="branch">{{ branch }}</span> since {{ since }}, not counting merges.</p>
+<div class="box chart-box">{{ chart|safe }}</div>
+<ol class="contributors">
+  {% for c in contributors %}
+  <li class="box contributor">
+    <div class="contributor-head">
+      {% if let Some(u) = c.username %}<a href="/{{ u }}"><img class="avatar" src="/avatars/{{ u }}" width="32" height="32" alt=""></a>{% else %}<span class="avatar avatar-none" aria-hidden="true"></span>{% endif %}
+      <div>
+        <strong>{% if let Some(u) = c.username %}<a href="/{{ u }}">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}</strong>
+        <div class="muted small">{{ c.commits }} {% if c.commits == 1 %}commit{% else %}commits{% endif %} · {{ c.share }}</div>
+      </div>
+      <span class="spacer"></span>
+      <span class="muted small">#{{ c.rank }}</span>
+    </div>
+    {{ c.chart|safe }}
+  </li>
+  {% endfor %}
+</ol>
+{% if people > contributors.len() %}<p class="muted small">Showing the {{ contributors.len() }} people with the most commits.</p>{% endif %}
+{% endif %}
+{% endblock %}

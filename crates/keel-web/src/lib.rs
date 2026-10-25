@@ -12,6 +12,7 @@ mod feed;
 mod forks;
 mod githttp;
 mod import;
+mod insights;
 mod issue_search;
 mod issues;
 mod labels;
@@ -34,6 +35,7 @@ mod session;
 mod stars;
 mod settings;
 mod statuses;
+mod theme;
 mod twofactor;
 mod wiki;
 
@@ -153,12 +155,15 @@ pub(crate) struct Page {
     pub mail_enabled: bool,
     /// The administrators' notice for every page.
     pub banner: String,
+    /// `auto` (follow the system), `light` or `dark`.
+    pub theme: &'static str,
 }
 
 impl Page {
     pub fn new(state: &AppState, viewer: Option<User>, title: impl Into<String>) -> Self {
         Self {
             unread: viewer.as_ref().and_then(|v| state.unread.get(&v.id)).unwrap_or(0),
+            theme: theme::current(viewer.as_ref()),
             mail_enabled: state.core.mail_enabled(),
             banner: state.core.site_settings().banner,
             title: title.into(),
@@ -183,6 +188,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/security/recovery", post(twofactor::recovery))
         .route("/register", get(pages::register_form).post(pages::register))
         .route("/logout", post(pages::logout))
+        .route("/theme", post(theme::set))
         .route("/new", get(pages::new_repo_form).post(pages::new_repo))
         .route("/org/new", get(orgs::new_form).post(orgs::create))
         .route("/org/{org}/settings", get(orgs::settings))
@@ -259,10 +265,16 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/pulls", get(pulls::list).post(pulls::create))
         .route("/{owner}/{repo}/compare", get(pulls::compare_index))
         .route("/{owner}/{repo}/compare/{*spec}", get(pulls::compare))
+        .route("/{owner}/{repo}/graphs/contributors", get(insights::contributors))
+        .route("/{owner}/{repo}/graphs/commit-activity", get(insights::commit_activity))
         .route("/{owner}/{repo}/pull/{number}", get(pulls::show))
         .route("/{owner}/{repo}/pull/{number}/commits", get(pulls::commits))
         .route("/{owner}/{repo}/pull/{number}/files", get(pulls::files))
         .route("/{owner}/{repo}/pull/{number}/merge", post(pulls::merge))
+        .route("/{owner}/{repo}/pull/{number}/ready", post(pulls::ready))
+        .route("/{owner}/{repo}/pull/{number}/draft", post(pulls::to_draft))
+        .route("/{owner}/{repo}/pull/{number}/auto-merge", post(pulls::auto_merge))
+        .route("/{owner}/{repo}/pull/{number}/auto-merge/disable", post(pulls::stop_auto_merge))
         .route("/{owner}/{repo}/pull/{number}/comments", post(pulls::inline_comment))
         .route("/{owner}/{repo}/pull/{number}/comments/{id}/reply", post(pulls::reply))
         .route("/{owner}/{repo}/pull/{number}/review", post(pulls::review))
@@ -422,7 +434,8 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     let path = req.uri().path().to_owned();
     let query = req.uri().query().map(str::to_owned);
     let session = session::token_from(req.headers()).map(str::to_owned);
-    let mut res = next.run(req).await;
+    let theme = theme::from_cookie(req.headers());
+    let mut res = theme::with_cookie(theme, next.run(req)).await;
     // Pages of renamed or transferred repositories move along.
     if safe
         && res.status() == StatusCode::NOT_FOUND

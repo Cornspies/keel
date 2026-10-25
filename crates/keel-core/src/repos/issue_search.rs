@@ -89,6 +89,8 @@ pub struct IssueQuery {
     pub no_label: bool,
     pub no_assignee: bool,
     pub no_milestone: bool,
+    /// `Some(true)`: draft pull requests only; `Some(false)`: no drafts.
+    pub draft: Option<bool>,
     /// `owner/name`.
     pub repo: Option<String>,
     pub owner: Option<String>,
@@ -154,6 +156,14 @@ impl IssueQuery {
                     out.pulls = Some(true);
                 }
                 ("is" | "type", "issue") => out.pulls = Some(false),
+                ("is", "draft") | ("draft", "true") => {
+                    out.draft = Some(true);
+                    out.pulls = Some(true);
+                }
+                ("draft", "false") => {
+                    out.draft = Some(false);
+                    out.pulls = Some(true);
+                }
                 ("is" | "type", "pr" | "pull-request" | "pull") => out.pulls = Some(true),
                 ("label", _) => out.labels.push(value.to_owned()),
                 ("-label", _) => out.not_labels.push(value.to_owned()),
@@ -189,7 +199,7 @@ pub struct IssueHit {
 // review requested, ?9 involves (user ids; -2 for unknown names), ?10
 // milestone title, ?11 labels and ?12 excluded labels (JSON arrays), ?13
 // no label, ?14 no assignee, ?15 no milestone, ?16 owner id, ?17 words
-// (JSON array of LIKE patterns).
+// (JSON array of LIKE patterns), ?18 drafts (NULL: either).
 macro_rules! issue_search_where {
     () => {
         concat!(
@@ -219,6 +229,7 @@ macro_rules! issue_search_where {
                AND (NOT ?14 OR NOT EXISTS (SELECT 1 FROM issue_assignees a WHERE a.issue_id = i.id))
                AND (NOT ?15 OR i.milestone_id IS NULL)
                AND (?16 IS NULL OR r.owner_id = ?16)
+               AND (?18 IS NULL OR EXISTS (SELECT 1 FROM pull_requests p WHERE p.issue_id = i.id AND p.is_draft = ?18))
                AND NOT EXISTS (SELECT 1 FROM json_each(?17) j
                     WHERE i.title NOT LIKE j.value ESCAPE '\\' AND i.body NOT LIKE j.value ESCAPE '\\')
                AND ",
@@ -232,11 +243,12 @@ macro_rules! issue_search_page {
         concat!(
             "SELECT i.id, i.repo_id, i.number, i.author_id, u.username AS author, i.title, i.body,
                 i.is_pull, i.state, i.comment_count, i.created_at, i.updated_at, i.closed_at, i.original_author,
+                i.is_pull AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.issue_id = i.id AND p.is_draft) AS is_draft,
                 ru.username AS repo_owner, r.name AS repo_name ",
             issue_search_where!(),
             " ORDER BY ",
             $order,
-            " LIMIT ?18 OFFSET ?19"
+            " LIMIT ?19 OFFSET ?20"
         )
     };
 }
@@ -329,6 +341,7 @@ impl Core {
                     .bind(q.no_milestone)
                     .bind(b.owner)
                     .bind(&b.text)
+                    .bind(q.draft)
             };
         }
         let sql = match q.sort {
@@ -365,6 +378,9 @@ mod tests {
         assert!(q.no_assignee && q.state == Some(StateFilter::Merged) && q.pulls == Some(true));
         assert_eq!((q.repo.as_deref(), q.milestone.as_deref()), (Some("ada/engine"), Some("v1.0")));
         assert_eq!(IssueQuery::parse("  ", None), IssueQuery::default());
+        let q = IssueQuery::parse("is:draft", None);
+        assert_eq!((q.draft, q.pulls), (Some(true), Some(true)));
+        assert_eq!(IssueQuery::parse("draft:false", None).draft, Some(false));
     }
 
     #[tokio::test]

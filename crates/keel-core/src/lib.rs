@@ -7,13 +7,14 @@ macro_rules! user_columns {
     () => {
         "id, username, COALESCE(email, '') AS email, password_hash, is_admin, kind, created_at,
          email_verified_at IS NOT NULL AS email_verified, email_notifications, disabled_at IS NOT NULL AS disabled,
-         totp_secret IS NOT NULL AS totp_enabled, avatar_type, avatar_version"
+         totp_secret IS NOT NULL AS totp_enabled, avatar_type, avatar_version, theme"
     };
 }
 
 mod activity;
 mod admin;
 mod auth;
+mod auto_merge;
 mod avatars;
 mod backup;
 mod cache;
@@ -21,6 +22,7 @@ mod config;
 mod events;
 mod file_edits;
 mod imports;
+mod insights;
 mod issue_templates;
 mod issues;
 mod labels;
@@ -52,11 +54,13 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
+pub use auto_merge::style_name;
 pub use backup::{BackupReport, backup};
 pub use activity::{Activity, IssueAction, label_json, time as json_time};
 pub use admin::{AdminUser, SiteSettings, SiteStats};
 pub use cache::EntryCommits;
 pub use config::{Config, MailConfig, SshConfig};
+pub use insights::{Contributor, DAY, RepoActivity};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
 pub use lfs::{LFS_TOKEN_SECS, LfsLock, parse_pointer, valid_oid};
@@ -77,7 +81,7 @@ pub use ssh_keys::{SshKey, parse_public_key};
 pub use statuses::{CommitStatus, STATUS_STATES, combined_state};
 pub use tokens::{AccessToken, looks_like_token};
 pub use totp::{RECOVERY_CODES, SecondStep, totp_uri};
-pub use users::User;
+pub use users::{THEMES, User};
 pub use avatars::{MAX_AVATAR, identicon, image_type};
 pub use file_edits::{FileEdit, FileWrite, clean_path};
 pub use imports::{
@@ -148,6 +152,10 @@ pub struct Core {
     mirror_wakeup: Arc<tokio::sync::Notify>,
     /// Signalled when an import is queued.
     import_wakeup: Arc<tokio::sync::Notify>,
+    /// Held while merging pull requests automatically, one at a time.
+    auto_merge_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Commit counts for graphs, by repository id.
+    activity_cache: Arc<std::sync::Mutex<std::collections::HashMap<i64, Arc<insights::RepoActivity>>>>,
     /// Instance settings from the admin page, read on every page view.
     settings: Arc<std::sync::RwLock<SiteSettings>>,
     /// Signs short-lived tokens (Git LFS).
@@ -182,6 +190,8 @@ impl Core {
             mail_wakeup: Arc::default(),
             mirror_wakeup: Arc::default(),
             import_wakeup: Arc::default(),
+            auto_merge_lock: Arc::default(),
+            activity_cache: Arc::default(),
             settings: Arc::default(),
             token_secret,
             metrics: Arc::default(),

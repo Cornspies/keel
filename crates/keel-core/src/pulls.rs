@@ -23,6 +23,15 @@ pub struct PullRequest {
     pub merge_commit: Option<String>,
     pub merged_by: Option<String>,
     pub merged_at: Option<i64>,
+    /// Drafts can't be merged until they're marked ready for review.
+    pub is_draft: bool,
+    /// Who turned auto-merge on, if it is: it merges as them, the way
+    /// below, once nothing blocks it.
+    pub auto_merge_by: Option<String>,
+    /// `merge` or `squash`.
+    pub auto_merge_style: String,
+    /// Delete the head branch after auto-merging.
+    pub auto_merge_delete: bool,
 }
 
 impl PullRequest {
@@ -78,6 +87,7 @@ impl Core {
         base_ref: &str,
         head_repo: &Repo,
         head_ref: &str,
+        draft: bool,
     ) -> Result<Issue> {
         if !related(repo, head_repo) || self.access(head_repo, Some(author)).await? == Access::None {
             return Err(Error::NotFound);
@@ -110,7 +120,7 @@ impl Core {
             head
         };
         let result = self
-            .insert_pull(repo, author, title, body, base_ref, head_repo, head_ref, base, head)
+            .insert_pull(repo, author, title, body, base_ref, head_repo, head_ref, base, head, draft)
             .await;
         if cross {
             self.git(repo.id, move |g| g.update_ref(&incoming, None, None)).await?;
@@ -130,6 +140,7 @@ impl Core {
         head_ref: &str,
         base: Oid,
         head: Oid,
+        draft: bool,
     ) -> Result<Issue> {
         if self.git(repo.id, move |g| g.is_ancestor(head, base)).await? {
             return invalid(format!("{base_ref} already contains all commits of {head_ref}."));
@@ -138,14 +149,15 @@ impl Core {
         let mut tx = self.db.begin().await?;
         let (issue_id, number) = insert_issue(&mut tx, repo.id, author, title, body, true).await?;
         sqlx::query(
-            "INSERT INTO pull_requests (issue_id, base_ref, head_ref, head_repo_id, base_commit)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO pull_requests (issue_id, base_ref, head_ref, head_repo_id, base_commit, is_draft)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(issue_id)
         .bind(base_ref)
         .bind(head_ref)
         .bind(head_repo.id)
         .bind(merge_base.map(|c| c.to_string()))
+        .bind(draft)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -183,9 +195,11 @@ impl Core {
         Ok(sqlx::query_as(
             "SELECT p.issue_id, p.base_ref, p.head_ref, p.head_repo_id,
                 hu.username || '/' || hr.name AS head_repo,
-                p.base_commit, p.head_commit, p.merge_commit, u.username AS merged_by, p.merged_at
+                p.base_commit, p.head_commit, p.merge_commit, u.username AS merged_by, p.merged_at,
+                p.is_draft, au.username AS auto_merge_by, p.auto_merge_style, p.auto_merge_delete
              FROM pull_requests p
              LEFT JOIN users u ON u.id = p.merged_by
+             LEFT JOIN users au ON au.id = p.auto_merge_by
              LEFT JOIN repositories hr ON hr.id = p.head_repo_id
              LEFT JOIN users hu ON hu.id = hr.owner_id
              WHERE p.issue_id = ?1",
@@ -292,6 +306,9 @@ impl Core {
         .bind(repo_id)
         .fetch_all(&self.db)
         .await?;
+        let mut bases: Vec<i64> = open.iter().map(|(r, _)| *r).collect();
+        bases.sort_unstable();
+        bases.dedup();
         for (base_repo, number) in open {
             let Some(issue) = self.issue(base_repo, number).await? else { continue };
             let Some(pull) = self.pull(issue.id).await? else { continue };
@@ -316,6 +333,11 @@ impl Core {
                 .execute(&self.db)
                 .await?;
         }
+        // New commits may have been what auto-merge waited for (a stale
+        // review dismissed, conflicts resolved).
+        for repo_id in bases {
+            self.auto_merge_soon(repo_id);
+        }
         Ok(())
     }
 }
@@ -338,6 +360,9 @@ impl Core {
             return invalid("This repository is a mirror and can't be changed here.");
         }
         let pull = self.pull(issue.id).await?.ok_or(Error::NotFound)?;
+        if pull.is_draft {
+            return invalid("This pull request is still a draft.");
+        }
         let (Some(base), Some(head)) = self.pull_tips(issue, &pull).await? else {
             return invalid("A branch is missing.");
         };
@@ -452,12 +477,12 @@ mod tests {
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         let _work = push_branches(&core, &repo);
 
-        assert!(core.create_pull(&repo, &ada, "Same", "", "main", &repo, "main").await.is_err());
-        assert!(core.create_pull(&repo, &ada, "Nope", "", "main", &repo, "nope").await.is_err());
-        assert!(core.create_pull(&repo, &ada, "Behind", "", "feature", &repo, "main").await.is_err(), "nothing to merge");
-        let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature").await.unwrap();
+        assert!(core.create_pull(&repo, &ada, "Same", "", "main", &repo, "main", false).await.is_err());
+        assert!(core.create_pull(&repo, &ada, "Nope", "", "main", &repo, "nope", false).await.is_err());
+        assert!(core.create_pull(&repo, &ada, "Behind", "", "feature", &repo, "main", false).await.is_err(), "nothing to merge");
+        let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature", false).await.unwrap();
         assert!(issue.is_pull);
-        assert!(core.create_pull(&repo, &ada, "Again", "", "main", &repo, "feature").await.is_err(), "duplicate");
+        assert!(core.create_pull(&repo, &ada, "Again", "", "main", &repo, "feature", false).await.is_err(), "duplicate");
         let pull = core.pull(issue.id).await.unwrap().unwrap();
         assert_eq!((pull.base_ref.as_str(), pull.head_ref.as_str()), ("main", "feature"));
         assert_eq!(pull.head_label(&issue), "feature");
@@ -484,7 +509,7 @@ mod tests {
         let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         let _work = push_branches(&core, &repo);
-        let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature").await.unwrap();
+        let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature", false).await.unwrap();
         let tip = core.git(repo.id, |g| Ok(g.branch_tip("feature"))).await.unwrap().unwrap();
         let blob = core.git(repo.id, move |g| Ok(g.blob(tip, "b")?.unwrap().id)).await.unwrap();
         let anchor = crate::InlineAnchor {
@@ -553,8 +578,8 @@ mod tests {
         git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "topic"]);
         let topic = core.git(fork.id, |g| Ok(g.branch_tip("topic"))).await.unwrap().unwrap();
 
-        assert!(core.create_pull(&repo, &bob, "x", "", "main", &unrelated, "main").await.is_err(), "not a fork");
-        let issue = core.create_pull(&repo, &bob, "Add c", "", "main", &fork, "topic").await.unwrap();
+        assert!(core.create_pull(&repo, &bob, "x", "", "main", &unrelated, "main", false).await.is_err(), "not a fork");
+        let issue = core.create_pull(&repo, &bob, "Add c", "", "main", &fork, "topic", false).await.unwrap();
         let pull = core.pull(issue.id).await.unwrap().unwrap();
         assert!(pull.is_cross_repo(&issue));
         assert_eq!(pull.head_label(&issue), "bob:topic");
@@ -564,7 +589,7 @@ mod tests {
         let refs = String::from_utf8_lossy(&refs.stdout);
         assert!(!refs.contains("incoming"), "temporary ref removed: {refs}");
         assert_eq!(core.git(repo.id, |g| Ok(g.branch_tip("topic"))).await.unwrap(), None);
-        assert!(core.create_pull(&repo, &bob, "Again", "", "main", &fork, "topic").await.is_err(), "duplicate");
+        assert!(core.create_pull(&repo, &bob, "Again", "", "main", &fork, "topic", false).await.is_err(), "duplicate");
 
         // A push to the fork moves the pull request.
         std::fs::write(work.path().join("c"), "2").unwrap();
@@ -590,7 +615,7 @@ mod tests {
         git(&["add", "-A"]);
         git(&["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-qm", "big"]);
         git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "lfs"]);
-        let lfs_pull = core.create_pull(&repo, &bob, "Big", "", "main", &fork, "lfs").await.unwrap();
+        let lfs_pull = core.create_pull(&repo, &bob, "Big", "", "main", &fork, "lfs", false).await.unwrap();
         assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), None);
         core.merge_pull(&repo, &lfs_pull, &ada, keel_git::MergeStyle::Merge, false).await.unwrap();
         assert_eq!(core.lfs_object(repo.id, &oid).await.unwrap(), Some(3));

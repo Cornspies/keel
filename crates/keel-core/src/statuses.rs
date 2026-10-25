@@ -128,6 +128,7 @@ impl Core {
             .fetch_one(&self.db)
             .await?;
         self.record(Activity::Status { repo_id: repo.id, status: status.clone(), actor: creator.id }).await;
+        self.auto_merge_soon(repo.id);
         Ok(status)
     }
 

@@ -327,6 +327,8 @@ pub struct CreateForm {
     title: String,
     #[serde(default)]
     body: String,
+    /// Present for "Create draft".
+    draft: Option<String>,
 }
 
 pub async fn create(
@@ -338,7 +340,7 @@ pub async fn create(
     let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
     let related = related_repos(&state, &repo, Some(&user)).await?;
     let (head_repo, head) = resolve_head(&related, &f.head).ok_or(AppError::NotFound)?;
-    match state.core.create_pull(&repo, &user, &f.title, &f.body, &f.base, &head_repo, &head).await {
+    match state.core.create_pull(&repo, &user, &f.title, &f.body, &f.base, &head_repo, &head, f.draft.is_some()).await {
         Ok(issue) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => {
             compare_page(&state, Some(user), &repo, access, f.base, f.head, f.title, f.body, Some(msg)).await
@@ -457,6 +459,12 @@ struct PullPage {
     merge_blocked: bool,
     /// Statuses of the head commit, and required ones not reported yet.
     checks: Vec<crate::statuses::CheckView>,
+    /// May mark it ready for review or a draft (the author and writers).
+    can_set_draft: bool,
+    /// Who turned auto-merge on and how it will merge, if it's on.
+    auto_merge: Option<(String, &'static str)>,
+    /// May turn auto-merge off.
+    can_stop_auto_merge: bool,
     error: Option<String>,
 }
 
@@ -502,6 +510,14 @@ async fn show_page(
     let can_delete_branch = can_delete_branch(state, repo, &l, viewer.as_ref()).await?;
     let protection = if l.issue.is_open() { merge_checks(state, repo, &l).await? } else { None };
     let checks = head_checks(state, repo, &l).await?;
+    let is_author = viewer.as_ref().is_some_and(|v| l.issue.is_author(v));
+    let auto_merge = l.pull.auto_merge_by.clone().filter(|_| l.issue.is_open()).map(|by| {
+        let how = if l.pull.auto_merge_style == "squash" { "squash and merge" } else { "merge" };
+        (by, how)
+    });
+    let can_stop_auto_merge = auto_merge.as_ref().is_some_and(|(by, _)| {
+        is_author || access >= Access::Write || viewer.as_ref().is_some_and(|v| &v.username == by)
+    });
     html(PullPage {
         repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", "").await?,
         page: Page::new(
@@ -510,6 +526,9 @@ async fn show_page(
             format!("{} · Pull request #{} · {}/{}", l.issue.title, number, repo.owner, repo.name),
         ),
         can_merge: access >= Access::Write,
+        can_set_draft: l.issue.is_open() && (is_author || access >= Access::Write),
+        auto_merge,
+        can_stop_auto_merge,
         can_delete_branch,
         merge_blocked: protection.as_ref().is_some_and(|c| c.blocked.is_some()),
         protection,
@@ -1128,6 +1147,67 @@ pub async fn merge(
     let style = if f.style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
     match state.core.merge_pull(&repo, &issue, &user, style, f.delete_branch.is_some()).await {
         Ok(_) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drafts and auto-merge
+// ---------------------------------------------------------------------------
+
+async fn set_draft(state: AppState, user: User, owner: String, name: String, number: i64, draft: bool) -> AppResult {
+    let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    match state.core.set_draft(&repo, &issue, &user, draft).await {
+        Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn ready(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+) -> AppResult {
+    set_draft(state, user, owner, name, number, false).await
+}
+
+pub async fn to_draft(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+) -> AppResult {
+    set_draft(state, user, owner, name, number, true).await
+}
+
+/// Turns auto-merge on, with the merge form's choices.
+pub async fn auto_merge(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+    Form(f): Form<MergeForm>,
+) -> AppResult {
+    let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    let style = if f.style == "squash" { MergeStyle::Squash } else { MergeStyle::Merge };
+    match state.core.enable_auto_merge(&repo, &issue, &user, style, f.delete_branch.is_some()).await {
+        Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn stop_auto_merge(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, number)): Path<(String, String, i64)>,
+) -> AppResult {
+    let (repo, access) = load(&state, Some(&user), &owner, &name).await?;
+    let issue = load_issue(&state, &repo, number).await?;
+    match state.core.disable_auto_merge(&repo, &issue, &user).await {
+        Ok(()) => Ok(Redirect::to(&issue_url(&repo, &issue)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => show_page(&state, Some(user), &repo, access, number, Some(msg)).await,
         Err(e) => Err(e.into()),
     }

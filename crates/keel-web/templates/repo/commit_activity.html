@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+{% include "repo/insights_nav.html" %}
+{% if branch.is_empty() %}
+<p class="empty">No commits yet.</p>
+{% else %}
+<p class="muted">{{ total }} {% if total == 1 %}commit{% else %}commits{% endif %} on <span class="branch">{{ branch }}</span> in the last year, {{ per_week }} a week on average{% if let Some(b) = busiest %}; the most were {{ b }}{% endif %}. Merges aren't counted.</p>
+<h3>Per week</h3>
+<div class="box chart-box">{{ weeks_chart|safe }}</div>
+<h3>Per day of the week</h3>
+<div class="box chart-box chart-narrow">{{ days_chart|safe }}</div>
+{% endif %}
+{% endblock %}

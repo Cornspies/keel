@@ -54,6 +54,18 @@
     <strong>{{ item.author }}</strong> {% if item.kind == "milestoned" %}added this to the{% else %}removed this from the{% endif %} <a href="{{ item.target_url }}"><strong>{{ item.target }}</strong></a> milestone
     <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
   </div>
+  {% else if item.kind == "ready_for_review" || item.kind == "converted_to_draft" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-{% if item.kind == "ready_for_review" %}open{% else %}draft{% endif %}" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "ready_for_review" %}marked this pull request as ready for review{% else %}marked this pull request as a draft{% endif %}
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
+  {% else if item.kind == "auto_merge_enabled" || item.kind == "auto_merge_disabled" %}
+  <div class="event" id="event-{{ item.id }}">
+    <span class="state-dot state-review" aria-hidden="true"></span>
+    <strong>{{ item.author }}</strong> {% if item.kind == "auto_merge_enabled" %}enabled{% else %}disabled{% endif %} auto-merge
+    <time class="muted" title="{{ item.when_full }}">{{ item.when }}</time>
+  </div>
   {% else %}
   <div class="event" id="event-{{ item.id }}">
     <span class="state-dot state-{% if item.kind == "reopened" %}open{% else %}{{ item.kind }}{% endif %}" aria-hidden="true"></span>

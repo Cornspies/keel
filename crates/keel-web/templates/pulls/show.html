@@ -26,6 +26,18 @@
     <span class="muted small">{{ pr.base_ref }} is protected by the rule <span class="branch">{{ c.pattern }}</span>.</span>
   </div>
   {% endif %}
+  {% if conv.draft %}
+  <div class="merge-status merge-draft"><strong>This pull request is still a draft.</strong>
+    <span class="muted">It can't be merged until it's marked ready for review.</span>
+    {% if can_set_draft %}<form method="post" action="{{ pr.url }}/ready" class="inline"><button class="btn btn-small">Ready for review</button></form>{% endif %}
+  </div>
+  {% else %}
+  {% if let Some((by, how)) = auto_merge %}
+  <div class="merge-status merge-auto"><strong>Auto-merge is on.</strong>
+    <span class="muted">{{ by }} turned it on: this will {{ how }} once the requirements are met.</span>
+    {% if can_stop_auto_merge %}<form method="post" action="{{ pr.url }}/auto-merge/disable" class="inline"><button class="btn btn-small">Disable auto-merge</button></form>{% endif %}
+  </div>
+  {% endif %}
   {% match m %}
   {% when MergeStatus::Ready %}
     <div class="merge-status merge-ok"><strong>This branch has no conflicts with {{ pr.base_ref }}.</strong>
@@ -34,10 +46,11 @@
     <form method="post" action="{{ pr.url }}/merge" class="form form-inline merge-form">
       <select name="style" aria-label="Merge method">
         <option value="merge">Create a merge commit</option>
-        <option value="squash">Squash and merge</option>
+        <option value="squash"{% if let Some((_, how)) = auto_merge %}{% if *how == "squash and merge" %} selected{% endif %}{% endif %}>Squash and merge</option>
       </select>
       {% if can_delete_branch %}<label class="check"><input type="checkbox" name="delete_branch" checked> Delete <span class="branch">{{ pr.head_label }}</span> afterwards</label>{% endif %}
       <button class="btn btn-primary"{% if merge_blocked %} disabled{% endif %}>Merge pull request</button>
+      {% if merge_blocked && auto_merge.is_none() %}<button class="btn" formaction="{{ pr.url }}/auto-merge" title="Merge once the requirements above are met">Enable auto-merge</button>{% endif %}
     </form>
     {% endif %}
   {% when MergeStatus::Conflicts(files) %}
@@ -49,6 +62,8 @@
   {% when MergeStatus::BranchMissing %}
     <div class="merge-status merge-conflict">The <span class="branch">{{ pr.head_label }}</span> or <span class="branch">{{ pr.base_ref }}</span> branch no longer exists.</div>
   {% endmatch %}
+  {% endif %}
+  {% if can_set_draft && !conv.draft %}<form method="post" action="{{ pr.url }}/draft" class="merge-footer">Still in progress? <button class="linkish">Convert to draft</button></form>{% endif %}
 </div>
 {% endif %}
 {% include "issues/comment_form.html" %}

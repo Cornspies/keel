@@ -55,7 +55,8 @@ impl IssueRow {
             url: issue_url(repo, i),
             number: i.number,
             title: i.title.clone(),
-            state: i.state.clone(),
+            // Only shown as the icon.
+            state: if i.is_draft && i.is_open() { "draft".into() } else { i.state.clone() },
             author: author_name(&i.author, &i.original_author),
             opened: relative_time(i.created_at),
             opened_full: datetime(i.created_at),
@@ -189,6 +190,8 @@ pub(crate) struct Conversation {
     pub number: i64,
     pub title: String,
     pub state: String,
+    /// An open pull request that is still a draft.
+    pub draft: bool,
     pub author: String,
     pub opened: String,
     pub comment_count: i64,
@@ -430,6 +433,7 @@ pub(crate) async fn conversation(
         number: issue.number,
         title: issue.title.clone(),
         state: issue.state.clone(),
+        draft: issue.is_draft && issue.is_open(),
         author: author_name(&issue.author, &issue.original_author),
         opened: relative_time(issue.created_at),
         comment_count: issue.comment_count,

@@ -172,6 +172,7 @@ impl Core {
             .await?;
         tx.commit().await?;
         self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
+        self.auto_merge_soon(issue.repo_id);
         Ok(id)
     }
 

@@ -3,7 +3,7 @@
   <li class="card-row">
     <span class="state-icon state-{{ r.state }}" title="{{ r.state }}" aria-label="{{ r.state }}"></span>
     <div class="issue-main">
-      {% if !r.repo.is_empty() %}<a class="muted issue-repo" href="/{{ r.repo }}">{{ r.repo }}</a> {% endif %}<a class="issue-title" href="{{ r.url }}">{{ r.title }}</a>{% if !r.status.is_empty() %} {{ r.status|safe }}{% endif %}
+      {% if !r.repo.is_empty() %}<a class="muted issue-repo" href="/{{ r.repo }}">{{ r.repo }}</a> {% endif %}<a class="issue-title" href="{{ r.url }}">{{ r.title }}</a>{% if r.state == "draft" %} <span class="badge">Draft</span>{% endif %}{% if !r.status.is_empty() %} {{ r.status|safe }}{% endif %}
       {% for l in r.labels %}<a class="label label-{{ l.color }}" href="{{ l.url }}" title="{{ l.description }}">{{ l.name }}</a>{% endfor %}
       <div class="muted small">#{{ r.number }} opened <time title="{{ r.opened_full }}">{{ r.opened }}</time> by {{ r.author }}{% if !r.assignees.is_empty() %} · assigned to {{ r.assignees.join(", ") }}{% endif %}</div>
     </div>

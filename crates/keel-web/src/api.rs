@@ -48,6 +48,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/users/{name}/repos", get(user_repos))
         .route("/api/v1/orgs/{org}/repos", get(user_repos).post(create_org_repo))
         .route("/api/v1/repos/{owner}/{repo}", get(repo).patch(update_repo).delete(delete_repo))
+        .route("/api/v1/repos/{owner}/{repo}/generate", post(generate))
         .route("/api/v1/repos/{owner}/{repo}/branches", get(branches))
         .route("/api/v1/repos/{owner}/{repo}/branches/{*branch}", get(branch))
         .route("/api/v1/repos/{owner}/{repo}/tags", get(tags))
@@ -445,6 +446,46 @@ async fn create_repo_in(state: &AppState, user: &User, owner: &User, body: NewRe
     Ok((StatusCode::CREATED, Json(repo_value(state, &r).await?)).into_response())
 }
 
+/// Like GitHub's `POST /repos/{template}/generate`.
+#[derive(Deserialize)]
+pub struct Generate {
+    /// Who gets it (the caller by default, or one of their organizations).
+    owner: Option<String>,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    include_all_branches: bool,
+}
+
+async fn generate(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Body(body): Body<Generate>,
+) -> ApiResult {
+    let user = caller.writer()?;
+    let (template, _) = find_repo(&state, &caller, &owner, &name).await?;
+    let target = match body.owner.as_deref() {
+        Some(o) if !o.eq_ignore_ascii_case(&user.username) => state.core.user_by_name(o).await?.ok_or_else(not_found_error)?,
+        _ => user.clone(),
+    };
+    if !state.core.can_create_repo_in(&target, user).await? {
+        return Err(error(StatusCode::FORBIDDEN, format!("You can't create repositories in {}", target.username)));
+    }
+    if !template.is_template {
+        return Err(error(StatusCode::UNPROCESSABLE_ENTITY, format!("{owner}/{name} is not a template repository")));
+    }
+    let r = state
+        .core
+        .generate_repo(&template, user, &target, &body.name, &body.description, body.private, body.include_all_branches)
+        .await?;
+    state.core.repo_created_event(r.id, user, None).await?;
+    Ok((StatusCode::CREATED, Json(repo_value(&state, &r).await?)).into_response())
+}
+
 async fn create_my_repo(State(state): State<AppState>, caller: Caller, Body(body): Body<NewRepo>) -> ApiResult {
     let user = caller.writer()?;
     create_repo_in(&state, user, user, body).await
@@ -539,6 +580,7 @@ pub struct RepoUpdate {
     name: Option<String>,
     description: Option<String>,
     private: Option<bool>,
+    is_template: Option<bool>,
 }
 
 async fn update_repo(
@@ -551,6 +593,9 @@ async fn update_repo(
     need(&caller, access, Access::Admin)?;
     let description = body.description.unwrap_or_else(|| r.description.clone());
     state.core.update_repo(r.id, &description, body.private.unwrap_or(r.is_private)).await?;
+    if let Some(t) = body.is_template {
+        state.core.set_template(r.id, t).await?;
+    }
     if let Some(name) = body.name.as_deref().filter(|n| *n != r.name) {
         state.core.rename_repo(&r, name).await?;
     }
@@ -1495,6 +1540,8 @@ pub struct NewPull {
     head: String,
     /// The branch to merge into.
     base: String,
+    #[serde(default)]
+    draft: bool,
 }
 
 async fn create_pull(
@@ -1508,7 +1555,7 @@ async fn create_pull(
     let related = crate::pulls::related_repos(&state, &r, Some(user)).await?;
     let (head_repo, head) = crate::pulls::resolve_head(&related, &body.head)
         .ok_or_else(|| error(StatusCode::UNPROCESSABLE_ENTITY, format!("Unknown head “{}”", body.head)))?;
-    let i = state.core.create_pull(&r, user, &body.title, &body.body, &body.base, &head_repo, &head).await?;
+    let i = state.core.create_pull(&r, user, &body.title, &body.body, &body.base, &head_repo, &head, body.draft).await?;
     Ok((StatusCode::CREATED, Json(state.core.pull_json(&r, &i).await?)).into_response())
 }
 

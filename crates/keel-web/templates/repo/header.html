@@ -4,8 +4,10 @@
       <a href="/{{ repo.owner }}">{{ repo.owner }}</a> <span class="sep">/</span>
       <a href="/{{ repo.owner }}/{{ repo.name }}"><strong>{{ repo.name }}</strong></a>
       {% if repo.is_private %}<span class="badge">Private</span>{% endif %}
+      {% if repo.is_template %}<span class="badge">Template</span>{% endif %}
     </h1>
     <div class="spacer"></div>
+    {% if repo.is_template %}<a class="btn btn-small btn-primary use-template" href="/new?template={{ repo.owner }}/{{ repo.name }}">Use this template</a>{% endif %}
     <div class="fork-button">
       {% match repo.watching %}
       {% when Some(watching) %}
@@ -36,6 +38,7 @@
     </div>
   </div>
   {% if let Some(p) = repo.parent %}<p class="muted small forked-from">forked from <a href="/{{ p }}">{{ p }}</a></p>{% endif %}
+  {% if let Some(t) = repo.template %}<p class="muted small forked-from">generated from <a href="/{{ t }}">{{ t }}</a></p>{% endif %}
   {% if let Some(m) = repo.mirror %}
   <div class="muted small forked-from mirror-line">
     <span>mirror of <a href="{{ m.url }}" rel="nofollow noopener noreferrer" class="mono">{{ m.url }}</a> · {{ m.status }}{% if m.failed %} · <span class="overdue">last sync failed</span>{% endif %}</span>
@@ -60,6 +63,7 @@
     <a href="/{{ repo.owner }}/{{ repo.name }}/branches"{% if repo.tab == "branches" %} class="active"{% endif %}>Branches</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/releases"{% if repo.tab == "releases" %} class="active"{% endif %}>Releases{% if repo.releases > 0 %} <span class="count">{{ repo.releases }}</span>{% endif %}</a>
     {% if repo.wiki_tab %}<a href="/{{ repo.owner }}/{{ repo.name }}/wiki"{% if repo.tab == "wiki" %} class="active"{% endif %}>Wiki</a>{% endif %}
+    <a href="/{{ repo.owner }}/{{ repo.name }}/graphs/contributors"{% if repo.tab == "insights" %} class="active"{% endif %}>Insights</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/search" class="tab-search">Search</a>
     {% if repo.can_admin %}<a href="/{{ repo.owner }}/{{ repo.name }}/settings"{% if repo.tab == "settings" %} class="active"{% endif %}>Settings</a>{% endif %}
   </nav>

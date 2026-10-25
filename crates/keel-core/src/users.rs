@@ -29,6 +29,9 @@ pub struct User {
     pub avatar_type: Option<String>,
     /// Changes with every new avatar, to bust caches.
     pub avatar_version: i64,
+    /// `auto` (follow the system), `light` or `dark`.
+    #[sqlx(default)]
+    pub theme: String,
 }
 
 impl User {
@@ -36,6 +39,9 @@ impl User {
         self.kind == "org"
     }
 }
+
+/// The theme choices: follow the system, or always light or dark.
+pub const THEMES: [&str; 3] = ["auto", "light", "dark"];
 
 // Hand-written so the password hash never ends up in logs.
 impl std::fmt::Debug for User {
@@ -50,6 +56,14 @@ impl std::fmt::Debug for User {
 
 
 impl Core {
+    pub async fn set_theme(&self, user_id: i64, theme: &str) -> Result<()> {
+        if !THEMES.contains(&theme) {
+            return invalid("Unknown theme.");
+        }
+        sqlx::query("UPDATE users SET theme = ?2 WHERE id = ?1").bind(user_id).bind(theme).execute(&self.db).await?;
+        Ok(())
+    }
+
     /// Creates an account. The very first account becomes the administrator
     /// and is allowed even when registration is closed.
     pub async fn register(&self, username: &str, email: &str, password: &str) -> Result<User> {
@@ -234,7 +248,7 @@ impl Core {
             "SELECT u.id, u.username, COALESCE(u.email, '') AS email, u.password_hash, u.is_admin,
                 u.kind, u.created_at, u.email_verified_at IS NOT NULL AS email_verified, u.email_notifications,
                 u.disabled_at IS NOT NULL AS disabled, u.totp_secret IS NOT NULL AS totp_enabled,
-                u.avatar_type, u.avatar_version
+                u.avatar_type, u.avatar_version, u.theme
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.disabled_at IS NULL",
         )

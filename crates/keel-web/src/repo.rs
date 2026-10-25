@@ -111,6 +111,9 @@ pub(crate) struct RepoView {
     pub open_pulls: i64,
     /// `owner/name` of the repository this was forked from.
     pub parent: Option<String>,
+    pub is_template: bool,
+    /// `owner/name` of the template this was generated from.
+    pub template: Option<String>,
     pub fork_count: i64,
     pub watchers: i64,
     /// Whether the viewer watches it (`None` when signed out).
@@ -187,6 +190,8 @@ impl RepoView {
             wiki_tab: access >= Access::Write || state.core.has_wiki(repo.id),
             mirror,
             parent,
+            is_template: repo.is_template,
+            template: state.core.template_of(repo, viewer).await?.map(|t| format!("{}/{}", t.owner, t.name)),
             fork_count: state.core.fork_count(repo.id).await?,
             watchers: state.core.watcher_count(repo.id).await?,
             watching: match viewer {
@@ -1258,6 +1263,7 @@ pub struct SettingsForm {
     #[serde(default)]
     topics: String,
     private: Option<String>,
+    template: Option<String>,
 }
 
 pub async fn update_settings(
@@ -1270,6 +1276,7 @@ pub async fn update_settings(
     let updated = async {
         let topics = keel_core::parse_topics(&f.topics)?;
         state.core.update_repo(repo.id, &f.description, f.private.is_some()).await?;
+        state.core.set_template(repo.id, f.template.is_some()).await?;
         state.core.set_topics(repo.id, &topics).await
     };
     match updated.await {

@@ -19,6 +19,10 @@ pub struct Repo {
     /// Topics, separated by spaces; see [`topics`](Self::topics).
     pub topic_names: String,
     pub stars: i64,
+    /// Can be used to start new repositories.
+    pub is_template: bool,
+    /// The template this one was generated from, if it still exists.
+    pub template_id: Option<i64>,
 }
 
 impl Repo {
@@ -34,7 +38,7 @@ macro_rules! repo_select {
             r.is_private, r.created_at, r.updated_at, r.forked_from,
             COALESCE((SELECT group_concat(t.topic, ' ' ORDER BY t.topic) FROM repo_topics t WHERE t.repo_id = r.id), '')
               AS topic_names,
-            r.star_count AS stars
+            r.star_count AS stars, r.is_template, r.template_id
          FROM repositories r JOIN users u ON u.id = r.owner_id "
     };
 }
@@ -52,6 +56,7 @@ macro_rules! visible_to {
 mod issue_search;
 mod pins;
 mod stars;
+mod templates;
 mod topics;
 pub use issue_search::{IssueHit, IssueQuery, IssueSort, StateFilter};
 pub use pins::MAX_PINS;
@@ -167,6 +172,8 @@ impl Core {
             forked_from: fork_of.map(|r| r.id),
             topic_names: String::new(),
             stars: 0,
+            is_template: false,
+            template_id: None,
         })
     }
 

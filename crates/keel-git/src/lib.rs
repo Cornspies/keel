@@ -13,6 +13,7 @@ mod merge;
 mod mirror;
 mod push;
 mod read;
+mod stats;
 mod store;
 mod transport;
 
@@ -27,6 +28,7 @@ pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability};
 pub use mirror::{Remote, import_fetch, ls_remote, mirror_fetch, mirror_push, parse_lfs_pointer};
 pub use push::{RefChange, Refs, ref_changes};
+pub use stats::CommitStamp;
 pub use store::{backup, create_bare, fork, run_maintenance};
 pub use transport::{Service, git_command};
 

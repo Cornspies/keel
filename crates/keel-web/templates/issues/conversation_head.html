@@ -3,6 +3,6 @@
   {% if conv.can_edit %}<a class="btn btn-small" href="{{ conv.base_url }}/edit">Edit</a>{% endif %}
 </div>
 <p class="issue-meta">
-  <span class="state-badge state-{{ conv.state }}">{{ conv.state }}</span>
+  {% if conv.draft %}<span class="state-badge state-draft">draft</span>{% else %}<span class="state-badge state-{{ conv.state }}">{{ conv.state }}</span>{% endif %}
   <strong>{{ conv.author }}</strong> opened this {{ conv.opened }} · {{ conv.comment_count }} {% if conv.comment_count == 1 %}comment{% else %}comments{% endif %}
 </p>

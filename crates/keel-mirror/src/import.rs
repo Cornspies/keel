@@ -144,6 +144,7 @@ fn issue(v: &Value, pulls: &HashMap<i64, Value>, web: &str) -> Option<ImportedIs
             head_commit: p["head"]["sha"].as_str().map(str::to_owned),
             merge_commit: p["merge_commit_sha"].as_str().filter(|_| !p["merged_at"].is_null()).map(str::to_owned),
             merged_at: time(&p["merged_at"]),
+            draft: p["draft"].as_bool().unwrap_or(false),
         }
     });
     let merged = pull.as_ref().is_some_and(|p| p.merged_at.is_some());

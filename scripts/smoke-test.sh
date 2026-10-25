@@ -1038,6 +1038,77 @@ check "nobody was notified" bash -c "! curl -s -b '$T/ada' '$B/notifications' | 
 check "imports with the API" is "$(api_status "$RW" POST /repos/migrate -d "{\"clone_addr\":\"http://127.0.0.1:$GITEA_PORT/octo/engine\",\"repo_name\":\"imported2\",\"issues\":false,\"releases\":false,\"wiki\":false}")" 201
 kill "$GITEA_PID" 2>/dev/null
 
+echo "== drafts and auto-merge"
+check "create a repository for it" is "$(post "$T/ada" /new name=flow)" 303
+FLOW="http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/flow.git"
+FW=$T/flow
+git init -q -b main "$FW" && echo one >"$FW/a.txt" && git -C "$FW" add -A && git -C "$FW" commit -qm one && git -C "$FW" push -q "$FLOW" main
+git -C "$FW" checkout -q -b wip && echo two >"$FW/b.txt" && git -C "$FW" add -A && git -C "$FW" commit -qm two && git -C "$FW" push -q "$FLOW" wip
+WIP=$(git -C "$FW" rev-parse HEAD)
+check "open a draft" is "$(post "$T/ada" /ada/flow/pulls base=main head=wip title="Work in progress" draft=1)" 303
+check "it says so" contains "$(curl -s -b "$T/ada" "$B/ada/flow/pull/1")" "still a draft"
+check "lists mark it" contains "$(curl -s "$B/ada/flow/pulls")" "state-draft"
+check "search finds drafts" contains "$(curl -s "$B/ada/flow/pulls?q=is:draft")" "Work in progress"
+check "drafts can't be merged" contains "$(curl -s -b "$T/ada" -H "$O" -d style=merge "$B/ada/flow/pull/1/merge")" "still a draft"
+check "the API says it's a draft" is "$(curl -s "$API/repos/ada/flow/pulls/1" | field '["draft"]')" True
+check "bob can't mark it ready" contains "$(curl -s -b "$T/bob" -H "$O" -d x=1 "$B/ada/flow/pull/1/ready")" "Only the author"
+check "ada marks it ready" is "$(post "$T/ada" /ada/flow/pull/1/ready x=1)" 303
+check "the timeline shows it" contains "$(curl -s "$B/ada/flow/pull/1")" "marked this pull request as ready for review"
+check "require a check" is "$(post "$T/ada" /ada/flow/settings/branches pattern=main require_pull=on required_approvals=0 required_checks=ci)" 303
+check "auto-merge is offered" contains "$(curl -s -b "$T/ada" "$B/ada/flow/pull/1")" "Enable auto-merge"
+check "turn it on" is "$(post "$T/ada" /ada/flow/pull/1/auto-merge style=squash delete_branch=on)" 303
+check "it waits for the check" contains "$(curl -s "$B/ada/flow/pull/1")" "Auto-merge is on"
+check "the API shows it" is "$(curl -s "$API/repos/ada/flow/pulls/1" | field '["auto_merge"]["merge_method"]')" squash
+check "CI passes" is "$(api_status "$RW" POST "/repos/ada/flow/statuses/$WIP" -d '{"state":"success","context":"ci"}')" 201
+automerged() { for _ in $(seq 1 50); do curl -s "$B/ada/flow/pull/1" | grep -q "state-badge state-merged" && return 0; sleep 0.1; done; return 1; }
+check "and it merges by itself" automerged
+check "as whoever turned it on" contains "$(curl -s "$B/ada/flow/pull/1")" "<strong>ada</strong> merged"
+git -C "$FW" fetch -q "$FLOW" main
+check "squashed" is "$(git -C "$FW" log -1 --format=%s FETCH_HEAD)" "Work in progress (#1)"
+check "and the branch is gone" is "$(git ls-remote "$B/ada/flow.git" refs/heads/wip | wc -l)" 0
+git -C "$FW" checkout -q -b later FETCH_HEAD && echo three >"$FW/c.txt" && git -C "$FW" add -A && git -C "$FW" commit -qm three && git -C "$FW" push -q "$FLOW" later
+check "open drafts with the API" is "$(api "$RW" POST /repos/ada/flow/pulls -d '{"title":"Later","head":"later","base":"main","draft":true}' | field '["draft"]')" True
+check "turning it off again" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$T/ada' -H '$O' -d x=1 '$B/ada/flow/pull/2/ready')\" = 303 ] && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$T/ada' -H '$O' -d style=merge '$B/ada/flow/pull/2/auto-merge')\" = 303 ] && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$T/ada' -H '$O' -d x=1 '$B/ada/flow/pull/2/auto-merge/disable')\" = 303 ]"
+check "is in the timeline" contains "$(curl -s "$B/ada/flow/pull/2")" "disabled auto-merge"
+
+echo "== repository templates"
+check "make flow a template" is "$(post "$T/ada" /ada/flow/settings description=Starter template=on)" 303
+check "people can use it" contains "$(curl -s -b "$T/bob" "$B/ada/flow")" "Use this template"
+check "the form picks it" contains "$(curl -s -b "$T/bob" "$B/new?template=ada/flow")" "<option selected>ada/flow</option>"
+check "bob starts from it" is "$(post "$T/bob" /new template=ada/flow name=myflow)" 303
+check "with its files" is "$(curl -s "$B/bob/myflow/raw/main/b.txt")" two
+git clone -q "$B/bob/myflow.git" "$T/myflow"
+check "but not its history" is "$(git -C "$T/myflow" rev-list --count HEAD)" 1
+check "nor its other branches" is "$(git -C "$T/myflow" branch -r | grep -vc HEAD)" 1
+check "the commit is bob's" is "$(git -C "$T/myflow" log -1 --format='%an %s')" "bob Initial commit"
+check "it says where it's from" contains "$(curl -s "$B/bob/myflow")" 'generated from <a href="/ada/flow">'
+check "with the API, with all branches" is "$(api "$RW" POST /repos/ada/flow/generate -d '{"name":"flow2","include_all_branches":true}' | field '["full_name"]')" ada/flow2
+check "which are all there" is "$(git ls-remote "$B/ada/flow2.git" 'refs/heads/*' | wc -l)" 2
+check "other repositories aren't templates" is "$(api_status "$RW" POST /repos/ada/tracker/generate -d '{"name":"x"}')" 422
+check "private templates stay private" is "$(post "$T/eve2" /new template=ada/secret name=peek)" 404
+
+echo "== insights"
+post "$T/ada" /new name=blank >/dev/null
+check "contributors graph" contains "$(curl -s "$B/ada/engine/graphs/contributors")" '<svg class="chart"'
+check "linked to accounts" contains "$(curl -s "$B/ada/engine/graphs/contributors")" '<a href="/ada">Ada</a>'
+check "commit activity" contains "$(curl -s "$B/ada/engine/graphs/commit-activity")" "in the last year"
+check "with a bar per week" contains "$(curl -s "$B/ada/engine/graphs/commit-activity")" "<title>"
+check "empty repositories" contains "$(curl -s -b "$T/ada" "$B/ada/blank/graphs/contributors")" "No commits yet"
+check "private ones are hidden" is "$(status "$B/ada/secret/graphs/contributors")" 404
+
+echo "== theme"
+check "pages follow the system" bash -c "! curl -s '$B/explore' | grep -q 'data-theme'"
+check "visitors pick one" is "$(curl -s -o /dev/null -w '%{redirect_url}' -c "$T/visitor" -H "$O" -H "Referer: $B/explore" -d theme=dark "$B/theme")" "$B/explore"
+check "it's remembered" contains "$(curl -s -b "$T/visitor" "$B/explore")" '<html lang="en" data-theme="dark">'
+check "the switch shows it" contains "$(curl -s -b "$T/visitor" "$B/explore")" 'value="dark" aria-pressed="true"'
+check "the script needs no redirect" is "$(curl -s -o /dev/null -w '%{http_code}' -H "$O" -d theme=light -d js=1 "$B/theme")" 204
+check "accounts keep theirs" is "$(post "$T/bob" /theme theme=light)" 303
+grep -v keel_theme "$T/bob" >"$T/bob-elsewhere"
+check "on other devices too" contains "$(curl -s -b "$T/bob-elsewhere" "$B/")" 'data-theme="light"'
+check "back to the system's" is "$(post "$T/bob" /theme theme=auto)" 303
+CSS=$(curl -s "$B/" | grep -o 'href="/static/style.css[^"]*"' | cut -d'"' -f2)
+check "the styles know both" bash -c "curl -s '$B$CSS' | grep -q ':root\[data-theme=\"dark\"\] .hl-comment'"
+
 echo "== pages"
 for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
@@ -1049,6 +1120,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /explore "/explore?sort=name&page=2" /ada/engine/stargazers "/ada?tab=stars" /ada/tracker/issues/new /ada/tracker/new/main/docs \
     /ada/tracker/upload/main /ada/tracker/edit/main/docs/README.md /ada/tracker/delete/main/docs/README.md \
     /issues /pulls "/pulls?q=is:pr" "/ada/engine/pulls?q=is:closed" /settings/profile /new/import /ada/imported /ada/imported/pulls?q=is:merged \
+    /ada/engine/graphs/contributors /ada/engine/graphs/commit-activity /ada/flow/pull/1 /ada/flow/pull/2 "/new?template=ada/flow" \
     /ada/engine/wiki /ada/engine/wiki/_pages /ada/engine/wiki/_new /ada/engine/wiki/Home/edit /ada/engine/wiki/Home/history /ada/engine/wiki/_Sidebar; do
     check "GET $p" is "$(status -b "$T/ada" "$B$p")" 200
 done

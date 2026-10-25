@@ -29,6 +29,9 @@ pub struct Issue {
     /// Imported: the author's profile where it came from.
     #[sqlx(default)]
     pub original_author: Option<String>,
+    /// A pull request that is still a draft.
+    #[sqlx(default)]
+    pub is_draft: bool,
 }
 
 impl Issue {
@@ -52,7 +55,8 @@ pub struct Comment {
     /// `reopened`, `merged`, `labeled`, `unlabeled`, `assigned`,
     /// `unassigned`, `review_requested`, `review_request_removed`,
     /// `milestoned`, `demilestoned` (the body is the label, user or
-    /// milestone name).
+    /// milestone name), `ready_for_review`, `converted_to_draft`,
+    /// `auto_merge_enabled`, `auto_merge_disabled`.
     pub kind: String,
     pub body: String,
     pub created_at: i64,
@@ -100,7 +104,8 @@ pub struct IssueCounts {
 macro_rules! issue_select {
     () => {
         "SELECT i.id, i.repo_id, i.number, i.author_id, u.username AS author, i.title, i.body,
-            i.is_pull, i.state, i.comment_count, i.created_at, i.updated_at, i.closed_at, i.original_author
+            i.is_pull, i.state, i.comment_count, i.created_at, i.updated_at, i.closed_at, i.original_author,
+            i.is_pull AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.issue_id = i.id AND p.is_draft) AS is_draft
          FROM issues i LEFT JOIN users u ON u.id = i.author_id "
     };
 }

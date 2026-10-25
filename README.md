@@ -19,6 +19,7 @@ One binary, one data directory, no external services.
   you like, and find them by topic, name or description, or by popularity.
 - **Activity feed** on the home page (repositories you watch) and on
   profiles.
+- **Insights:** contributor and commit activity graphs.
 - **Code search** across all repositories you can see, or within one on any
   branch; substrings or regular expressions.
 - **Issues and pull requests:** shared numbering, Markdown with `#123` and
@@ -30,13 +31,17 @@ One binary, one data directory, no external services.
   comments on lines of the diff (with replies, marked outdated once the line
   changes), suggested changes that can be applied with one click, approvals
   and change requests, and merging with a merge commit or squash, with
-  conflict detection.
+  conflict detection. Draft pull requests can't be merged until they're
+  marked ready for review; auto-merge merges once checks pass and reviews are
+  in.
 - **Branch protection:** require pull requests, a number of approvals and
   passing checks, and refuse force pushes and deletion, for branches by name
   or pattern.
 - **Commit statuses:** CI reports results through the API (GitHub's status
   API); they show on commits, branches and pull requests.
 - **Forks** that are created instantly and share disk space with the original.
+- **Templates:** mark a repository as a template, and start new ones with a
+  copy of its files (without its history) and its labels.
 - **Mirrors:** pull mirrors of repositories hosted elsewhere (GitHub,
   GitLab, …), kept in sync on a schedule, and push mirrors that get every
   change, both with their Git LFS files.
@@ -62,6 +67,8 @@ One binary, one data directory, no external services.
 - **Administration:** a page for site administrators with statistics,
   accounts (create, disable, delete, grant admin), all repositories, closing
   sign-ups and a notice on every page.
+- **Light and dark themes** that follow the system, or that people pick with
+  the switch at the bottom of every page.
 - **JSON API** in the style of GitHub's, with personal access tokens.
 
 CI is not built in: connect one with a webhook, and let it report back with
@@ -174,7 +181,8 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | --- | --- |
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
-| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private` |
+| `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template` |
+| `POST /repos/{owner}/{repo}/generate` | from a template: `owner`, `name`, `description`, `private`, `include_all_branches` |
 | `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
 | `GET /search/repositories` | `q` (words, and `topic:x`), `sort` (`updated`, `stars`, `created`, `watchers`, `name`) |
 | `GET /user/starred`, `GET /users/{name}/starred`, `GET /repos/{owner}/{repo}/stargazers` | |
@@ -194,8 +202,8 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET`, `POST /repos/{owner}/{repo}/issues/{n}/comments` | |
 | `GET`, `POST /repos/{owner}/{repo}/issues/{n}/reactions`, `DELETE …/reactions/{id}` | `content`: `+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`, `rocket`, `eyes` |
 | `GET`, `POST /repos/{owner}/{repo}/issues/comments/{id}/reactions` (or `pulls/comments`), `DELETE …/reactions/{id}` | the same |
-| `GET`, `POST /repos/{owner}/{repo}/pulls` | `title`, `body`, `head` (`branch` or `owner:branch`), `base` |
-| `GET /repos/{owner}/{repo}/pulls/{n}` | adds `approvals`, `required_approvals`, `merge_blocked_by` |
+| `GET`, `POST /repos/{owner}/{repo}/pulls` | `title`, `body`, `head` (`branch` or `owner:branch`), `base`, `draft` |
+| `GET /repos/{owner}/{repo}/pulls/{n}` | with `draft` and `auto_merge`; adds `approvals`, `required_approvals`, `merge_blocked_by` |
 | `POST /repos/{owner}/{repo}/pulls/{n}/reviews` | `event`: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` |
 | `PUT /repos/{owner}/{repo}/pulls/{n}/merge` | `merge_method`: `merge` or `squash`; `delete_branch` |
 | `GET`, `POST /repos/{owner}/{repo}/releases` | `tag_name`, `target_commitish`, `name`, `body`, `draft`, `prerelease` |
@@ -230,7 +238,8 @@ crates/
               queue and payloads, push events, site administration, Git LFS
               storage, wikis, topics, stars, reactions, issue templates,
               commits from the browser, issue search, avatars, pins,
-              imports, backups
+              imports, drafts and auto-merge, templates, commit counts for
+              graphs, backups
   keel-git    reading repositories (libgit2 + git CLI), diffs, merging,
               repo creation and maintenance, upload-pack/receive-pack commands
   keel-search trigram code search index (tantivy)
@@ -251,10 +260,10 @@ scripts/
 ## Design notes
 
 **Pages are rendered on the server** with compile-time-checked askama
-templates. There is no frontend build. The ~100 lines of JavaScript
+templates. There is no frontend build. The ~150 lines of JavaScript
 only add conveniences (copy buttons, late-loaded commit info, opening the
-line-comment form in place, starting a suggested change), so every page works
-without them.
+line-comment form in place, starting a suggested change, reactions and the
+theme switch without a reload), so every page works without them.
 
 **git itself serves clones and pushes.** keel authenticates and
 authorizes, then streams request and response bodies straight into and out of
@@ -476,6 +485,32 @@ pull request's branch without a working tree (a new blob, tree and commit
 with libgit2, then a compare-and-swap ref update), as the person applying it,
 if they can push there and the file hasn't changed since.
 
+**Auto-merge** is turned on by someone with write access, and merges as
+them, the way they chose, once nothing blocks it: it's checked again when a
+status is reported, a review is given or a branch moves (in the background,
+one merge at a time). If they lose write access it turns itself off; marking
+the pull request a draft turns it off too. Like GitHub, it's only offered
+while branch rules block merging; otherwise there's the merge button.
+
+**Templates** are copied without history: the files of the template's
+default branch (or every branch) are packed with libgit2 straight from the
+template into the new repository, and each branch gets a single "Initial
+commit" by whoever generated it. Labels and Git LFS files come along.
+
+**Graphs** count the default branch's commits (without merges, names and
+emails through `.mailmap`) per day and author with one `git log`, and keep
+the counts in memory; after a push only the new commits are counted, unless
+the branch was rewritten. Commits belong to an account by its verified
+email (or any email, if the server can't send mail to verify them). The
+charts are SVG drawn on the server, with a tooltip per bar, so they need no
+JavaScript.
+
+**The theme** is a `data-theme` attribute on the page, which the stylesheet's
+color tokens (and the syntax highlighting) follow; without it the system
+setting decides. The choice is kept in a cookie, so it works signed out, and
+with the account, so it follows people to other devices. The script applies
+it in place; without the script the form reloads the page.
+
 **Labels** come from a fixed palette of ten colors, so they read well in light
 and dark mode without inline styles (which the Content Security Policy
 forbids). New repositories start with six common labels.
@@ -533,6 +568,8 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 | Commit list | ~20 ms |
 | File history | ~50 ms |
 | Commit with diff | ~5 ms |
+| Contributors graph (first view; after a push only new commits are counted) | ~7 ms (~375 ms) |
+| Commit activity graph | ~2 ms |
 
 ## Security
 
@@ -586,8 +623,8 @@ run automatically at startup.
 
 ## Ideas
 
-- Draft pull requests, and merging automatically once checks pass and
-  reviews are in.
-- Repository templates ("Use this template").
-- Contributors and commit activity graphs.
-- A light/dark theme switch (besides following the system).
+- Rebase and merge, as a third way to merge pull requests.
+- Verified commits: check SSH and GPG commit signatures against the keys
+  people added, and show which commits are verified.
+- Archiving repositories: read-only, and out of the way on Explore.
+- Project boards: issues and pull requests in columns.

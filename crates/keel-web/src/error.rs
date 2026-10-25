@@ -35,6 +35,8 @@ internal_from!(anyhow::Error, keel_git::Error, askama::Error, tokio::task::JoinE
 #[template(path = "error.html")]
 struct ErrorPage<'a> {
     css_url: &'static str,
+    /// From the theme cookie; the account isn't known here.
+    theme: &'static str,
     status: u16,
     title: &'a str,
     message: &'a str,
@@ -65,6 +67,7 @@ impl IntoResponse for AppError {
         };
         let page = ErrorPage {
             css_url: crate::assets::css_url(),
+            theme: crate::theme::current(None),
             status: status.as_u16(),
             title,
             message,

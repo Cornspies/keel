@@ -219,6 +219,15 @@ struct NewRepoPage {
     is_private: bool,
     mirror_url: String,
     intervals: &'static [(i64, &'static str)],
+    /// Templates to start from, as `owner/name`, and the one chosen.
+    templates: Vec<String>,
+    template: String,
+    all_branches: bool,
+}
+
+/// Templates `user` can start from, as `owner/name`.
+async fn template_names(state: &AppState, user: &User) -> AppResult<Vec<String>> {
+    Ok(state.core.templates(user).await?.into_iter().map(|t| format!("{}/{}", t.owner, t.name)).collect())
 }
 
 pub(crate) async fn possible_owners(state: &AppState, user: &User) -> AppResult<Vec<String>> {
@@ -230,6 +239,8 @@ pub(crate) async fn possible_owners(state: &AppState, user: &User) -> AppResult<
 #[derive(Deserialize)]
 pub struct OwnerQuery {
     owner: Option<String>,
+    /// `owner/name` of a template to start from.
+    template: Option<String>,
 }
 
 pub async fn new_repo_form(
@@ -242,6 +253,11 @@ pub async fn new_repo_form(
         .owner
         .and_then(|o| owners.iter().find(|x| x.eq_ignore_ascii_case(&o)).cloned())
         .unwrap_or_else(|| user.username.clone());
+    let templates = template_names(&state, &user).await?;
+    let template = q
+        .template
+        .and_then(|t| templates.iter().find(|x| x.eq_ignore_ascii_case(&t)).cloned())
+        .unwrap_or_default();
     html(NewRepoPage {
         page: Page::new(&state, Some(user), "New repository"),
         error: None,
@@ -252,6 +268,9 @@ pub async fn new_repo_form(
         is_private: false,
         mirror_url: String::new(),
         intervals: keel_core::MIRROR_INTERVALS,
+        templates,
+        template,
+        all_branches: false,
     })
 }
 
@@ -269,6 +288,9 @@ pub struct NewRepoForm {
     #[serde(default)]
     mirror_password: String,
     mirror_interval: Option<i64>,
+    #[serde(default)]
+    template: String,
+    all_branches: Option<String>,
 }
 
 pub async fn new_repo(
@@ -286,7 +308,18 @@ pub async fn new_repo(
     if !state.core.can_create_repo_in(&owner, &user).await? {
         return Err(AppError::Forbidden);
     }
-    let created = if f.mirror_url.trim().is_empty() {
+    let template = match f.template.split_once('/') {
+        Some((o, n)) => Some(state.core.repo(o, n).await?.ok_or(AppError::NotFound)?),
+        None => None,
+    };
+    let created = if let Some(template) = &template {
+        if f.mirror_url.trim().is_empty() {
+            let all = f.all_branches.is_some();
+            state.core.generate_repo(template, &user, &owner, &f.name, &f.description, is_private, all).await
+        } else {
+            Err(keel_core::Error::Invalid("Choose either a template or a repository to mirror.".into()))
+        }
+    } else if f.mirror_url.trim().is_empty() {
         state.core.create_repo(&owner, &f.name, &f.description, is_private).await
     } else {
         let interval = f.mirror_interval.unwrap_or(8 * 3600);
@@ -304,6 +337,7 @@ pub async fn new_repo(
         }
         Err(keel_core::Error::Invalid(msg)) => html(NewRepoPage {
             owners: possible_owners(&state, &user).await?,
+            templates: template_names(&state, &user).await?,
             owner: owner.username,
             page: Page::new(&state, Some(user), "New repository"),
             error: Some(msg),
@@ -312,6 +346,8 @@ pub async fn new_repo(
             is_private,
             mirror_url: f.mirror_url,
             intervals: keel_core::MIRROR_INTERVALS,
+            template: f.template,
+            all_branches: f.all_branches.is_some(),
         }),
         Err(e) => Err(e.into()),
     }

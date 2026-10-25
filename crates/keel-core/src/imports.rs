@@ -150,6 +150,7 @@ pub struct ImportedPull {
     pub head_commit: Option<String>,
     pub merge_commit: Option<String>,
     pub merged_at: Option<i64>,
+    pub draft: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,8 +461,8 @@ impl Core {
         }
         if let Some(p) = &i.pull {
             sqlx::query(
-                "INSERT INTO pull_requests (issue_id, base_ref, head_ref, head_repo_id, head_commit, merge_commit, merged_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO pull_requests (issue_id, base_ref, head_ref, head_repo_id, head_commit, merge_commit, merged_at, is_draft)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .bind(id)
             .bind(&p.base_ref)
@@ -470,6 +471,7 @@ impl Core {
             .bind(&p.head_commit)
             .bind(&p.merge_commit)
             .bind(p.merged_at)
+            .bind(p.draft)
             .execute(&mut *tx)
             .await?;
         }

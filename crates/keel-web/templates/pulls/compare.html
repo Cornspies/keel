@@ -27,7 +27,10 @@
       <label>Title <input name="title" value="{{ title }}" maxlength="256" required></label>
       <label>Description <textarea name="body" rows="8" placeholder="What does this change and why? Markdown is supported.">
 {{ body }}</textarea></label>
-      <button class="btn btn-primary">Create pull request</button>
+      <div class="row-actions">
+        <button class="btn btn-primary">Create pull request</button>
+        <button class="btn" name="draft" value="1" title="Can't be merged until it's marked ready for review">Create draft</button>
+      </div>
     </form>
   </div>
   {% else %}

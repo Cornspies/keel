@@ -21,7 +21,8 @@ pub fn warm_up() {
     LazyLock::force(&SYNTAXES);
 }
 
-/// CSS for highlighted code, following the OS light/dark preference.
+/// CSS for highlighted code, following the OS light/dark preference unless
+/// the page picks one (`data-theme`, like the site's colors).
 pub fn highlight_css() -> String {
     let themes = two_face::theme::extra();
     let light = css_for_theme_with_class_style(themes.get(EmbeddedThemeName::OneHalfLight), CLASS_STYLE)
@@ -35,11 +36,28 @@ pub fn highlight_css() -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let dark = strip(dark);
     format!(
-        "{}\n@media (prefers-color-scheme: dark) {{\n{}\n}}\n",
+        "{}\n@media (prefers-color-scheme: dark) {{\n{}\n}}\n{}\n",
         strip(light),
-        strip(dark)
+        scope_css(&dark, ":root:not([data-theme=\"light\"])"),
+        scope_css(&dark, ":root[data-theme=\"dark\"]")
     )
+}
+
+/// Puts `scope` in front of every selector of `css` (as syntect writes it:
+/// selectors on the line that opens a rule).
+fn scope_css(css: &str, scope: &str) -> String {
+    css.lines()
+        .map(|line| match line.strip_suffix('{') {
+            Some(selectors) if !line.trim_start().starts_with(['/', '*']) => {
+                let scoped: Vec<String> = selectors.split(',').map(|s| format!("{scope} {}", s.trim())).collect();
+                format!("{} {{", scoped.join(", "))
+            }
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Highlights `text` and returns one self-contained HTML fragment per line,
@@ -417,6 +435,14 @@ pub fn human_size(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlight_css_follows_the_theme_switch() {
+        let css = highlight_css();
+        assert!(css.contains(":root[data-theme=\"dark\"] .hl-comment"), "{css}");
+        assert!(css.contains(":root:not([data-theme=\"light\"]) .hl-comment"));
+        assert_eq!(scope_css(".a, .b.c {\n color: red;\n}", "S"), "S .a, S .b.c {\n color: red;\n}");
+    }
 
     #[test]
     fn highlighted_lines_are_balanced() {

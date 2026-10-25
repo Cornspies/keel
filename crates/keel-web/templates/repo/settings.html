@@ -8,6 +8,7 @@
     <label>Description <input name="description" value="{{ repo.description }}"></label>
     <label>Topics <input name="topics" value="{{ repo.topics|join(" ") }}" placeholder="e.g. rust web cli" autocomplete="off"> <span class="hint">Separated by spaces. Lowercase letters, digits and hyphens. People find repositories by topic on the <a href="/explore">Explore</a> page.</span></label>
     <label class="check"><input type="checkbox" name="private" {% if repo.is_private %}checked{% endif %}> Private <span class="hint">Only you can see and clone it.</span></label>
+    <label class="check"><input type="checkbox" name="template" {% if repo.is_template %}checked{% endif %}> Template repository <span class="hint">People who can see it can start new repositories with a copy of its files and labels.</span></label>
     <button class="btn btn-primary">Save</button>
   </form>
 

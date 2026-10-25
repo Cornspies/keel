@@ -1,0 +1,4 @@
+<nav class="state-tabs sub-tabs insights-tabs">
+  <a href="/{{ repo.owner }}/{{ repo.name }}/graphs/contributors"{% if tab == "contributors" %} class="active"{% endif %}>Contributors</a>
+  <a href="/{{ repo.owner }}/{{ repo.name }}/graphs/commit-activity"{% if tab == "commits" %} class="active"{% endif %}>Commit activity</a>
+</nav>

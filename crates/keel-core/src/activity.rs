@@ -44,6 +44,10 @@ pub enum IssueAction {
     Demilestoned(Milestone),
     /// A pull request's head moved.
     Synchronized,
+    ReadyForReview,
+    ConvertedToDraft,
+    AutoMergeEnabled,
+    AutoMergeDisabled,
 }
 
 /// A Unix time as an RFC 3339 string.
@@ -92,6 +96,7 @@ impl Core {
             IssueAction::Closed => Some(("closed", "", None)),
             IssueAction::Reopened => Some(("reopened", "", None)),
             IssueAction::Merged => Some(("merged", "", None)),
+            IssueAction::ReadyForReview => Some(("marked ready for review", "", None)),
             IssueAction::Assigned(user) => Some(("assigned you", "", Some((user.id, "assigned")))),
             IssueAction::ReviewRequested(user) => {
                 Some(("requested your review", "", Some((user.id, "review_requested"))))
@@ -130,6 +135,10 @@ impl Core {
             IssueAction::Milestoned(m) => ("milestoned", Some(("milestone", self.milestone_json(m)))),
             IssueAction::Demilestoned(m) => ("demilestoned", Some(("milestone", self.milestone_json(m)))),
             IssueAction::Synchronized => ("synchronize", None),
+            IssueAction::ReadyForReview => ("ready_for_review", None),
+            IssueAction::ConvertedToDraft => ("converted_to_draft", None),
+            IssueAction::AutoMergeEnabled => ("auto_merge_enabled", None),
+            IssueAction::AutoMergeDisabled => ("auto_merge_disabled", None),
         };
         let mut payload = json!({
             "action": name,
@@ -359,6 +368,7 @@ impl Core {
             "owner": { "id": r.owner_id, "login": r.owner, "html_url": format!("{}/{}", self.config.base_url, r.owner) },
             "private": r.is_private,
             "fork": r.forked_from.is_some(),
+            "is_template": r.is_template,
             "description": r.description,
             "topics": r.topics().collect::<Vec<_>>(),
             "stargazers_count": r.stars,
@@ -532,6 +542,14 @@ impl Core {
         v["merged_at"] = merged_at.map_or(Value::Null, time);
         v["merged_by"] = merged_by.as_deref().map_or(Value::Null, |m| self.login_json(Some(m)));
         v["merge_commit_sha"] = json!(merge_commit);
+        v["draft"] = json!(pull.is_draft);
+        v["auto_merge"] = match &pull.auto_merge_by {
+            Some(by) => json!({
+                "enabled_by": self.login_json(Some(by)),
+                "merge_method": pull.auto_merge_style,
+            }),
+            None => Value::Null,
+        };
         v["head"] = side(head_repo.as_ref(), &pull.head_ref, head_sha, pull.head_label(issue));
         let reviewers = self.review_requests(issue.id).await?;
         v["requested_reviewers"] = reviewers.iter().map(|(_, name)| self.login_json(Some(name))).collect();

@@ -5,6 +5,13 @@
   <p class="muted">Moving a project from GitHub or Gitea? <a href="/new/import">Import it</a> with its issues, pull requests and releases.</p>
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/new" class="form">
+    {% if !templates.is_empty() %}
+    <label>Template <select name="template">
+      <option value="">No template</option>
+      {% for t in templates %}<option{% if *t == template %} selected{% endif %}>{{ t }}</option>{% endfor %}
+    </select> <span class="hint">Start with a copy of a template's files (without its history) and labels.</span></label>
+    <label class="check"><input type="checkbox" name="all_branches"{% if all_branches %} checked{% endif %}> Include all branches of the template <span class="hint">Otherwise only its default branch.</span></label>
+    {% endif %}
     <label>Name
       <span class="prefixed">
         {% if owners.len() > 1 %}
