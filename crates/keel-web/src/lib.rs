@@ -5,6 +5,7 @@ mod admin;
 mod api;
 mod archive;
 mod assets;
+mod blame;
 mod edit;
 mod error;
 mod explore;
@@ -80,6 +81,10 @@ pub struct Inner {
     last_commits: Cache<(Oid, String), Arc<HashMap<String, CommitSummary>>>,
     highlighted: Cache<(Oid, String), Arc<Vec<String>>>,
     markdown: Cache<(Oid, String), Arc<String>>,
+    /// Blame per (commit, path).
+    blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
+    /// Limits how many blames run at once.
+    blame_slots: tokio::sync::Semaphore,
     /// Merge result per (base, head); `None` if head is already merged.
     mergeability: Cache<(Oid, Oid), Option<keel_git::Mergeability>>,
     /// Unread notifications per user id, looked up with the session on each
@@ -128,6 +133,14 @@ impl AppState {
                 .max_capacity(mib(32))
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
+            blames: Cache::builder()
+                .max_capacity(mib(64))
+                .weigher(|_, v: &Arc<keel_git::Blame>| {
+                    let commits: usize = v.commits.values().map(|c| c.summary.len() + c.author.len() + c.email.len() + 64).sum();
+                    (v.hunks.iter().map(|h| h.orig_path.len() + 96).sum::<usize>() + commits).min(u32::MAX as usize) as u32
+                })
+                .build(),
+            blame_slots: tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get().div_ceil(2))),
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
             started: std::time::Instant::now(),
@@ -248,6 +261,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/tree/{*rest}", get(repo::tree))
         .route("/{owner}/{repo}/blob/{*rest}", get(repo::blob))
         .route("/{owner}/{repo}/raw/{*rest}", get(repo::raw))
+        .route("/{owner}/{repo}/blame/{*rest}", get(blame::blame))
         .route("/{owner}/{repo}/archive/{*rest}", get(archive::download))
         .route("/{owner}/{repo}/last-commits/{*rest}", get(repo::last_commits_json))
         .route("/{owner}/{repo}/commits", get(repo::commits_default))

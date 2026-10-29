@@ -148,6 +148,15 @@ check "adding SSH keys needs the password" contains "$(curl -s -b "$T/ada" -H "$
 check "add SSH key" is "$(post "$T/ada" /settings/keys "key=$(cat "$T/key.pub")" password=password-ada)" 303
 echo ssh >>"$W/README.md" && git -C "$W" commit -qam "Over SSH"
 check "push over SSH" git -C "$W" push -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" main
+
+echo "== blame"
+page=$(curl -s "$B/ada/engine/blame/main/README.md")
+check "blame names each line's commit" contains "$page" '>Initial commit</a>'
+check "for every commit that changed it" contains "$page" '>Over SSH</a>'
+check "and links to the blame before it" contains "$page" 'class="blame-prior" href="/ada/engine/blame/'
+check "files link to their blame" contains "$(curl -s "$B/ada/engine/blob/main/README.md")" '/ada/engine/blame/main/README.md'
+check "directories go to the tree" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/blame/main/src")" "$B/ada/engine/tree/main/src"
+check "private repositories stay hidden" is "$(status "$B/ada/secret/blame/main/README.md")" 404
 check "clone over SSH" git clone -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/c3"
 
 echo "== collaborators"
@@ -1276,7 +1285,7 @@ check "and their cards' repositories" is "$(api "$RW" GET /orgs/acme/projects/1 
 check "issue search finds them" is "$(api "$RW" GET "/search/issues?q=project:acme/1" | field '["total_count"]')" 1
 
 echo "== pages"
-for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
+for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs /ada/engine/blame/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \

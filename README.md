@@ -9,7 +9,9 @@ One binary, one data directory, no external services.
   and over a built-in SSH server.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
-  `.tar.gz`.
+  `.tar.gz`. Blame shows the commit that last changed each line, links to the
+  blame before it, and skips the commits listed in `.git-blame-ignore-revs`
+  (as on GitHub).
 - **Verified commits:** commits signed with SSH or GPG keys people added show
   as verified (or say why not), and so do the commits keel makes itself
   (merges, squashes, rebases, edits in the browser), signed with its own key.
@@ -675,7 +677,15 @@ maintenance): cache warming, search indexing and pull request updates.
 
 **Caches are keyed by git object ids**, so they never need invalidation, only
 a size bound: last commits per (commit, directory), highlighted files per
-blob, rendered Markdown per blob.
+blob, rendered Markdown per blob, blame per (commit, file).
+
+**Blame** runs `git blame --incremental`, which skips commits that didn't
+touch the file using the commit-graph's changed-path Bloom filters, and
+follows renames. It's the costliest page on a long history and anyone who can
+read the repository can ask for it, so blames run at most one per two CPUs at
+a time (others wait their turn), stop after 20 seconds (the page then says so
+and links to the file's history), and links to blame pages are `nofollow`
+for crawlers. Binary files, Git LFS files and files over 2 MiB aren't blamed.
 
 **Rendering work is bounded:** syntax highlighting stops at 256 KiB, file
 display at 2 MiB, and diffs at 300 files / 10,000 lines.
@@ -689,6 +699,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 | File view, highlighted (7,860 lines; first view) | ~30 ms (~350 ms) |
 | Commit list | ~20 ms |
 | File history | ~50 ms |
+| Blame (`diff.c`, 7,860 lines; first view) | ~35 ms (~2 s) |
 | Commit with diff | ~5 ms |
 | Contributors graph (first view; after a push only new commits are counted) | ~7 ms (~375 ms) |
 | Commit activity graph | ~2 ms |
