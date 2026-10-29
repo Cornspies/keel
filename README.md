@@ -6,7 +6,8 @@ One binary, one data directory, no external services.
 **Features:**
 
 - **Git hosting:** clone, fetch and push over HTTP (password or access token)
-  and over a built-in SSH server.
+  and over a built-in SSH server. Deploy keys give servers and CI SSH access
+  to one repository, read-only or with pushing.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
   `.tar.gz`. Blame shows the commit that last changed each line, links to the
@@ -303,6 +304,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
 | `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`) |
+| `GET`, `POST /repos/{owner}/{repo}/keys`, `GET`, `DELETE …/keys/{id}` | deploy keys, for repository admins: `title`, `key`, `read_only` (unlike GitHub's, `true` unless set to `false`) |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template`, `archived` |
 | `POST /repos/{owner}/{repo}/generate` | from a template: `owner`, `name`, `description`, `private`, `include_all_branches` |
 | `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
@@ -753,6 +755,17 @@ Webhooks don't follow redirects or use proxies. Unless
 or other internal addresses: names are resolved by keel and checked on the
 addresses actually connected to, so a hostname pointing at an internal address
 doesn't get around it.
+
+**Deploy keys** are SSH keys of a repository rather than of a person, for
+servers and CI: Settings → Deploy keys, or the API. A key reaches only its
+repository (not its wiki), only reads unless it's allowed to push, and
+pushes with it follow the branch protection rules like anyone's (pushes by
+a deploy key have no pusher in the activity feed and webhooks, like a
+mirror's). A key can be one repository's deploy key, or someone's SSH key,
+but not both, so it always means one thing. Git LFS works with them over
+SSH (`git-lfs-authenticate` hands out a token for the key); locking files
+doesn't, since a lock belongs to a person, and to a deploy key every lock is
+someone else's.
 
 **Permissions:** a user's access to a repository is the highest of: admin for
 the owner, organization owners and site admins; write for organization

@@ -64,6 +64,9 @@ pub fn parse_public_key(line: &str) -> Result<ParsedKey> {
 impl Core {
     pub async fn add_ssh_key(&self, user_id: i64, name: &str, key: &str) -> Result<SshKey> {
         let parsed = parse_public_key(key)?;
+        if self.deploy_key_exists(&parsed.fingerprint).await? {
+            return invalid("This key is a repository's deploy key. Use another key for your account.");
+        }
         let name = match name.trim() {
             "" if parsed.comment.is_empty() => "SSH key",
             "" => parsed.comment.as_str(),

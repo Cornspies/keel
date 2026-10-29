@@ -236,8 +236,22 @@ impl Core {
         Ok(self.user_by_id(user_id).await?.filter(|u| !u.disabled).map(|u| (u, write)))
     }
 
-    /// The subject (a user) and the write bit of a valid, unexpired token
-    /// of kind `tag` for `repo`.
+    /// An LFS token for a deploy key (`git-lfs-authenticate` over SSH).
+    pub fn lfs_deploy_token(&self, key: &crate::DeployKey, write: bool) -> String {
+        let payload = format!("lfsk.{}.{}.{}.{}", key.id, key.repo_id, u8::from(write), now() + LFS_TOKEN_SECS);
+        let mac = sign(&self.token_secret, payload.as_bytes());
+        format!("{payload}.{}", mac.trim_start_matches("sha256="))
+    }
+
+    /// Checks a deploy key's LFS token for `repo`: whether it allows
+    /// uploads (if the key still exists and still may).
+    pub async fn check_lfs_deploy_token(&self, token: &str, repo: &Repo) -> Result<Option<bool>> {
+        let Some((key_id, write)) = self.lfs_token_claims(token, "lfsk", repo) else { return Ok(None) };
+        Ok(self.deploy_key(repo.id, key_id).await?.map(|k| write && k.can_write))
+    }
+
+    /// The subject (user or key) and the write bit of a valid, unexpired
+    /// token of kind `tag` for `repo`.
     fn lfs_token_claims(&self, token: &str, tag: &str, repo: &Repo) -> Option<(i64, bool)> {
         let (payload, mac) = token.rsplit_once('.')?;
         let expected = sign(&self.token_secret, payload.as_bytes());
@@ -315,6 +329,18 @@ mod tests {
         assert!(core.check_lfs_token(&token, &other).await.unwrap().is_none(), "other repository");
         assert!(core.check_lfs_token(&token.replace("lfs1.1", "lfs1.2"), &repo).await.unwrap().is_none(), "forged");
         assert!(core.check_lfs_token("nonsense", &repo).await.unwrap().is_none());
+        // Deploy keys get their own kind of token.
+        let key = core
+            .add_deploy_key(&repo, &ada, "ci", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC6zoxk3Z5bwvcVFAgXzaj00HQ9WJq6OzV7DGgTKSwKF", false)
+            .await
+            .unwrap();
+        let deploy = core.lfs_deploy_token(&key, true);
+        assert_eq!(core.check_lfs_deploy_token(&deploy, &repo).await.unwrap(), Some(false), "the key may only read");
+        assert!(core.check_lfs_token(&deploy, &repo).await.unwrap().is_none(), "not a user's token");
+        assert!(core.check_lfs_deploy_token(&token, &repo).await.unwrap().is_none(), "not a key's token");
+        assert!(core.check_lfs_deploy_token(&deploy, &other).await.unwrap().is_none());
+        core.delete_deploy_key(repo.id, key.id).await.unwrap();
+        assert!(core.check_lfs_deploy_token(&deploy, &repo).await.unwrap().is_none(), "the key is gone");
 
         // Locks.
         let mine = core.create_lfs_lock(repo.id, &ada, "/art/logo.psd", "refs/heads/main").await.unwrap().unwrap();

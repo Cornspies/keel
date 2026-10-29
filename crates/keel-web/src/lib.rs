@@ -5,6 +5,7 @@ mod admin;
 mod api;
 mod archive;
 mod assets;
+mod deploy_keys;
 mod blame;
 mod edit;
 mod error;
@@ -314,6 +315,8 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/settings/hooks/{id}/test", post(hooks::repo_test))
         .route("/{owner}/{repo}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::repo_redeliver))
         .route("/{owner}/{repo}/settings/branches", get(protection::index).post(protection::create))
+        .route("/{owner}/{repo}/settings/keys", get(deploy_keys::index).post(deploy_keys::create))
+        .route("/{owner}/{repo}/settings/keys/{id}/delete", post(deploy_keys::delete))
         .route("/{owner}/{repo}/settings/branches/{id}", post(protection::update))
         .route("/{owner}/{repo}/settings/branches/{id}/delete", post(protection::delete))
         .route("/{owner}/{repo}/milestones", get(milestones::index).post(milestones::create))

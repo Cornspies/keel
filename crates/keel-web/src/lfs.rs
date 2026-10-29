@@ -49,7 +49,9 @@ fn internal(e: impl std::fmt::Display) -> Response {
 
 /// Finds the repository and checks the client may read it (or, with
 /// `write`, upload to it). Like git over HTTP, anonymous clients get 401
-/// for what they can't see, so private names don't leak.
+/// for what they can't see, so private names don't leak. The user is
+/// `None` for anonymous readers and for deploy keys (with a token from
+/// `git-lfs-authenticate`), so after a `write` check it means a deploy key.
 #[allow(clippy::result_large_err)] // the error is the response to send
 async fn authorize(state: &AppState, headers: &HeaderMap, owner: &str, name: &str, write: bool) -> Result<(Repo, Option<User>), Response> {
     let name = name.strip_suffix(".git").unwrap_or(name);
@@ -58,6 +60,20 @@ async fn authorize(state: &AppState, headers: &HeaderMap, owner: &str, name: &st
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+    if let (Some(token), Some(r)) = (bearer, &repo)
+        && let Some(key_writes) = state.core.check_lfs_deploy_token(token.trim(), r).await.map_err(internal)?
+    {
+        let repo = repo.expect("checked");
+        return match () {
+            _ if write && (!key_writes || repo.is_archived()) => {
+                Err(fail(StatusCode::FORBIDDEN, "This deploy key can't push to this repository"))
+            }
+            _ if write && state.core.is_mirror(repo.id).await.map_err(internal)? => {
+                Err(fail(StatusCode::FORBIDDEN, "This repository is a mirror"))
+            }
+            _ => Ok((repo, None)),
+        };
+    }
     let (user, can_write) = match (bearer, &repo) {
         (Some(token), Some(repo)) => match state.core.check_lfs_token(token.trim(), repo).await.map_err(internal)? {
             Some((user, write)) => (Some(user), write),
@@ -140,7 +156,11 @@ pub async fn batch(
         Err(res) => return res,
     };
     // Transfers are authorized with a token rather than the password again.
-    let auth = user.as_ref().map(|u| json!({ "Authorization": format!("Bearer {}", state.core.lfs_token(u, &repo, upload)) }));
+    let auth = match &user {
+        Some(u) => Some(json!({ "Authorization": format!("Bearer {}", state.core.lfs_token(u, &repo, upload)) })),
+        // A deploy key's token (anonymous readers have no header).
+        None => headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(|v| json!({ "Authorization": v })),
+    };
     let max = state.core.config.lfs_max_bytes;
     let mut room = if upload {
         match state.core.storage_room(repo.owner_id).await {
@@ -304,6 +324,7 @@ async fn receive(state: &AppState, oid: &str, body: Body, room: Option<u64>) -> 
 // ---------------------------------------------------------------------------
 
 const LOCK_PAGE: i64 = 100;
+const DEPLOY_KEY_LOCKS: &str = "Deploy keys can't lock files; locks belong to people";
 
 fn lock_json(l: &LfsLock) -> Value {
     json!({
@@ -338,7 +359,7 @@ pub async fn create_lock(
         Ok(r) => r,
         Err(res) => return res,
     };
-    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    let Some(user) = user else { return fail(StatusCode::FORBIDDEN, DEPLOY_KEY_LOCKS) };
     let Ok(req) = serde_json::from_slice::<NewLock>(&body) else {
         return fail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid lock request");
     };
@@ -418,7 +439,7 @@ pub async fn verify_locks(
         Ok(r) => r,
         Err(res) => return res,
     };
-    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    // A deploy key holds no locks: every lock is someone else's.
     let req: VerifyRequest = serde_json::from_slice(&body).unwrap_or_default();
     let limit = req.limit.map(|l| l.to_string());
     let (after, limit) = page_params(req.cursor.as_deref(), limit.as_deref());
@@ -426,7 +447,7 @@ pub async fn verify_locks(
         Ok(mut locks) => {
             let next = (locks.len() as i64 > limit).then(|| locks[limit as usize - 1].id.to_string());
             locks.truncate(limit as usize);
-            let (ours, theirs): (Vec<_>, Vec<_>) = locks.iter().partition(|l| l.owner_id == user.id);
+            let (ours, theirs): (Vec<_>, Vec<_>) = locks.iter().partition(|l| user.as_ref().is_some_and(|u| l.owner_id == u.id));
             let mut body = json!({
                 "ours": ours.into_iter().map(lock_json).collect::<Vec<_>>(),
                 "theirs": theirs.into_iter().map(lock_json).collect::<Vec<_>>(),
@@ -458,7 +479,7 @@ pub async fn unlock(
         Ok(r) => r,
         Err(res) => return res,
     };
-    let Some(user) = user else { return fail(StatusCode::UNAUTHORIZED, "Authentication required") };
+    let Some(user) = user else { return fail(StatusCode::FORBIDDEN, DEPLOY_KEY_LOCKS) };
     let req: UnlockRequest = serde_json::from_slice(&body).unwrap_or_default();
     let Ok(id) = id.parse::<i64>() else { return fail(StatusCode::NOT_FOUND, "Lock not found") };
     let lock = match state.core.lfs_locks(repo.id, None, Some(id), 0, 1).await {

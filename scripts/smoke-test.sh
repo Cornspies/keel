@@ -589,6 +589,36 @@ check "create a repository" is "$(api_status "$RW" POST /user/repos -d '{"name":
 check "it's private" is "$(status "$API/repos/ada/from-api")" 404
 check "delete it" is "$(api_status "$RW" DELETE /repos/ada/from-api)" 204
 
+echo "== deploy keys"
+ssh-keygen -q -t ed25519 -N "" -C ci@build -f "$T/deploy"
+ssh-keygen -q -t ed25519 -N "" -C pusher -f "$T/deploy2"
+DEPLOY_SSH="ssh -i $T/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT"
+DEPLOY2_SSH="ssh -i $T/deploy2 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT"
+SSH_URL="ssh://git@127.0.0.1:$SSH_PORT"
+check "unknown keys get nowhere" bash -c "! GIT_SSH_COMMAND='$DEPLOY_SSH' git ls-remote '$SSH_URL/ada/engine.git' 2>/dev/null"
+check "admins add deploy keys" is "$(post "$T/ada" /ada/engine/settings/keys title=ci "key=$(cat "$T/deploy.pub")")" 303
+check "and see them" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings/keys")" "read-only"
+check "others can't" is "$(status -b "$T/bob" "$B/ada/engine/settings/keys")" 403
+check "a deploy key clones its repository" bash -c "GIT_SSH_COMMAND='$DEPLOY_SSH' git clone -q '$SSH_URL/ada/engine.git' '$T/deployed'"
+check "read-only ones can't push" contains "$(cd "$T/deployed" && git checkout -q -b from-ci && GIT_SSH_COMMAND="$DEPLOY_SSH" git push origin from-ci 2>&1)" "deploy key is read-only"
+check "nor reach other repositories" contains "$(GIT_SSH_COMMAND="$DEPLOY_SSH" git ls-remote "$SSH_URL/ada/secret.git" 2>&1)" "not found"
+check "or the wiki" contains "$(GIT_SSH_COMMAND="$DEPLOY_SSH" git ls-remote "$SSH_URL/ada/engine.wiki.git" 2>&1)" "not found"
+check "the greeting names the key" contains "$($DEPLOY_SSH -T git@127.0.0.1 2>&1)" "deploy key “ci”"
+check "Git LFS works with them" contains "$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine download 2>&1)" '"Bearer lfsk.'
+LFS_TOKEN=$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine download | field '["header"]["Authorization"]')
+check "for downloads" is "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $LFS_TOKEN" -H "Content-Type: application/vnd.git-lfs+json" -d '{"operation":"download","objects":[]}' "$B/ada/engine.git/info/lfs/objects/batch")" 200
+check "not uploads, read-only" contains "$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine upload 2>&1)" "read-only"
+check "a person's key can't be one" is "$(api_status "$RW" POST /repos/ada/engine/keys -d "{\"key\":\"$(cat "$T/key.pub")\"}")" 422
+check "the API adds keys that push" is "$(api "$RW" POST /repos/ada/engine/keys -d "{\"title\":\"pusher\",\"key\":\"$(cat "$T/deploy2.pub")\",\"read_only\":false}" | field '["read_only"]')" False
+check "and lists them" is "$(api "$RW" GET /repos/ada/engine/keys | field '[1]["title"]')" pusher
+check "a writing key pushes" bash -c "cd '$T/deployed' && GIT_SSH_COMMAND='$DEPLOY2_SSH' git push -q origin from-ci"
+check "the branch is there" contains "$(git ls-remote "$B/ada/engine.git")" refs/heads/from-ci
+echo ci >"$T/deployed/ci.txt" && git -C "$T/deployed" add -A && git -C "$T/deployed" -c user.name=CI -c user.email=ci@example.com commit -qm "From CI"
+check "branch protection still applies" contains "$(cd "$T/deployed" && GIT_SSH_COMMAND="$DEPLOY2_SSH" git push origin HEAD:main 2>&1)" "protected"
+DK=$(api "$RW" GET /repos/ada/engine/keys | field '[1]["id"]')
+check "deleting a key" is "$(api_status "$RW" DELETE "/repos/ada/engine/keys/$DK")" 204
+check "stops it working" bash -c "! GIT_SSH_COMMAND='$DEPLOY2_SSH' git ls-remote '$SSH_URL/ada/engine.git' 2>/dev/null"
+
 echo "== administration"
 check "others don't see it" is "$(status -b "$T/bob" "$B/admin")" 404
 check "overview" contains "$(curl -s -b "$T/ada" "$B/admin")" "accounts"

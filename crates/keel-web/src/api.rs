@@ -45,6 +45,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/user/starred/{owner}/{repo}", get(is_starred).put(star).delete(unstar))
         .route("/api/v1/users/{name}/starred", get(user_starred))
         .route("/api/v1/repos/{owner}/{repo}/stargazers", get(stargazers))
+        .route("/api/v1/repos/{owner}/{repo}/keys", get(deploy_keys).post(add_deploy_key))
+        .route("/api/v1/repos/{owner}/{repo}/keys/{id}", get(deploy_key).delete(delete_deploy_key))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}/reactions", get(issue_reactions).post(add_issue_reaction))
         .route("/api/v1/repos/{owner}/{repo}/issues/{number}/reactions/{id}", axum::routing::delete(delete_issue_reaction))
         .route("/api/v1/repos/{owner}/{repo}/issues/comments/{comment}/reactions", get(comment_reactions).post(add_comment_reaction))
@@ -419,6 +421,79 @@ async fn add_ssh_key(State(state): State<AppState>, caller: Caller, Body(body): 
 
 async fn delete_ssh_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<StatusCode> {
     state.core.delete_ssh_key(caller.writer()?.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Deploy keys (GitHub's /repos/{owner}/{repo}/keys), for repository admins.
+
+fn deploy_key_value(state: &AppState, repo: &Repo, k: &keel_core::DeployKey) -> Value {
+    json!({
+        "id": k.id,
+        "key": k.public_key,
+        "url": format!("{}/api/v1/repos/{}/{}/keys/{}", state.core.config.base_url, repo.owner, repo.name, k.id),
+        "title": k.title,
+        "verified": true,
+        "created_at": json_time(k.created_at),
+        "last_used": k.last_used_at.map(json_time),
+        "read_only": !k.can_write,
+    })
+}
+
+async fn admin_of(state: &AppState, caller: &Caller, owner: &str, name: &str) -> ApiResult<Repo> {
+    let (repo, access) = find_repo_for_admin(state, caller, owner, name).await?;
+    need(caller, &repo, access, Access::Admin)?;
+    Ok(repo)
+}
+
+async fn deploy_keys(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let repo = admin_of(&state, &caller, &owner, &name).await?;
+    let keys = state.core.deploy_keys(repo.id).await?;
+    Ok(Json(json!(keys.iter().map(|k| deploy_key_value(&state, &repo, k)).collect::<Vec<_>>())))
+}
+
+async fn deploy_key(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> ApiResult<Json<Value>> {
+    let repo = admin_of(&state, &caller, &owner, &name).await?;
+    let key = state.core.deploy_key(repo.id, id).await?.ok_or_else(not_found_error)?;
+    Ok(Json(deploy_key_value(&state, &repo, &key)))
+}
+
+#[derive(Deserialize)]
+pub struct NewDeployKey {
+    #[serde(default)]
+    title: String,
+    key: String,
+    /// Unlike on GitHub, keys are read-only unless this is `false`.
+    read_only: Option<bool>,
+}
+
+async fn add_deploy_key(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name)): Path<(String, String)>,
+    Body(body): Body<NewDeployKey>,
+) -> ApiResult {
+    let repo = admin_of(&state, &caller, &owner, &name).await?;
+    let user = caller.writer()?;
+    let key = state.core.add_deploy_key(&repo, user, &body.title, &body.key, body.read_only == Some(false)).await?;
+    Ok((StatusCode::CREATED, Json(deploy_key_value(&state, &repo, &key))).into_response())
+}
+
+async fn delete_deploy_key(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((owner, name, id)): Path<(String, String, i64)>,
+) -> ApiResult<StatusCode> {
+    let repo = admin_of(&state, &caller, &owner, &name).await?;
+    caller.writer()?;
+    state.core.delete_deploy_key(repo.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
