@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="narrow-left">
+  <p class="muted small"><a href="/{{ repo.owner }}/{{ repo.name }}/settings">Settings</a> / Deploy keys</p>
+  <h2>Deploy keys</h2>
+  <p class="muted">SSH keys for servers and CI that need this repository only, without anyone's account. They're read-only unless allowed to push, and pushes with them follow the branch protection rules. A key can be the deploy key of one repository, and can't also be someone's SSH key.{% if let Some(url) = ssh_url %} Clone with <span class="mono">git clone {{ url }}</span>.{% endif %}</p>
+  {% if keys.is_empty() %}
+  <p class="empty">No deploy keys yet.</p>
+  {% else %}
+  <ul class="card-list">
+    {% for k in keys %}
+    <li class="card-row">
+      <div>
+        <strong>{{ k.title }}</strong> {% if k.can_write %}<span class="badge">read &amp; write</span>{% else %}<span class="badge">read-only</span>{% endif %}
+        <div class="mono muted small">{{ k.fingerprint }}</div>
+        <div class="muted small">Added {{ k.added }}{% if let Some(who) = k.added_by %} by {{ who }}{% endif %} · {% if let Some(u) = k.last_used %}Last used {{ u }}{% else %}Never used{% endif %}</div>
+      </div>
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/keys/{{ k.id }}/delete"><button class="btn btn-small btn-danger">Delete</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2>Add a deploy key</h2>
+  {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+  <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/settings/keys" class="form">
+    <label>Title <input name="title" value="{{ title }}" maxlength="100" placeholder="e.g. production server"></label>
+    <label>Key <textarea name="key" rows="4" class="mono" required placeholder="ssh-ed25519 AAAA…">{{ key }}</textarea>
+      <span class="hint">The public key, e.g. the contents of <span class="mono">~/.ssh/id_ed25519.pub</span> on the server. Make one just for this: <span class="mono">ssh-keygen -t ed25519 -f deploy_key</span>.</span></label>
+    <label class="check"><input type="checkbox" name="write"{% if write %} checked{% endif %}> Allow pushing <span class="hint">Without this, the key can only clone and fetch.</span></label>
+    <button class="btn btn-primary">Add key</button>
+  </form>
+</div>
+{% endblock %}

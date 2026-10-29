@@ -6,6 +6,7 @@
 //! (bitmaps, commit-graph, partial clone, protocol v2).
 
 mod archive;
+mod blame;
 mod diff;
 mod edit;
 mod files;
@@ -27,6 +28,7 @@ pub use read::{
 pub use edit::{FileChange, replace_line};
 pub use files::{FileChanges, FileRef};
 pub use merge::{Identity, MergeStyle, Mergeability, Signer};
+pub use blame::{Blame, BlameCommit, BlameHunk, IGNORE_REVS_FILE};
 pub use mirror::{Remote, import_fetch, ls_remote, mirror_fetch, mirror_push, parse_lfs_pointer};
 pub use push::{RefChange, Refs, ref_changes};
 pub use signed::SignedCommit;

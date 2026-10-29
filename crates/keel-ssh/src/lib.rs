@@ -86,6 +86,7 @@ impl Server for SshServer {
             core: self.core.clone(),
             peer,
             user: None,
+            deploy_key: None,
             protocol: HashMap::new(),
             stdin: HashMap::new(),
             channels: Channels::default(),
@@ -103,6 +104,8 @@ struct Connection {
     core: Core,
     peer: Option<SocketAddr>,
     user: Option<User>,
+    /// Signed in with a repository's deploy key instead of a person's key.
+    deploy_key: Option<keel_core::DeployKey>,
     /// `GIT_PROTOCOL` sent via `SetEnv`, per channel.
     protocol: HashMap<ChannelId, String>,
     /// Feeds client data to the running git process, per channel.
@@ -192,23 +195,46 @@ fn parse_lfs_command(cmd: &str) -> Option<(String, String, bool)> {
 }
 
 impl Connection {
+    /// What the signed-in key may do with `repo` (or its wiki): a person's
+    /// access, or a deploy key's, which only reaches its own repository
+    /// (not the wiki) and can't push to archived ones.
+    async fn access(&self, repo: &keel_core::Repo, wiki: bool) -> anyhow::Result<Access> {
+        if let Some(key) = &self.deploy_key {
+            return Ok(match () {
+                _ if key.repo_id != repo.id || wiki => Access::None,
+                _ if key.can_write && !repo.is_archived() => Access::Write,
+                _ => Access::Read,
+            });
+        }
+        Ok(self.core.access(repo, self.user.as_ref()).await?)
+    }
+
+    /// Why a push with only read access is refused.
+    fn refusal(&self, repo: &keel_core::Repo) -> &'static str {
+        if self.deploy_key.is_some() && !repo.is_archived() {
+            "keel: this deploy key is read-only"
+        } else {
+            push_refusal(repo)
+        }
+    }
+
     /// Answers `git-lfs-authenticate`: where the LFS server is, and a
     /// short-lived token for it.
     async fn lfs_authenticate(&self, channel: ChannelId, (owner, name, upload): (String, String, bool), handle: Handle) -> anyhow::Result<()> {
-        let Some(user) = self.user.clone() else {
+        if self.user.is_none() && self.deploy_key.is_none() {
             Self::fail(&handle, channel, "keel: authentication required").await;
             return Ok(());
-        };
+        }
         let repo = self.core.repo_or_redirect(&owner, &name).await?;
         let access = match &repo {
-            Some(r) => self.core.access(r, Some(&user)).await?,
+            Some(r) => self.access(r, false).await?,
             None => Access::None,
         };
         let needed = if upload { Access::Write } else { Access::Read };
         let repo = match repo {
             Some(r) if access >= needed => r,
             Some(r) if access == Access::Read => {
-                Self::fail(&handle, channel, push_refusal(&r)).await;
+                Self::fail(&handle, channel, self.refusal(&r)).await;
                 return Ok(());
             }
             _ => {
@@ -216,7 +242,11 @@ impl Connection {
                 return Ok(());
             }
         };
-        let token = self.core.lfs_token(&user, &repo, upload);
+        let token = match (&self.user, &self.deploy_key) {
+            (Some(user), _) => self.core.lfs_token(user, &repo, upload),
+            (None, Some(key)) => self.core.lfs_deploy_token(key, upload),
+            (None, None) => unreachable!("checked above"),
+        };
         let answer = serde_json::json!({
             "href": format!("{}/{}/{}.git/info/lfs", self.core.config.base_url, repo.owner, repo.name),
             "header": { "Authorization": format!("Bearer {token}") },
@@ -241,17 +271,16 @@ impl Connection {
         request: GitRequest,
         handle: Handle,
     ) -> anyhow::Result<()> {
-        let user = self.user.clone();
         let target = self.core.git_target(&request.owner, &request.repo).await?;
         let needed = if request.service.is_write() { Access::Write } else { Access::Read };
         let access = match &target {
-            Some(t) => self.core.access(&t.repo, user.as_ref()).await?,
+            Some(t) => self.access(&t.repo, t.wiki).await?,
             None => Access::None,
         };
         let target = match target {
             Some(t) if access >= needed => t,
             Some(t) if access == Access::Read => {
-                Self::fail(&handle, channel, push_refusal(&t.repo)).await;
+                Self::fail(&handle, channel, self.refusal(&t.repo)).await;
                 return Ok(());
             }
             _ => {
@@ -371,7 +400,7 @@ impl russh::server::Handler for Connection {
     async fn auth_publickey_offered(&mut self, _user: &str, offer: PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
         // Skip the signature round-trip for keys we don't know.
         let fingerprint = offer.public_key.fingerprint(HashAlg::Sha256).to_string();
-        Ok(if self.core.ssh_key_exists(&fingerprint).await? {
+        Ok(if self.core.ssh_key_exists(&fingerprint).await? || self.core.deploy_key_exists(&fingerprint).await? {
             Auth::Accept
         } else {
             Auth::reject()
@@ -380,14 +409,17 @@ impl russh::server::Handler for Connection {
 
     async fn auth_publickey(&mut self, _user: &str, key: VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
         let fingerprint = key.public_key.fingerprint(HashAlg::Sha256).to_string();
-        match self.core.user_by_ssh_fingerprint(&fingerprint).await? {
-            Some(user) => {
-                tracing::info!(user = %user.username, peer = ?self.peer, "ssh login");
-                self.user = Some(user);
-                Ok(Auth::Accept)
-            }
-            None => Ok(Auth::reject()),
+        if let Some(user) = self.core.user_by_ssh_fingerprint(&fingerprint).await? {
+            tracing::info!(user = %user.username, peer = ?self.peer, "ssh login");
+            self.user = Some(user);
+            return Ok(Auth::Accept);
         }
+        if let Some(key) = self.core.deploy_key_by_fingerprint(&fingerprint).await? {
+            tracing::info!(repo = key.repo_id, key = key.id, peer = ?self.peer, "ssh login with a deploy key");
+            self.deploy_key = Some(key);
+            return Ok(Auth::Accept);
+        }
+        Ok(Auth::reject())
     }
 
     async fn channel_open_session(
@@ -426,7 +458,11 @@ impl russh::server::Handler for Connection {
             return Ok(());
         }
         session.channel_success(channel)?;
-        let name = self.user.as_ref().map(|u| u.username.as_str()).unwrap_or("there");
+        let name = match (&self.user, &self.deploy_key) {
+            (Some(u), _) => u.username.clone(),
+            (None, Some(k)) => format!("deploy key “{}”", k.title),
+            (None, None) => "there".to_owned(),
+        };
         let handle = session.handle();
         let message = format!("Hi {name}! You've successfully authenticated, but keel does not provide shell access.\r\n");
         tokio::spawn(async move {

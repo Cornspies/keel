@@ -320,6 +320,39 @@ input:focus, textarea:focus { outline: 2px solid var(--link); outline-offset: -1
 .code tr:target { background: var(--hunk-bg); }
 .code tbody tr:first-child td { padding-top: 8px; }
 .code tbody tr:last-child td { padding-bottom: 8px; }
+/* Blame: the commit of each hunk beside its lines, with a bar from the
+   file's oldest (faint) to its newest (accent) change. */
+.blame .blame-info {
+  width: 300px; min-width: 220px; max-width: 300px; padding: 4px 8px 4px 10px; font: 13px/1.4 var(--sans);
+  border-right: 1px solid var(--border-muted); border-left: 4px solid var(--blame-color, var(--border-muted));
+  white-space: normal;
+}
+.blame tr.hunk-start:not(:first-child) td { border-top: 1px solid var(--border-muted); }
+.blame .blame-commit { display: flex; gap: 6px; align-items: center; }
+.blame .blame-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.blame .blame-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blame .blame-prior {
+  flex: none; width: 14px; height: 14px; background: var(--text-muted);
+  -webkit-mask: var(--icon-history) center / contain no-repeat; mask: var(--icon-history) center / contain no-repeat;
+}
+.blame .blame-prior:hover { background: var(--accent); }
+.blame-scale { display: inline-flex; gap: 6px; align-items: center; margin-left: 12px; }
+.blame-scale-bar { width: 60px; height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--border-muted), var(--accent)); }
+.age-0 { --blame-color: color-mix(in srgb, var(--accent) 10%, var(--border)); }
+.age-1 { --blame-color: color-mix(in srgb, var(--accent) 20%, var(--border)); }
+.age-2 { --blame-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
+.age-3 { --blame-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.age-4 { --blame-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.age-5 { --blame-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.age-6 { --blame-color: color-mix(in srgb, var(--accent) 70%, var(--border)); }
+.age-7 { --blame-color: color-mix(in srgb, var(--accent) 80%, var(--border)); }
+.age-8 { --blame-color: color-mix(in srgb, var(--accent) 90%, var(--border)); }
+.age-9 { --blame-color: var(--accent); }
+@media (max-width: 640px) {
+  .blame .blame-info { width: 140px; min-width: 140px; max-width: 140px; }
+  .blame .blame-meta, .blame-scale { display: none; }
+}
+:root { --icon-history: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.64 3.14.43 1.93A.25.25 0 0 0 0 2.1v3.65c0 .14.11.25.25.25H3.9a.25.25 0 0 0 .18-.43L2.72 4.22a6.5 6.5 0 1 1-1.18 4.45.75.75 0 1 0-1.5.16 8 8 0 1 0 1.6-5.69ZM7.75 4a.75.75 0 0 1 .75.75v2.99l2.03.81a.75.75 0 0 1-.56 1.4l-2.5-1A.75.75 0 0 1 7 8.25v-3.5A.75.75 0 0 1 7.75 4Z'/%3E%3C/svg%3E"); }
 .blob-note { padding: 24px 16px; margin: 0; text-align: center; color: var(--text-muted); }
 .blob-image { padding: 24px; text-align: center; background: var(--bg-subtle); }
 .blob-image img { max-width: 100%; }
@@ -902,3 +935,8 @@ button.reaction:hover, .reaction-add:hover { background: var(--bg-hover); }
 .board-add > summary { cursor: pointer; padding: 2px 2px; }
 .board-add .form { margin-top: 6px; }
 .board-new-column { background: none; border-style: dashed; }
+
+/* Signing in with single sign-on. */
+.btn-block { display: flex; justify-content: center; width: 100%; }
+.or-divider { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; }
+.or-divider::before, .or-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border-muted); }

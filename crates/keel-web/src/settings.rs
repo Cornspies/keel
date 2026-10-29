@@ -3,14 +3,14 @@
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, State};
-use axum::http::header;
+use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
 use keel_core::{AccessToken, GpgKey, SshKey, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
 use crate::render::{date, relative_time};
-use crate::session::{SignedIn, set_cookie};
+use crate::session::{SignedIn, confirm, set_cookie};
 use crate::{AppState, Page};
 
 pub async fn index() -> Redirect {
@@ -86,9 +86,15 @@ pub struct EmailForm {
 pub async fn change_email(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
+    headers: HeaderMap,
     Form(f): Form<EmailForm>,
 ) -> AppResult {
-    match state.core.change_email(&user, &f.password, &f.email).await {
+    let changed = async {
+        confirm(&state, &user, &headers, &f.password).await?;
+        state.core.set_email(&user, &f.email).await
+    }
+    .await;
+    match changed {
         Ok(()) => {
             if let Some(user) = state.core.user_by_id(user.id).await? {
                 state.core.send_verification(&user).await?;
@@ -102,6 +108,8 @@ pub async fn change_email(
 
 #[derive(Deserialize)]
 pub struct PasswordForm {
+    /// Empty for accounts without a password, which set their first one.
+    #[serde(default)]
     current: String,
     new: String,
     confirm: String,
@@ -110,13 +118,22 @@ pub struct PasswordForm {
 pub async fn change_password(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
+    headers: HeaderMap,
     Form(f): Form<PasswordForm>,
 ) -> AppResult {
     if f.new != f.confirm {
         let msg = "The new passwords don’t match.".to_owned();
         return account_page(&state, user, None, Some(msg), None);
     }
-    match state.core.change_password(&user, &f.current, &f.new).await {
+    let changed = if user.has_password() {
+        state.core.change_password(&user, &f.current, &f.new).await
+    } else {
+        match confirm(&state, &user, &headers, "").await {
+            Ok(()) => state.core.set_first_password(&user, &f.new).await,
+            Err(e) => Err(e),
+        }
+    };
+    match changed {
         Ok(()) => {
             // All sessions were revoked; keep this browser signed in.
             let token = state.core.create_session(user.id).await?;
@@ -279,22 +296,17 @@ pub struct GpgKeyForm {
     password: String,
 }
 
-/// Adding keys and tokens needs the password: they grant access that
-/// outlasts a stolen session.
-async fn confirm(state: &AppState, user: &User, password: &str) -> keel_core::Result<()> {
-    if !state.core.confirm_password(user, password).await? {
-        return Err(keel_core::Error::Invalid("Your password is incorrect.".into()));
-    }
-    Ok(())
-}
+// Adding keys and tokens needs the password (see `session::confirm`):
+// they grant access that outlasts a stolen session.
 
 pub async fn add_gpg_key(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
+    headers: HeaderMap,
     Form(f): Form<GpgKeyForm>,
 ) -> AppResult {
     let added = async {
-        confirm(&state, &user, &f.password).await?;
+        confirm(&state, &user, &headers, &f.password).await?;
         state.core.add_gpg_key(user.id, &f.key).await
     }
     .await;
@@ -328,10 +340,11 @@ pub struct KeyForm {
 pub async fn add_key(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
+    headers: HeaderMap,
     Form(f): Form<KeyForm>,
 ) -> AppResult {
     let added = async {
-        confirm(&state, &user, &f.password).await?;
+        confirm(&state, &user, &headers, &f.password).await?;
         state.core.add_ssh_key(user.id, &f.name, &f.key).await
     }
     .await;
@@ -363,6 +376,7 @@ struct TokenView {
     name: String,
     hint: String,
     can_write: bool,
+    site_admin: bool,
     created: String,
     last_used: Option<String>,
     expires: Option<String>,
@@ -377,6 +391,7 @@ impl From<AccessToken> for TokenView {
             name: t.name,
             hint: t.hint,
             can_write: t.can_write,
+            site_admin: t.site_admin,
             created: date(t.created_at),
             last_used: t.last_used_at.map(relative_time),
             expires: t.expires_at.map(date),
@@ -395,12 +410,14 @@ struct TokensPage {
     created: Option<String>,
     username: String,
     clone_example: String,
+    is_admin: bool,
 }
 
 async fn tokens_page(state: &AppState, user: User, error: Option<String>, created: Option<String>) -> AppResult {
     let tokens = state.core.tokens(user.id).await?.into_iter().map(TokenView::from).collect();
     html(TokensPage {
         username: user.username.clone(),
+        is_admin: user.is_admin,
         clone_example: state.core.config.http_clone_url(&user.username, "<repo>"),
         page: Page::new(state, Some(user), "Access tokens"),
         nav: "tokens",
@@ -418,6 +435,8 @@ pub async fn tokens(State(state): State<AppState>, SignedIn(user): SignedIn) -> 
 pub struct TokenForm {
     name: String,
     write: Option<String>,
+    /// For administrators: the token may administer the site.
+    admin: Option<String>,
     /// Days until expiry; empty for never.
     #[serde(default)]
     expires: String,
@@ -428,12 +447,13 @@ pub struct TokenForm {
 pub async fn create_token(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
+    headers: HeaderMap,
     Form(f): Form<TokenForm>,
 ) -> AppResult {
     let expires = f.expires.trim().parse::<i64>().ok().filter(|d| *d > 0);
     let created = async {
-        confirm(&state, &user, &f.password).await?;
-        state.core.create_token(user.id, &f.name, f.write.is_some(), expires).await
+        confirm(&state, &user, &headers, &f.password).await?;
+        state.core.create_token(user.id, &f.name, f.write.is_some(), f.admin.is_some(), expires).await
     }
     .await;
     match created {

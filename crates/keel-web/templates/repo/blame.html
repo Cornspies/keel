@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "repo/header.html" %}
+<div class="toolbar">
+  {% include "repo/refswitch.html" %}
+  {% include "repo/crumbs.html" %}
+</div>
+<div class="box">
+  <div class="box-head file-head">
+    <span class="muted small">Blame{% if commit_count > 0 %} · {{ commit_count }} commit{% if commit_count != 1 %}s{% endif %}{% endif %}</span>
+    <span class="blame-scale muted small" title="Older to newer changes"><span>Older</span><span class="blame-scale-bar"></span><span>Newer</span></span>
+    <span class="spacer"></span>
+    <a class="btn btn-small" href="{{ blob_url }}">Normal view</a>
+    <a class="btn btn-small" href="{{ history_url }}">History</a>
+    <a class="btn btn-small" href="{{ raw_url }}">Raw</a>
+  </div>
+  {% match content %}
+  {% when BlameContent::Rows(rows) %}
+  <div class="code-scroll">
+    <table class="code blame">
+      <tbody>
+      {% for row in rows %}
+        <tr id="L{{ row.n }}"{% if row.hunk.is_some() %} class="hunk-start"{% endif %}>
+          {% if let Some(h) = row.hunk %}
+          <td class="blame-info age-{{ h.age }}" rowspan="{{ h.rows }}">
+            <div class="blame-commit">
+              <a class="blame-summary" href="{{ h.url }}" title="{{ h.summary }}">{{ h.summary }}</a>
+              {% if let Some(u) = h.prior_url %}<a class="blame-prior" href="{{ u }}" rel="nofollow" title="Blame before this commit" aria-label="Blame before this commit"></a>{% endif %}
+            </div>
+            <div class="muted small blame-meta"><a class="mono" href="{{ h.url }}">{{ h.short }}</a> · {{ h.author }} · <time title="{{ h.when_full }}">{{ h.when }}</time></div>
+          </td>
+          {% else if row.uncovered %}
+          <td class="blame-info"></td>
+          {% endif %}
+          <td class="ln"><a href="#L{{ row.n }}">{{ row.n }}</a></td><td class="lc">{{ row.code|safe }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% when BlameContent::Unavailable(why) %}
+  <p class="blob-note">{{ why }} <a href="{{ blob_url }}">View the file</a></p>
+  {% when BlameContent::TooSlow %}
+  <p class="blob-note">This file's history is too long to blame quickly. <a href="{{ history_url }}">See its history</a></p>
+  {% endmatch %}
+</div>
+{% endblock %}

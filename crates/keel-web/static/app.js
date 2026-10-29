@@ -18,6 +18,18 @@ document.addEventListener("click", (event) => {
   }
 });
 
+// Links in emails carry their token after "#", which browsers don't send to
+// the server (so it stays out of request logs): move it into the form, and
+// out of the address bar and history.
+for (const input of document.querySelectorAll("input[data-fragment]")) {
+  const value = new URLSearchParams(location.hash.slice(1)).get(input.dataset.fragment);
+  if (value) {
+    input.value = value;
+    history.replaceState(null, "", location.pathname);
+  }
+  if (input.value) input.closest("[data-fragment-field]").hidden = true;
+}
+
 document.addEventListener("focusin", (event) => {
   if (event.target.matches(".copy-field input")) event.target.select();
 });

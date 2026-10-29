@@ -11,6 +11,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::secrets::Purpose;
 use crate::{Core, Error, Repo, Result, User, invalid, is_private_ip, now};
 
 /// How often a mirror can sync: (seconds, label).
@@ -152,7 +153,7 @@ impl Core {
         .bind(repo.id)
         .bind(&parsed.url)
         .bind(username)
-        .bind(password)
+        .bind(self.seal(Purpose::Mirror, &password)?)
         .bind(interval_secs)
         .bind(now())
         .execute(&self.db)
@@ -220,7 +221,7 @@ impl Core {
         .bind(repo_id)
         .bind(&parsed.url)
         .bind(username)
-        .bind(password)
+        .bind(password.map(|p| self.seal(Purpose::Mirror, p)).transpose()?)
         .bind(interval_secs)
         .bind(now())
         .execute(&self.db)
@@ -278,7 +279,8 @@ impl Core {
                 .bind(repo_id)
                 .fetch_optional(&self.db)
                 .await?;
-        Ok(row.map(|(url, username, password)| MirrorRemote { url, username, password }))
+        row.map(|(url, username, password)| Ok(MirrorRemote { url, username, password: self.unseal(Purpose::Mirror, &password)? }))
+            .transpose()
     }
 
     /// Fetches a mirror's branches and tags, then handles what changed
@@ -426,7 +428,7 @@ impl Core {
         .bind(repo_id)
         .bind(&parsed.url)
         .bind(username)
-        .bind(password)
+        .bind(self.seal(Purpose::PushMirror, &password)?)
         .bind(now())
         .fetch_one(&self.db)
         .await?;
@@ -485,7 +487,10 @@ impl Core {
             .bind(id)
             .fetch_optional(&self.db)
             .await?;
-        Ok(row.map(|(url, username, password)| MirrorRemote { url, username, password }))
+        row.map(|(url, username, password)| {
+            Ok(MirrorRemote { url, username, password: self.unseal(Purpose::PushMirror, &password)? })
+        })
+        .transpose()
     }
 
     /// The LFS files to upload before pushing: those that commits the

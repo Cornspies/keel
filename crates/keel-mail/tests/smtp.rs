@@ -84,7 +84,7 @@ async fn sends_queued_mail() {
     assert!(message.contains("Subject: [keel] Verify your email address"));
     assert!(message.contains("Auto-Submitted: auto-generated"));
     assert!(message.contains("@git.example.com>"), "Message-ID uses the site's host");
-    assert!(message.contains("https://git.example.com/email/verify?token="));
+    assert!(message.contains("https://git.example.com/email/verify#token="));
     // The rejected address was given up on rather than retried.
     assert_eq!(core.next_mail_due().await.unwrap(), None);
 }

@@ -25,7 +25,7 @@ use crate::{AppError, AppState, Page};
 const LAST_COMMIT_SYNC_WALK: usize = 500;
 const COMMITS_PER_PAGE: usize = 50;
 /// Larger files are offered as a raw download instead of being rendered.
-const MAX_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const DIFF_MAX_FILES: usize = 300;
 pub(crate) const DIFF_MAX_LINES: usize = 10_000;
 const README_NAMES: &[&str] = &["readme.md", "readme.markdown", "readme", "readme.txt"];
@@ -267,7 +267,7 @@ pub(crate) struct Crumb {
 }
 
 /// Breadcrumbs for `path`, each linking to its directory.
-fn crumbs(base: &str, rev: &str, path: &str) -> Vec<Crumb> {
+pub(crate) fn crumbs(base: &str, rev: &str, path: &str) -> Vec<Crumb> {
     let mut out = Vec::new();
     let mut acc = String::new();
     for seg in path.split('/').filter(|s| !s.is_empty()) {
@@ -295,7 +295,7 @@ pub(crate) struct RefNames {
 }
 
 impl RefNames {
-    fn load(g: &GitRepo, base: &str, mode: &str) -> AppResult<Self> {
+    pub(crate) fn load(g: &GitRepo, base: &str, mode: &str) -> AppResult<Self> {
         let link = |r: keel_git::RefInfo| RefLink {
             url: format!("{base}/{mode}/{}", encode_path(&r.name)),
             name: r.name,
@@ -622,6 +622,7 @@ struct BlobPage {
     plain: bool,
     raw_url: String,
     history_url: String,
+    blame_url: Option<String>,
     latest: Option<CommitView>,
     refs: RefNames,
     /// Who locked the file with Git LFS.
@@ -679,17 +680,7 @@ pub async fn blob(
             };
             BlobContent::Rendered(render_text_doc(&st, &filename, &blob, &links))
         } else {
-            let key = (blob.id, filename.clone());
-            let lines = match st.highlighted.get(&key) {
-                Some(hit) => hit,
-                None => {
-                    let text = String::from_utf8_lossy(&blob.data);
-                    let lines = Arc::new(render::highlight_lines(&filename, &text));
-                    st.highlighted.insert(key, lines.clone());
-                    lines
-                }
-            };
-            BlobContent::Lines(lines)
+            BlobContent::Lines(highlighted(&st, &blob, &filename))
         };
         let line_count = match &content {
             BlobContent::Lines(l) => l.len(),
@@ -729,6 +720,7 @@ pub async fn blob(
     let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
     let changeable = view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == r.rev);
     let editable = changeable && size <= 1024 * 1024 && matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_));
+    let blame_url = matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_)).then(|| format!("{base}/blame/{rev_url}/{path_url}"));
     html(BlobPage {
         edit_url: editable.then(|| format!("{base}/edit/{rev_url}/{path_url}")),
         delete_url: changeable.then(|| format!("{base}/delete/{rev_url}/{path_url}")),
@@ -743,12 +735,25 @@ pub async fn blob(
         plain,
         raw_url: format!("{base}/raw/{rev_url}/{path_url}"),
         history_url: format!("{base}/commits/{rev_url}/{path_url}"),
+        blame_url,
         latest: latest.as_ref().map(|c| CommitView::new(&base, c)),
         rev: r.rev,
         rev_url,
         path: r.path,
         refs,
     })
+}
+
+/// The lines of a text file as highlighted HTML, cached by blob.
+pub(crate) fn highlighted(state: &AppState, blob: &keel_git::Blob, filename: &str) -> Arc<Vec<String>> {
+    let key = (blob.id, filename.to_owned());
+    if let Some(hit) = state.highlighted.get(&key) {
+        return hit;
+    }
+    let text = String::from_utf8_lossy(&blob.data);
+    let lines = Arc::new(render::highlight_lines(filename, &text));
+    state.highlighted.insert(key, lines.clone());
+    lines
 }
 
 fn bytecount_lines(data: &[u8]) -> usize {

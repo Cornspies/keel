@@ -16,6 +16,7 @@ FAILED=0
 cleanup() {
     [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null && wait "$PID" 2>/dev/null
     [ -n "${SMTP_PID:-}" ] && kill "$SMTP_PID" 2>/dev/null
+    [ -n "${OIDC_PID:-}" ] && kill "$OIDC_PID" 2>/dev/null
     if [ -n "${SMOKE_KEEP:-}" ]; then
         rm -rf "$SMOKE_KEEP" && cp -r "$T/data" "$SMOKE_KEEP"
     fi
@@ -78,12 +79,65 @@ PY
 SMTP_PID=$!
 for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$SMTP_PORT) 2>/dev/null && break; sleep 0.1; done
 
+# An OpenID Connect provider for single sign-on: it signs in whoever
+# $T/idp_user.json says, and checks the client secret and PKCE.
+OIDC_PORT=$((HTTP_PORT + 6))
+python3 - "$OIDC_PORT" "$T/idp_user.json" <<'PY' &
+import base64, hashlib, http.server, json, secrets, sys, time, urllib.parse
+port, user_file = int(sys.argv[1]), sys.argv[2]
+issuer = f"http://127.0.0.1:{port}"
+codes = {}
+b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+class H(http.server.BaseHTTPRequestHandler):
+    def send(self, status, body=b"", headers=()):
+        self.send_response(status)
+        for k, v in headers: self.send_header(k, v)
+        self.end_headers(); self.wfile.write(body)
+    def do_GET(self):
+        url = urllib.parse.urlparse(self.path); q = dict(urllib.parse.parse_qsl(url.query))
+        if url.path == "/.well-known/openid-configuration":
+            doc = {"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
+                   "userinfo_endpoint": issuer + "/userinfo", "token_endpoint_auth_methods_supported": ["client_secret_basic"]}
+            return self.send(200, json.dumps(doc).encode(), [("Content-Type", "application/json")])
+        if url.path == "/authorize":
+            if q.get("client_id") != "keel" or q.get("code_challenge_method") != "S256" or "openid" not in q.get("scope", ""):
+                return self.send(400, b"bad request")
+            code = secrets.token_urlsafe(16)
+            codes[code] = dict(q, user=json.load(open(user_file)))
+            sep = "&" if "?" in q["redirect_uri"] else "?"
+            loc = q["redirect_uri"] + sep + urllib.parse.urlencode({"code": code, "state": q["state"]})
+            return self.send(302, headers=[("Location", loc)])
+        if url.path == "/userinfo":
+            c = codes.get(self.headers.get("Authorization", "").removeprefix("Bearer at-"))
+            return self.send(200, json.dumps(c["user"]).encode(), [("Content-Type", "application/json")]) if c else self.send(401)
+        self.send(404)
+    def do_POST(self):
+        form = dict(urllib.parse.parse_qsl(self.rfile.read(int(self.headers["Content-Length"])).decode()))
+        if self.headers.get("Authorization") != "Basic " + base64.b64encode(b"keel:s3cret").decode():
+            return self.send(401, b'{"error":"invalid_client"}')
+        c = codes.pop(form.get("code", ""), None)
+        if not c or form.get("redirect_uri") != c["redirect_uri"] or b64(hashlib.sha256(form.get("code_verifier", "").encode()).digest()) != c["code_challenge"]:
+            return self.send(400, b'{"error":"invalid_grant"}')
+        codes["used-" + form["code"]] = c
+        claims = {"iss": issuer, "aud": "keel", "exp": int(time.time()) + 300, "iat": int(time.time()), "nonce": c["nonce"], **c["user"]}
+        if claims.pop("userinfo_only", False):
+            for k in ("email", "email_verified"): claims.pop(k, None)
+        token = b64(b'{"alg":"RS256"}') + "." + b64(json.dumps(claims).encode()) + ".c2ln"
+        body = {"access_token": "at-used-" + form["code"], "token_type": "Bearer", "id_token": token}
+        self.send(200, json.dumps(body).encode(), [("Content-Type", "application/json")])
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+OIDC_PID=$!
+
 # A relative --data-dir, as by default: paths derived from it (such as the
 # hooks that enforce branch protection) must still work.
 (cd "$T" && exec "$BIN" serve --data-dir data --http-addr "127.0.0.1:$HTTP_PORT" \
     --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
     --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" \
-    --metrics-token smoke-metrics --max-push-size 2 >"$T/server.log" 2>&1) &
+    --metrics-token smoke-metrics --max-push-size 2 \
+    --oidc-issuer "http://127.0.0.1:$OIDC_PORT" --oidc-client-id keel --oidc-client-secret s3cret --oidc-name "Example ID" \
+    >"$T/server.log" 2>&1) &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -148,6 +202,15 @@ check "adding SSH keys needs the password" contains "$(curl -s -b "$T/ada" -H "$
 check "add SSH key" is "$(post "$T/ada" /settings/keys "key=$(cat "$T/key.pub")" password=password-ada)" 303
 echo ssh >>"$W/README.md" && git -C "$W" commit -qam "Over SSH"
 check "push over SSH" git -C "$W" push -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" main
+
+echo "== blame"
+page=$(curl -s "$B/ada/engine/blame/main/README.md")
+check "blame names each line's commit" contains "$page" '>Initial commit</a>'
+check "for every commit that changed it" contains "$page" '>Over SSH</a>'
+check "and links to the blame before it" contains "$page" 'class="blame-prior" href="/ada/engine/blame/'
+check "files link to their blame" contains "$(curl -s "$B/ada/engine/blob/main/README.md")" '/ada/engine/blame/main/README.md'
+check "directories go to the tree" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/blame/main/src")" "$B/ada/engine/tree/main/src"
+check "private repositories stay hidden" is "$(status "$B/ada/secret/blame/main/README.md")" 404
 check "clone over SSH" git clone -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/c3"
 
 echo "== collaborators"
@@ -337,7 +400,8 @@ check "main has the fork's change" is "$(curl -s "$B/ada/engine/raw/main/bob.txt
 check "fork branch was deleted" is "$(git ls-remote "$BOB_FORK" refs/heads/topic 2>/dev/null | wc -l)" 0
 
 echo "== webhooks"
-# A receiver that saves each request's event, signature and body.
+# A receiver that saves each request's event, signature and body, and
+# serves an image and a page for the image proxy.
 HOOK_PORT=$((HTTP_PORT + 2))
 mkdir -p "$T/hooks"
 python3 - "$HOOK_PORT" "$T/hooks" <<'PY' &
@@ -351,6 +415,10 @@ class H(http.server.BaseHTTPRequestHandler):
         open(f"{out}/{i}.json", "wb").write(body)
         open(f"{out}/{i}.hdr", "w").write(f"{self.headers['X-GitHub-Event']} {self.headers.get('X-Hub-Signature-256', '')}\n")
         self.send_response(200); self.end_headers(); self.wfile.write(b"thanks")
+    def do_GET(self):
+        kind, body = {"/dot.png": ("image/png", bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4b70000000049454e44ae426082")),
+                      "/page.html": ("text/html", b"<script>alert(1)</script>")}.get(self.path, ("text/plain", b"hi"))
+        self.send_response(200); self.send_header("Content-Type", kind); self.end_headers(); self.wfile.write(body)
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
@@ -396,6 +464,18 @@ check "as gollum events" received gollum '"page_name":"Home"'
 check "stars are delivered" is "$(post "$T/bob" /ada/engine/star to=on)" 303
 check "as star events" received star '"action":"created"'
 check "unstar" is "$(post "$T/bob" /ada/engine/star to=off)" 303
+
+echo "== images from other servers"
+check "pages only load keel's images" contains "$(curl -sI "$B/ada/engine/issues/1" | tr -d '\r')" "img-src 'self' data:"
+post "$T/bob" /ada/engine/issues/1/comments action=comment \
+    body="![dot](http://127.0.0.1:$HOOK_PORT/dot.png) <img src=\"http://127.0.0.1:$HOOK_PORT/page.html\">" >/dev/null
+page=$(curl -s "$B/ada/engine/issues/1")
+IMG=$(grep -o '/_image?url=[^"]*dot\.png[^"]*' <<<"$page" | head -1 | sed 's/&amp;/\&/g')
+NOTIMG=$(grep -o '/_image?url=[^"]*page\.html[^"]*' <<<"$page" | head -1 | sed 's/&amp;/\&/g')
+check "go through keel" is "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$B$IMG")" "200 image/png"
+check "sandboxed" contains "$(curl -sI "$B$IMG" | tr -d '\r')" "sandbox"
+check "only with keel's signature" is "$(status "$B${IMG%sig=*}sig=00000000000000000000000000000000")" 404
+check "and only images" is "$(status "$B$NOTIMG")" 404
 kill "$HOOK_PID" 2>/dev/null
 
 echo "== notifications"
@@ -431,9 +511,10 @@ mail_to() { # mail_to <address> <text>: waits up to 5s for a message to <address
     echo "no mail to $1 containing '$2'"
     return 1
 }
-check "signing up sends a verification link" mail_to ada@example.com "/email/verify?token="
-VERIFY=$(grep -o '/email/verify?token=[A-Za-z0-9_-]*' "$(mail_to ada@example.com /email/verify)" | head -1)
-check "the link verifies the address" contains "$(curl -s "$B$VERIFY")" "is verified"
+check "signing up sends a verification link" mail_to ada@example.com "/email/verify#token="
+VERIFY=$(grep -o '/email/verify#token=[A-Za-z0-9_-]*' "$(mail_to ada@example.com /email/verify)" | head -1 | cut -d= -f2)
+check "opening it verifies nothing yet" bash -c "! curl -s '$B/email/verify' | grep -q 'is verified'"
+check "confirming does" contains "$(curl -s -H "$O" --data-urlencode "token=$VERIFY" "$B/email/verify")" "is verified"
 check "account settings show it" contains "$(curl -s -b "$T/ada" "$B/settings/account")" "Verified"
 check "email everything" is "$(post "$T/ada" /settings/notifications email=all)" 303
 check "bob opens an issue" is "$(post "$T/bob" /ada/engine/issues title="Mail me" body="Watch this")" 303
@@ -443,13 +524,45 @@ check "unverified addresses get none" bash -c "! grep -l 'Mail me' '$T'/mail/*.e
 check "login offers password resets" contains "$(curl -s "$B/login")" "Forgot your password?"
 check "unknown addresses look the same" contains "$(curl -s -H "$O" -d "email=nobody@example.com" "$B/password/forgot")" "Check your email"
 check "request a reset" contains "$(curl -s -H "$O" -d "email=eve@example.com" "$B/password/forgot")" "Check your email"
+check "reset links keep the token out of requests" mail_to eve@example.com "/password/reset#token="
 RESET=$(grep -o 'token=[A-Za-z0-9_-]*' "$(mail_to eve@example.com /password/reset)" | head -1 | cut -d= -f2)
-check "reset form" is "$(status "$B/password/reset?token=$RESET")" 200
+check "reset form" is "$(status "$B/password/reset")" 200
+check "links from before still work" contains "$(curl -s "$B/password/reset?token=$RESET")" "value=\"$RESET\""
 check "set a new password" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/eve2" -H "$O" --data-urlencode "token=$RESET" -d "new=password-reset&confirm=password-reset" "$B/password/reset")" 303
 check "signed in afterwards" contains "$(curl -s -b "$T/eve2" "$B/settings/account")" "eve@example.com"
 check "old sessions are signed out" is "$(status -b "$T/eve" "$B/settings/account")" 303
 check "the new password works" contains "$(curl -s -H "$O" -d "login=eve&password=password-reset" -o /dev/null -w '%{http_code}' "$B/login")" 303
 check "links work once" contains "$(curl -s "$B/password/reset?token=$RESET")" "expired"
+
+echo "== single sign-on"
+sso() { # sso <jar> <identity json>: signs in with the provider; prints where it ended
+    echo "$2" >"$T/idp_user.json"
+    curl -s -L -b "$1" -c "$1" -o "$T/sso.html" -w '%{url_effective}' "$B/login/oidc?next=/explore"
+}
+check "sign-in offers the provider" contains "$(curl -s "$B/login")" "Sign in with Example ID"
+check "a new person gets an account" is "$(sso "$T/sam" '{"sub":"u1","email":"sam@example.com","email_verified":true,"preferred_username":"sam"}')" "$B/explore"
+check "named as the provider says" contains "$(curl -s -b "$T/sam" "$B/settings/account")" "sam@example.com"
+check "and verified" contains "$(curl -s -b "$T/sam" "$B/settings/account")" "Verified"
+check "with no password" contains "$(curl -s -b "$T/sam" "$B/settings/account")" "Your account has no password"
+check "signing in again finds it" is "$(sso "$T/sam2" '{"sub":"u1","email":"sam@example.com","email_verified":true}')" "$B/explore"
+check "the same account" is "$(sqlite3 "$T/data/keel.db" "SELECT COUNT(*) FROM users WHERE email = 'sam@example.com'")" 1
+check "just signed in, it confirms changes without a password" contains "$(curl -s -b "$T/sam" -H "$O" -d name=ci -d expires=30 "$B/settings/tokens")" "Your new token"
+check "and sets a first password" is "$(post "$T/sam" /settings/account/password new=password-sam confirm=password-sam)" 303
+check "which then works" is "$(curl -s -o /dev/null -w '%{http_code}' -H "$O" -d "login=sam&password=password-sam" "$B/login")" 303
+check "the address may come from userinfo" is "$(sso "$T/uma" '{"sub":"u3","email":"uma@example.com","email_verified":true,"userinfo_only":true}')" "$B/explore"
+check "verified addresses connect existing accounts" is "$(sso "$T/ada-sso" '{"sub":"u2","email":"ada@example.com","email_verified":true}')" "$B/explore"
+check "as their owner" contains "$(curl -s -b "$T/ada-sso" "$B/settings/account")" 'value="ada@example.com"'
+check "unverified ones don't" contains "$(sso "$T/bob-sso" '{"sub":"u4","email":"bob@example.com","email_verified":false}'; cat "$T/sso.html")" "An account with the address bob@example.com exists"
+check "settings show the connection" contains "$(curl -s -b "$T/ada" "$B/settings/security")" "connected to Example ID as <strong>ada@example.com</strong>"
+check "which can be undone" is "$(post "$T/ada" /settings/security/sso/delete x=1)" 303
+echo '{"sub":"u2","email":"ada@example.com","email_verified":true}' >"$T/idp_user.json"
+check "and made again from settings" contains "$(curl -s -b "$T/ada" -c "$T/ada" -L -H "$O" -d x=1 "$B/settings/security/sso")" "connected to Example ID"
+curl -s -c "$T/half" -o /dev/null "$B/login/oidc"
+check "a forged state is refused" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?code=x&state=forged")" "match the one started here"
+check "so is a callback without a sign-in" contains "$(curl -s "$B/login/oidc/callback?code=x&state=y")" "took too long"
+check "the provider's refusals are shown" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?error=access_denied&error_description=Not+allowed")" "Example ID said: Not allowed"
+sqlite3 "$T/data/keel.db" "UPDATE users SET disabled_at = 1 WHERE username = 'uma'"
+check "disabled accounts stay out" contains "$(sso "$T/uma2" '{"sub":"u3","email":"uma@example.com","email_verified":true}'; cat "$T/sso.html")" "disabled"
 
 echo "== branch protection"
 check "readers can't manage branch rules" is "$(status -b "$T/eve2" "$B/ada/engine/settings/branches")" 403
@@ -559,6 +672,36 @@ check "main has it" is "$(curl -s "$B/ada/engine/raw/main/api.txt")" api
 check "create a repository" is "$(api_status "$RW" POST /user/repos -d '{"name":"from-api","private":true}')" 201
 check "it's private" is "$(status "$API/repos/ada/from-api")" 404
 check "delete it" is "$(api_status "$RW" DELETE /repos/ada/from-api)" 204
+
+echo "== deploy keys"
+ssh-keygen -q -t ed25519 -N "" -C ci@build -f "$T/deploy"
+ssh-keygen -q -t ed25519 -N "" -C pusher -f "$T/deploy2"
+DEPLOY_SSH="ssh -i $T/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT"
+DEPLOY2_SSH="ssh -i $T/deploy2 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT"
+SSH_URL="ssh://git@127.0.0.1:$SSH_PORT"
+check "unknown keys get nowhere" bash -c "! GIT_SSH_COMMAND='$DEPLOY_SSH' git ls-remote '$SSH_URL/ada/engine.git' 2>/dev/null"
+check "admins add deploy keys" is "$(post "$T/ada" /ada/engine/settings/keys title=ci "key=$(cat "$T/deploy.pub")")" 303
+check "and see them" contains "$(curl -s -b "$T/ada" "$B/ada/engine/settings/keys")" "read-only"
+check "others can't" is "$(status -b "$T/bob" "$B/ada/engine/settings/keys")" 403
+check "a deploy key clones its repository" bash -c "GIT_SSH_COMMAND='$DEPLOY_SSH' git clone -q '$SSH_URL/ada/engine.git' '$T/deployed'"
+check "read-only ones can't push" contains "$(cd "$T/deployed" && git checkout -q -b from-ci && GIT_SSH_COMMAND="$DEPLOY_SSH" git push origin from-ci 2>&1)" "deploy key is read-only"
+check "nor reach other repositories" contains "$(GIT_SSH_COMMAND="$DEPLOY_SSH" git ls-remote "$SSH_URL/ada/secret.git" 2>&1)" "not found"
+check "or the wiki" contains "$(GIT_SSH_COMMAND="$DEPLOY_SSH" git ls-remote "$SSH_URL/ada/engine.wiki.git" 2>&1)" "not found"
+check "the greeting names the key" contains "$($DEPLOY_SSH -T git@127.0.0.1 2>&1)" "deploy key “ci”"
+check "Git LFS works with them" contains "$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine download 2>&1)" '"Bearer lfsk.'
+LFS_TOKEN=$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine download | field '["header"]["Authorization"]')
+check "for downloads" is "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $LFS_TOKEN" -H "Content-Type: application/vnd.git-lfs+json" -d '{"operation":"download","objects":[]}' "$B/ada/engine.git/info/lfs/objects/batch")" 200
+check "not uploads, read-only" contains "$($DEPLOY_SSH git@127.0.0.1 git-lfs-authenticate ada/engine upload 2>&1)" "read-only"
+check "a person's key can't be one" is "$(api_status "$RW" POST /repos/ada/engine/keys -d "{\"key\":\"$(cat "$T/key.pub")\"}")" 422
+check "the API adds keys that push" is "$(api "$RW" POST /repos/ada/engine/keys -d "{\"title\":\"pusher\",\"key\":\"$(cat "$T/deploy2.pub")\",\"read_only\":false}" | field '["read_only"]')" False
+check "and lists them" is "$(api "$RW" GET /repos/ada/engine/keys | field '[1]["title"]')" pusher
+check "a writing key pushes" bash -c "cd '$T/deployed' && GIT_SSH_COMMAND='$DEPLOY2_SSH' git push -q origin from-ci"
+check "the branch is there" contains "$(git ls-remote "$B/ada/engine.git")" refs/heads/from-ci
+echo ci >"$T/deployed/ci.txt" && git -C "$T/deployed" add -A && git -C "$T/deployed" -c user.name=CI -c user.email=ci@example.com commit -qm "From CI"
+check "branch protection still applies" contains "$(cd "$T/deployed" && GIT_SSH_COMMAND="$DEPLOY2_SSH" git push origin HEAD:main 2>&1)" "protected"
+DK=$(api "$RW" GET /repos/ada/engine/keys | field '[1]["id"]')
+check "deleting a key" is "$(api_status "$RW" DELETE "/repos/ada/engine/keys/$DK")" 204
+check "stops it working" bash -c "! GIT_SSH_COMMAND='$DEPLOY2_SSH' git ls-remote '$SSH_URL/ada/engine.git' 2>/dev/null"
 
 echo "== administration"
 check "others don't see it" is "$(status -b "$T/bob" "$B/admin")" 404
@@ -745,6 +888,8 @@ check "new pushes follow by themselves" synced engine-backup refs/heads/pushed-l
 
 echo "== backups and health"
 check "health" is "$(curl -s "$B/healthz" | field '["status"]')" ok
+check "without telling strangers the version" bash -c "! curl -s '$B/healthz' | grep -q version"
+check "but telling monitoring" contains "$(curl -s -H 'Authorization: Bearer smoke-metrics' "$B/healthz")" '"version"'
 check "backup a running server" bash -c "'$BIN' backup --data-dir '$T/data' '$T/backup' | grep -q 'Backed up'"
 check "the copy has the repositories" git clone -q "$T/backup/repos/1.git" "$T/restored"
 check "with their branches" is "$(git -C "$T/restored" rev-parse HEAD 2>/dev/null)" "$(git --git-dir "$T/data/repos/1.git" rev-parse HEAD)"
@@ -1276,7 +1421,7 @@ check "and their cards' repositories" is "$(api "$RW" GET /orgs/acme/projects/1 
 check "issue search finds them" is "$(api "$RW" GET "/search/issues?q=project:acme/1" | field '["total_count"]')" 1
 
 echo "== pages"
-for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs \
+for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/main/src/main.rs /ada/engine/blame/main/src/main.rs \
     /ada/engine/commits/main /ada/engine/branches /ada/engine/issues /ada/engine/issues/new \
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \

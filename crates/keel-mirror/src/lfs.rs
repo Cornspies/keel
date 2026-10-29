@@ -1,11 +1,10 @@
 //! A Git LFS client (batch API, basic transfers), for mirrors.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
-use keel_core::{Core, MirrorRemote, Outbound};
+use keel_core::{Core, MirrorRemote};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -22,18 +21,7 @@ pub fn endpoint(url: &str) -> String {
     if url.ends_with(".git") { format!("{url}/info/lfs") } else { format!("{url}.git/info/lfs") }
 }
 
-/// Only http(s), and no literal private addresses (names are checked by
-/// the client's resolver).
-pub(crate) fn check_url(url: &reqwest::Url, outbound: &Outbound) -> Result<(), String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("{} isn't an http(s) URL", url.scheme()));
-    }
-    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
-    if host.parse::<IpAddr>().is_ok_and(|ip| !outbound.allows(ip)) {
-        return Err("that address may not be reached".into());
-    }
-    Ok(())
-}
+pub(crate) use keel_hooks::check_url;
 
 #[derive(Deserialize)]
 struct BatchResponse {
@@ -262,6 +250,7 @@ pub async fn upload(core: &Core, client: &reqwest::Client, remote: &MirrorRemote
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keel_core::Outbound;
 
     #[test]
     fn endpoints_and_urls() {

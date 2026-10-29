@@ -120,6 +120,14 @@ struct SecurityPage {
     codes: Vec<String>,
     codes_left: i64,
     error: Option<String>,
+    /// With single sign-on: the provider, and how the account is connected.
+    sso: Option<SsoView>,
+}
+
+pub(crate) struct SsoView {
+    pub name: String,
+    /// The provider's email for the account and since when, if connected.
+    pub connected: Option<(String, String)>,
 }
 
 fn qr_data_uri(text: &str) -> String {
@@ -148,10 +156,19 @@ async fn security_page(state: &AppState, user: User, codes: Vec<String>, error: 
             (spaced, qr_data_uri(&uri))
         })
     };
+    let sso = match &state.core.config.oidc {
+        Some(o) => {
+            let ids = state.core.identities(fresh.id).await?;
+            let connected = ids.into_iter().find(|i| i.issuer == o.issuer).map(|i| (i.email, crate::render::date(i.created_at)));
+            Some(SsoView { name: o.name.clone(), connected })
+        }
+        None => None,
+    };
     html(SecurityPage {
+        sso,
         enabled: fresh.totp_enabled,
         codes_left: state.core.recovery_codes_left(fresh.id).await?,
-        page: Page::new(state, Some(fresh), "Two-factor authentication"),
+        page: Page::new(state, Some(fresh), "Security"),
         nav: "security",
         setup,
         codes,
@@ -185,28 +202,44 @@ pub async fn enable(State(state): State<AppState>, SignedIn(user): SignedIn, For
 
 #[derive(Deserialize)]
 pub struct PasswordForm {
+    #[serde(default)]
     password: String,
 }
 
-/// Whether `password` is the user's (to confirm sensitive changes).
-async fn password_ok(state: &AppState, user: &User, password: &str) -> AppResult<bool> {
-    Ok(state.core.authenticate(&user.username, password).await?.is_some_and(|u| u.id == user.id))
+/// Confirms a sensitive change (see `session::confirm`); `Some` is the
+/// page saying why not.
+async fn confirmed(state: &AppState, user: &User, headers: &HeaderMap, password: &str) -> AppResult<Option<axum::response::Response>> {
+    match crate::session::confirm(state, user, headers, password).await {
+        Ok(()) => Ok(None),
+        Err(keel_core::Error::Invalid(msg)) => Ok(Some(security_page(state, user.clone(), Vec::new(), Some(msg)).await?)),
+        Err(e) => Err(e.into()),
+    }
 }
 
-pub async fn disable(State(state): State<AppState>, SignedIn(user): SignedIn, Form(f): Form<PasswordForm>) -> AppResult {
-    if !password_ok(&state, &user, &f.password).await? {
-        return security_page(&state, user, Vec::new(), Some("That password isn't right.".into())).await;
+pub async fn disable(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    headers: HeaderMap,
+    Form(f): Form<PasswordForm>,
+) -> AppResult {
+    if let Some(refused) = confirmed(&state, &user, &headers, &f.password).await? {
+        return Ok(refused);
     }
     state.core.disable_totp(user.id).await?;
     Ok(Redirect::to("/settings/security").into_response())
 }
 
-pub async fn recovery(State(state): State<AppState>, SignedIn(user): SignedIn, Form(f): Form<PasswordForm>) -> AppResult {
+pub async fn recovery(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    headers: HeaderMap,
+    Form(f): Form<PasswordForm>,
+) -> AppResult {
     if !user.totp_enabled {
         return Ok(Redirect::to("/settings/security").into_response());
     }
-    if !password_ok(&state, &user, &f.password).await? {
-        return security_page(&state, user, Vec::new(), Some("That password isn't right.".into())).await;
+    if let Some(refused) = confirmed(&state, &user, &headers, &f.password).await? {
+        return Ok(refused);
     }
     let codes = state.core.new_recovery_codes(user.id).await?;
     security_page(&state, user, codes, None).await

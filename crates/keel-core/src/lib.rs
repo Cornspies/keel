@@ -19,8 +19,10 @@ mod avatars;
 mod backup;
 mod cache;
 mod config;
+mod deploy_keys;
 mod events;
 mod file_edits;
+mod identities;
 mod imports;
 mod insights;
 mod issue_templates;
@@ -39,6 +41,7 @@ mod protection;
 mod pulls;
 mod quotas;
 mod reactions;
+mod secrets;
 mod releases;
 mod repos;
 mod reviews;
@@ -63,7 +66,9 @@ pub use backup::{BackupReport, backup};
 pub use activity::{Activity, IssueAction, label_json, time as json_time};
 pub use admin::{AdminUser, SiteSettings, SiteStats};
 pub use cache::EntryCommits;
-pub use config::{Config, MailConfig, Network, SshConfig};
+pub use deploy_keys::{DeployKey, MAX_DEPLOY_KEYS};
+pub use config::{Config, MailConfig, Network, OidcConfig, SshConfig};
+pub use identities::{Claims, ExternalIdentity, SsoOutcome};
 pub use insights::{Contributor, DAY, RepoActivity};
 pub use issues::{Comment, Issue, IssueCounts, IssueFilter};
 pub use labels::{LABEL_COLORS, Label};
@@ -175,6 +180,30 @@ pub struct Core {
     signing_key: Arc<signing::SigningKey>,
     /// See [`Core::setup_code`].
     setup_code: Arc<std::sync::Mutex<Option<String>>>,
+    /// Encrypts secrets kept in the database.
+    secrets: Arc<secrets::SecretBox>,
+}
+
+/// Makes a data directory from before 0.15 (or one someone loosened)
+/// private again: the directory `0700`, the database files `0600`. SQLite
+/// gives its `-wal` and `-shm` files the database's permissions.
+fn tighten_permissions(data_dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let db = data_dir.join("keel.db");
+        let wal = data_dir.join("keel.db-wal");
+        let shm = data_dir.join("keel.db-shm");
+        for (path, mode) in [(data_dir, 0o700), (db.as_path(), 0o600), (wal.as_path(), 0o600), (shm.as_path(), 0o600)] {
+            let Ok(meta) = std::fs::metadata(path) else { continue };
+            if meta.permissions().mode() & 0o077 != 0 {
+                match std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                    Ok(()) => tracing::info!("made {} private ({mode:o})", path.display()),
+                    Err(e) => tracing::warn!("{} is readable by others and couldn't be changed: {e}", path.display()),
+                }
+            }
+        }
+    }
 }
 
 impl Core {
@@ -204,9 +233,25 @@ impl Core {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&db).await?;
+        tighten_permissions(&config.data_dir);
         let token_secret = Arc::new(Self::load_token_secret(&db).await?);
         let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), true)?;
-        let core = Self::assemble(db, config, token_secret, signing_key);
+        // A missing key must not be replaced while secrets need the old one.
+        let key_path = config.secret_key_path();
+        let create = !key_path.exists();
+        if create && secrets::any_encrypted(&db).await? {
+            anyhow::bail!(
+                "the database has encrypted secrets, but their key {} is missing: restore it, \
+                 or point --secret-key-file at it",
+                key_path.display()
+            );
+        }
+        let secret_box = secrets::SecretBox::load(&key_path, create)?;
+        let core = Self::assemble(db, config, token_secret, signing_key, secret_box);
+        let encrypted = core.encrypt_plain_secrets().await?;
+        if encrypted > 0 {
+            tracing::info!("encrypted {encrypted} secrets stored by an earlier version");
+        }
         core.load_settings().await?;
         core.announce_setup_code().await?;
         core.delete_expired_sessions().await?;
@@ -228,10 +273,16 @@ impl Core {
             .busy_timeout(Duration::from_secs(5));
         let db = SqlitePoolOptions::new().max_connections(2).connect_with(options).await?;
         let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), false)?;
-        Ok(Self::assemble(db, config, Arc::default(), signing_key))
+        Ok(Self::assemble(db, config, Arc::default(), signing_key, secrets::SecretBox::ephemeral()))
     }
 
-    fn assemble(db: SqlitePool, config: Config, token_secret: Arc<String>, signing_key: signing::SigningKey) -> Self {
+    fn assemble(
+        db: SqlitePool,
+        config: Config,
+        token_secret: Arc<String>,
+        signing_key: signing::SigningKey,
+        secret_box: secrets::SecretBox,
+    ) -> Self {
         Self {
             db,
             config: Arc::new(config),
@@ -249,6 +300,7 @@ impl Core {
             login_failures: Arc::default(),
             signing_key: Arc::new(signing_key),
             setup_code: Arc::default(),
+            secrets: Arc::new(secret_box),
         }
     }
 

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="narrow">
+  <h1>Verify your email address</h1>
+  <form method="post" action="/email/verify" class="form">
+    <label data-fragment-field>Verification code <input name="token" value="{{ token }}" required autocomplete="off" data-fragment="token">
+      <span class="hint">The part of the link in the email after <span class="mono">token=</span>.</span></label>
+    <button class="btn btn-primary">Verify my address</button>
+  </form>
+</div>
+{% endblock %}

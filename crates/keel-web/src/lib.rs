@@ -5,6 +5,8 @@ mod admin;
 mod api;
 mod archive;
 mod assets;
+mod deploy_keys;
+mod blame;
 mod edit;
 mod error;
 mod explore;
@@ -19,8 +21,10 @@ mod labels;
 mod lastcommit;
 mod lfs;
 mod notifications;
+mod oidc;
 mod orgs;
 mod hooks;
+mod images;
 mod pages;
 mod password;
 mod profile;
@@ -58,6 +62,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use error::AppError;
+pub use oidc::secure_url;
 use error::AppResult;
 
 pub(crate) fn now() -> i64 {
@@ -80,6 +85,15 @@ pub struct Inner {
     last_commits: Cache<(Oid, String), Arc<HashMap<String, CommitSummary>>>,
     highlighted: Cache<(Oid, String), Arc<Vec<String>>>,
     markdown: Cache<(Oid, String), Arc<String>>,
+    /// Blame per (commit, path).
+    blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
+    /// Limits how many blames run at once.
+    blame_slots: tokio::sync::Semaphore,
+    /// The single sign-on provider, if configured.
+    oidc: Option<oidc::Provider>,
+    /// Fetches images for [`images`], a few at a time.
+    image_client: reqwest::Client,
+    image_slots: Arc<tokio::sync::Semaphore>,
     /// Merge result per (base, head); `None` if head is already merged.
     mergeability: Cache<(Oid, Oid), Option<keel_git::Mergeability>>,
     /// Unread notifications per user id, looked up with the session on each
@@ -110,7 +124,11 @@ impl AppState {
 
     fn build(core: Core) -> Self {
         let mib = |n: u64| n * 1024 * 1024;
+        images::set_key(core.image_proxy_key());
         Self(Arc::new(Inner {
+            image_client: images::client(&core.config.outbound()),
+            oidc: core.config.oidc.clone().map(oidc::Provider::new),
+            image_slots: Arc::new(tokio::sync::Semaphore::new(images::CONCURRENT_IMAGES)),
             search: search::open_index(&core.config.data_dir),
             core,
             assets: assets::Assets::new(),
@@ -128,6 +146,14 @@ impl AppState {
                 .max_capacity(mib(32))
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
+            blames: Cache::builder()
+                .max_capacity(mib(64))
+                .weigher(|_, v: &Arc<keel_git::Blame>| {
+                    let commits: usize = v.commits.values().map(|c| c.summary.len() + c.author.len() + c.email.len() + 64).sum();
+                    (v.hunks.iter().map(|h| h.orig_path.len() + 96).sum::<usize>() + commits).min(u32::MAX as usize) as u32
+                })
+                .build(),
+            blame_slots: tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get().div_ceil(2))),
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
             started: std::time::Instant::now(),
@@ -159,6 +185,11 @@ pub(crate) struct Page {
     pub banner: String,
     /// `auto` (follow the system), `light` or `dark`.
     pub theme: &'static str,
+    /// What the single sign-on provider is called, if there's one.
+    pub sso_name: Option<String>,
+    /// Whether the viewer has a password to confirm changes with (not
+    /// accounts made with single sign-on, until they set one).
+    pub has_password: bool,
 }
 
 impl Page {
@@ -166,6 +197,8 @@ impl Page {
         Self {
             unread: viewer.as_ref().and_then(|v| state.unread.get(&v.id)).unwrap_or(0),
             theme: theme::current(viewer.as_ref()),
+            sso_name: state.core.config.oidc.as_ref().map(|o| o.name.clone()),
+            has_password: viewer.as_ref().is_none_or(User::has_password),
             mail_enabled: state.core.mail_enabled(),
             banner: state.core.site_settings().banner,
             title: title.into(),
@@ -233,9 +266,13 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/account/password", post(settings::change_password))
         .route("/settings/account/verify", post(settings::send_verification))
         .route("/settings/notifications", get(settings::notifications).post(settings::save_notifications))
+        .route("/login/oidc", get(oidc::start))
+        .route("/login/oidc/callback", get(oidc::callback))
+        .route("/settings/security/sso", post(oidc::link))
+        .route("/settings/security/sso/delete", post(oidc::unlink))
         .route("/password/forgot", get(password::forgot_form).post(password::forgot))
         .route("/password/reset", get(password::reset_form).post(password::reset))
-        .route("/email/verify", get(password::verify))
+        .route("/email/verify", get(password::verify_form).post(password::verify))
         .route("/settings/keys", get(settings::keys).post(settings::add_key))
         .route("/settings/keys/{id}/delete", post(settings::delete_key))
         .route("/settings/gpg-keys", post(settings::add_gpg_key))
@@ -248,6 +285,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/tree/{*rest}", get(repo::tree))
         .route("/{owner}/{repo}/blob/{*rest}", get(repo::blob))
         .route("/{owner}/{repo}/raw/{*rest}", get(repo::raw))
+        .route("/{owner}/{repo}/blame/{*rest}", get(blame::blame))
         .route("/{owner}/{repo}/archive/{*rest}", get(archive::download))
         .route("/{owner}/{repo}/last-commits/{*rest}", get(repo::last_commits_json))
         .route("/{owner}/{repo}/commits", get(repo::commits_default))
@@ -293,6 +331,8 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/settings/hooks/{id}/test", post(hooks::repo_test))
         .route("/{owner}/{repo}/settings/hooks/{id}/deliveries/{delivery}/redeliver", post(hooks::repo_redeliver))
         .route("/{owner}/{repo}/settings/branches", get(protection::index).post(protection::create))
+        .route("/{owner}/{repo}/settings/keys", get(deploy_keys::index).post(deploy_keys::create))
+        .route("/{owner}/{repo}/settings/keys/{id}/delete", post(deploy_keys::delete))
         .route("/{owner}/{repo}/settings/branches/{id}", post(protection::update))
         .route("/{owner}/{repo}/settings/branches/{id}/delete", post(protection::delete))
         .route("/{owner}/{repo}/milestones", get(milestones::index).post(milestones::create))
@@ -393,6 +433,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks).post(lfs::create_lock))
         .route("/{owner}/{repo}/info/lfs/locks/{id}/unlock", post(lfs::unlock))
         .route("/healthz", get(health))
+        .route("/_image", get(images::image))
         .route("/metrics", get(metrics))
         .route("/signing-key.pub", get(signing_key));
 
@@ -420,19 +461,25 @@ async fn track(State(state): State<AppState>, req: Request, next: Next) -> Respo
     res
 }
 
-/// Prometheus metrics, for requests with the configured bearer token.
-async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let Some(token) = state.core.config.metrics_token.as_deref() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+/// Whether the request carries the configured metrics token
+/// (`Authorization: Bearer …`).
+fn has_metrics_token(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(token) = state.core.config.metrics_token.as_deref() else { return false };
     let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
     // Constant-time, so the token can't be guessed byte by byte.
-    let ok = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0;
-    if !ok {
+    given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0
+}
+
+/// Prometheus metrics, for requests with the configured bearer token.
+async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if state.core.config.metrics_token.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !has_metrics_token(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], "Unauthorized\n").into_response();
     }
     match state.core.metrics_text().await {
@@ -445,15 +492,17 @@ async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) 
 }
 
 /// For monitoring and load balancers: 200 if the server can use its
-/// database, 503 otherwise.
-async fn health(State(state): State<AppState>) -> Response {
+/// database, 503 otherwise. The version and uptime only go to requests
+/// with the metrics token: to others the version would say which known
+/// vulnerabilities to try.
+async fn health(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let database = state.core.database_ok().await;
-    let body = serde_json::json!({
-        "status": if database { "ok" } else { "unavailable" },
-        "version": env!("CARGO_PKG_VERSION"),
-        "database": database,
-        "uptime_seconds": state.started.elapsed().as_secs(),
-    });
+    let mut body = serde_json::json!({ "status": if database { "ok" } else { "unavailable" } });
+    if has_metrics_token(&state, &headers) {
+        body["version"] = env!("CARGO_PKG_VERSION").into();
+        body["database"] = database.into();
+        body["uptime_seconds"] = state.started.elapsed().as_secs().into();
+    }
     let status = if database { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, [(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
 }
@@ -489,7 +538,7 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     let defaults = [
         (
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src * data:; \
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; \
              form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),

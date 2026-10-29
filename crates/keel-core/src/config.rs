@@ -38,6 +38,28 @@ pub struct Config {
     /// Networks webhooks, mirrors and imports may not reach, besides the
     /// private ones (e.g. the server's own public addresses).
     pub blocked_networks: Vec<Network>,
+    /// The key secrets in the database are encrypted with (see
+    /// `secrets`); `secret.key` in the data directory by default.
+    pub secret_key_file: Option<PathBuf>,
+    /// Signing in with an OpenID Connect provider, if configured.
+    pub oidc: Option<OidcConfig>,
+}
+
+/// Single sign-on with an OpenID Connect provider (Keycloak, Authentik,
+/// Google, Microsoft Entra, …), registered there as a confidential client
+/// with the redirect URI `<base URL>/login/oidc/callback`.
+#[derive(Clone, Debug)]
+pub struct OidcConfig {
+    /// The provider's issuer URL, e.g. `https://id.example.com/realms/main`;
+    /// its configuration is at `/.well-known/openid-configuration` below it.
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// The sign-in button says "Sign in with <name>".
+    pub name: String,
+    /// Create accounts for whoever the provider signs in, even when sign-ups
+    /// are closed: for a provider that only has your own people.
+    pub allow_signup: bool,
 }
 
 /// An IP network, like `203.0.113.7/32` or `2001:db8::/48`.
@@ -115,6 +137,8 @@ impl Default for Config {
             quota_bytes: None,
             max_repos: None,
             blocked_networks: Vec::new(),
+            secret_key_file: None,
+            oidc: None,
         }
     }
 }
@@ -127,6 +151,10 @@ impl Config {
     /// Git hooks keel runs (see `protection.rs`).
     pub fn hooks_dir(&self) -> PathBuf {
         self.data_dir.join("hooks")
+    }
+
+    pub fn secret_key_path(&self) -> PathBuf {
+        self.secret_key_file.clone().unwrap_or_else(|| self.data_dir.join(crate::secrets::KEY_FILE))
     }
 
     pub fn repos_dir(&self) -> PathBuf {

@@ -84,8 +84,9 @@ pub async fn backup(data_dir: &Path, out: &Path) -> anyhow::Result<BackupReport>
 
     // 3. The SSH host key (so clients don't see a changed key after a
     // restore), the commit signing key (so commits keel signed stay
-    // verified) and large files.
-    for name in ["ssh_host_ed25519_key", crate::signing::KEY_FILE] {
+    // verified), the key the database's secrets are encrypted with (if it's
+    // kept here rather than with --secret-key-file) and large files.
+    for name in ["ssh_host_ed25519_key", crate::signing::KEY_FILE, crate::secrets::KEY_FILE] {
         let key = data_dir.join(name);
         if key.is_file() {
             std::fs::copy(&key, out.join(name))?;
@@ -169,6 +170,9 @@ mod tests {
         core.create_issue(repo.id, &ada, "Kept", "").await.unwrap();
         let page = crate::WikiEdit { page: None, title: "Home", text: "Hi", message: "", base: None };
         core.save_wiki_page(&repo, &ada, page).await.unwrap();
+        core.create_webhook(crate::HookOwner::Repo(repo.id), "https://ci.example.com/hook", "s3cret", &["push".into()], true)
+            .await
+            .unwrap();
         // Simulate a repository deleted after the snapshot.
         std::fs::remove_dir_all(core.repo_path(&gone)).unwrap();
         std::fs::create_dir_all(dir.path().join("lfs/ab/cd")).unwrap();
@@ -202,5 +206,7 @@ mod tests {
         assert!(restored.authenticate("ada", "password1").await.unwrap().is_some());
         assert_eq!(restored.signing_public_key(), core.signing_public_key(), "the same signing key");
         assert_eq!(restored.wiki_page(r.id, "Home", None).await.unwrap().unwrap().text, "Hi");
+        let hooks = restored.webhooks(crate::HookOwner::Repo(r.id)).await.unwrap();
+        assert_eq!(hooks[0].secret, "s3cret", "with the key the secrets were encrypted with");
     }
 }

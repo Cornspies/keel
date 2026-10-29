@@ -6,10 +6,13 @@ One binary, one data directory, no external services.
 **Features:**
 
 - **Git hosting:** clone, fetch and push over HTTP (password or access token)
-  and over a built-in SSH server.
+  and over a built-in SSH server. Deploy keys give servers and CI SSH access
+  to one repository, read-only or with pushing.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
-  `.tar.gz`.
+  `.tar.gz`. Blame shows the commit that last changed each line, links to the
+  blame before it, and skips the commits listed in `.git-blame-ignore-revs`
+  (as on GitHub).
 - **Verified commits:** commits signed with SSH or GPG keys people added show
   as verified (or say why not), and so do the commits keel makes itself
   (merges, squashes, rebases, edits in the browser), signed with its own key.
@@ -65,7 +68,8 @@ One binary, one data directory, no external services.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
 - **People:** accounts with optional two-factor authentication (authenticator
-  apps and recovery codes), organizations (owners and members),
+  apps and recovery codes), single sign-on with an OpenID Connect provider
+  (Keycloak, Authentik, Google, Microsoft Entra, …), organizations (owners and members),
   per-repository collaborators (read/write/admin), private repositories.
 - **Importing** from GitHub, Gitea or Forgejo: the code with Git LFS files,
   issues and pull requests (numbers kept), comments and reviews, labels,
@@ -112,8 +116,18 @@ git push ssh://git@localhost:2222/<you>/<repo>.git main    # SSH: add your key u
 ```
 
 All state lives in `./data`: `keel.db` (SQLite), `repos/<id>.git` (bare
-repositories), `lfs/` (Git LFS files), the generated SSH host key, and
-`search/` (the code search index, which is rebuilt automatically if deleted).
+repositories), `lfs/` (Git LFS files), the generated SSH host key, the key
+keel signs its commits with, `secret.key` (see below) and `search/` (the
+code search index, which is rebuilt automatically if deleted).
+
+Secrets keel has to read back (two-factor secrets, webhook secrets, mirror
+passwords, import tokens) are stored encrypted (AES-256-GCM) with
+`secret.key`, so a copy of the database alone doesn't give them away. To keep
+the key out of the data directory, and so out of its backups, move it
+elsewhere and point `--secret-key-file` at it. Keep a copy: without it,
+keel won't start on a database with encrypted secrets, rather than make a
+new key that can't read them. Secrets stored by older versions are encrypted
+at the first start.
 
 ### Backups and monitoring
 
@@ -123,7 +137,8 @@ repositories), `lfs/` (Git LFS files), the generated SSH host key, and
 
 copies the data directory while the server keeps running: the database as a
 consistent snapshot, then every repository and wiki, LFS file and release
-file, the SSH host key and the key keel signs its commits with. The
+file, the SSH host key, the key keel signs its commits with and
+`secret.key` if it's in the data directory. The
 copy is a data directory itself, so restoring is `keel serve --data-dir
 /backups/keel-2026-10-24` (or copying it back). Archive it with `tar` or your
 backup tool of choice. The database holds secrets (two-factor and webhook
@@ -131,8 +146,10 @@ secrets, mirror passwords), so the copy's directory is readable only by its
 owner (`0700`, the database `0600`), like a new data directory; symlinks in
 the data directory aren't followed.
 
-`GET /healthz` answers `200 {"status":"ok",…}` while the server can use its
-database and `503` otherwise, for load balancers and uptime monitors.
+`GET /healthz` answers `200 {"status":"ok"}` while the server can use its
+database and `503` otherwise, for load balancers and uptime monitors. With
+the metrics token (below) it also says keel's version and uptime; without
+it, the version would tell strangers which known vulnerabilities to try.
 
 With `--metrics-token` (or `KEEL_METRICS_TOKEN`) set, `GET /metrics` serves
 Prometheus metrics to requests with that bearer token: requests and their
@@ -166,6 +183,10 @@ Every flag can also be set as an environment variable.
 | `--max-push-size` | `KEEL_MAX_PUSH_SIZE` | `4096` (MiB) per push |
 | `--quota` | `KEEL_QUOTA` | no limit; MiB each account may store (git data, wikis, LFS and release files) |
 | `--max-repos` | `KEEL_MAX_REPOS` | no limit; repositories per account (and organizations a person may own) |
+| `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret` | `KEEL_OIDC_ISSUER`, `KEEL_OIDC_CLIENT_ID`, `KEEL_OIDC_CLIENT_SECRET` | no single sign-on; see below |
+| `--oidc-name` | `KEEL_OIDC_NAME` | `single sign-on`: the button says "Sign in with <name>" |
+| `--oidc-allow-signup` | `KEEL_OIDC_ALLOW_SIGNUP` | off: the provider creates accounts only while sign-ups are open |
+| `--secret-key-file` | `KEEL_SECRET_KEY_FILE` | `<data dir>/secret.key`; created if missing |
 | `--block-outbound` | `KEEL_BLOCK_OUTBOUND` | none; more networks webhooks, mirrors and imports can't reach, e.g. `203.0.113.0/24,2001:db8::/32` |
 | `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
 | `--smtp-url` | `KEEL_SMTP_URL` | no email |
@@ -193,6 +214,119 @@ an `https://` base URL. With open sign-ups, set `--quota` and `--max-repos`
 `--block-outbound`: they count as public, so without it webhooks and mirrors
 can reach services listening on them.
 
+### Single sign-on
+
+People can sign in with an OpenID Connect provider. Register keel there as
+a confidential client (with a client secret) using the authorization code
+flow, with the redirect URI `https://git.example.com/login/oidc/callback`
+and the scopes `openid email profile`. Then:
+
+```sh
+KEEL_OIDC_CLIENT_SECRET='…' ./keel serve --base-url https://git.example.com \
+    --oidc-issuer https://id.example.com/realms/main --oidc-client-id keel --oidc-name "Example ID"
+```
+
+The sign-in page then offers "Sign in with Example ID". Which account that
+signs in to:
+
+1. the account it's connected to, if it is (Settings → Security →
+   Connect, or the first time it was used);
+2. otherwise, the account with the same email address, if the provider says
+   it verified the address and keel verified it too, so it's the same
+   person; the two are then connected;
+3. otherwise a new account, named after the provider's username, while
+   sign-ups are open, or always with `--oidc-allow-signup` (for a provider
+   that only has your own people; don't use it with a public provider like
+   Google). The first account, the administrator, can't be made this way: it
+   needs the setup code.
+
+Accounts made this way have no password. Where keel asks for the password
+(adding keys and tokens, changing the address), they're confirmed by having
+signed in in the last ten minutes, in that browser; they can set a password
+in Settings → Account. Two-factor authentication still applies after signing
+in with the provider, if it's on. Disconnecting needs a password, so the
+account can still be signed in to.
+
+keel uses the authorization code flow with PKCE, its state in a signed
+cookie for ten minutes. It checks the ID token's issuer, audience, expiry and
+nonce; it doesn't check its signature, which OpenID Connect allows because
+keel gets it directly from the provider's token endpoint over HTTPS (Core
+1.0, 3.1.3.7). So the issuer and its endpoints must be `https://` (or
+`http://` to localhost, for trying it out).
+
+### Behind nginx
+
+keel can't limit requests per address behind a proxy: it only sees the
+proxy's address, and it doesn't trust `X-Forwarded-For`, which anyone can
+send when keel is reachable directly. So the proxy should do it. keel limits
+wrong passwords per account (ten in 15 minutes); a per-address limit stops one
+client from guessing across many accounts, or from locking someone out by
+sending wrong passwords for their account. A configuration:
+
+```nginx
+# Requests per client address. Signing in: 10 a minute, bursts of 5.
+limit_req_zone $binary_remote_addr zone=keel_login:10m rate=10r/m;
+# Git over HTTP with a password or token (Basic credentials): 60 a minute,
+# bursts of 60, which a clone or push (2–4 requests) is far from.
+map $http_authorization $keel_basic { "~^Basic " $binary_remote_addr; default ""; }
+limit_req_zone $keel_basic zone=keel_git:10m rate=60r/m;
+# Everything else: 20 a second, bursts of 100.
+limit_req_zone $binary_remote_addr zone=keel_all:10m rate=20r/s;
+limit_req_status 429;
+
+server {
+    listen 443 ssl http2;              # nginx 1.25.1+: `listen 443 ssl;` and `http2 on;`
+    server_name git.example.com;
+    ssl_certificate     /etc/letsencrypt/live/git.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/git.example.com/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    client_max_body_size 0;            # keel limits pushes (--max-push-size) and LFS files itself
+    proxy_request_buffering off;       # stream pushes to keel
+    proxy_buffering off;               # stream clones back
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    large_client_header_buffers 4 16k; # caps URL length
+    proxy_set_header Host $host;
+
+    # Where passwords and codes are checked: sign-in, its second step,
+    # sign-up, and password resets.
+    location ~ ^/(login|login/2fa|register|password/forgot|password/reset)$ {
+        limit_req zone=keel_login burst=5 nodelay;
+        limit_req zone=keel_all burst=100 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location / {
+        limit_req zone=keel_git burst=60 nodelay;   # only requests with Basic credentials
+        limit_req zone=keel_all burst=100 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+server { listen 80; server_name git.example.com; return 301 https://$host$request_uri; }
+```
+
+The `keel_git` zone only counts requests that carry Basic credentials, since
+requests with an empty key aren't limited: that covers git over HTTP and
+Git LFS with a password or token, without slowing down browsing. Giving
+locations both zones applies both.
+
+Check it from another machine: quick wrong sign-ins get `429` once the burst
+of five is used up:
+
+```sh
+for i in $(seq 15); do
+  curl -s -o /dev/null -w '%{http_code} ' -H 'Origin: https://git.example.com' \
+    -d login=nobody -d password=wrong https://git.example.com/login
+done; echo
+# 200 200 200 200 200 200 429 429 …
+```
+
+People behind one address (an office, a university) share its limits; if
+that's a problem, raise the rates or give their network its own zone with a
+`geo` block. Prefer SSH keys or tokens for git: neither is limited per
+account, and SSH doesn't go through nginx at all.
+
 ### JSON API
 
 The API lives under `/api/v1` and follows GitHub's REST API where that's easy:
@@ -214,6 +348,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
 | `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`) |
+| `GET`, `POST /repos/{owner}/{repo}/keys`, `GET`, `DELETE …/keys/{id}` | deploy keys, for repository admins: `title`, `key`, `read_only` (unlike GitHub's, `true` unless set to `false`) |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template`, `archived` |
 | `POST /repos/{owner}/{repo}/generate` | from a template: `owner`, `name`, `description`, `private`, `include_all_branches` |
 | `GET`, `PUT /repos/{owner}/{repo}/topics` | `{"names": ["rust", "cli"]}` |
@@ -665,6 +800,17 @@ or other internal addresses: names are resolved by keel and checked on the
 addresses actually connected to, so a hostname pointing at an internal address
 doesn't get around it.
 
+**Deploy keys** are SSH keys of a repository rather than of a person, for
+servers and CI: Settings → Deploy keys, or the API. A key reaches only its
+repository (not its wiki), only reads unless it's allowed to push, and
+pushes with it follow the branch protection rules like anyone's (pushes by
+a deploy key have no pusher in the activity feed and webhooks, like a
+mirror's). A key can be one repository's deploy key, or someone's SSH key,
+but not both, so it always means one thing. Git LFS works with them over
+SSH (`git-lfs-authenticate` hands out a token for the key); locking files
+doesn't, since a lock belongs to a person, and to a deploy key every lock is
+someone else's.
+
 **Permissions:** a user's access to a repository is the highest of: admin for
 the owner, organization owners and site admins; write for organization
 members; the collaborator role; read for anyone if the repository is public.
@@ -675,7 +821,15 @@ maintenance): cache warming, search indexing and pull request updates.
 
 **Caches are keyed by git object ids**, so they never need invalidation, only
 a size bound: last commits per (commit, directory), highlighted files per
-blob, rendered Markdown per blob.
+blob, rendered Markdown per blob, blame per (commit, file).
+
+**Blame** runs `git blame --incremental`, which skips commits that didn't
+touch the file using the commit-graph's changed-path Bloom filters, and
+follows renames. It's the costliest page on a long history and anyone who can
+read the repository can ask for it, so blames run at most one per two CPUs at
+a time (others wait their turn), stop after 20 seconds (the page then says so
+and links to the file's history), and links to blame pages are `nofollow`
+for crawlers. Binary files, Git LFS files and files over 2 MiB aren't blamed.
 
 **Rendering work is bounded:** syntax highlighting stops at 256 KiB, file
 display at 2 MiB, and diffs at 300 files / 10,000 lines.
@@ -689,6 +843,7 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 | File view, highlighted (7,860 lines; first view) | ~30 ms (~350 ms) |
 | Commit list | ~20 ms |
 | File history | ~50 ms |
+| Blame (`diff.c`, 7,860 lines; first view) | ~35 ms (~2 s) |
 | Commit with diff | ~5 ms |
 | Contributors graph (first view; after a push only new commits are counted) | ~7 ms (~375 ms) |
 | Commit activity graph | ~2 ms |
@@ -711,16 +866,34 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   into another host.
 - Password reset and verification links are single-use, expire (1 hour and
   7 days), are stored only as SHA-256 hashes and are sent at most once a
-  minute per account. Asking for a reset says the same thing whether or not an
+  minute per account. Their token is after the `#`, which browsers don't
+  send, so it stays out of the proxy's and keel's request logs; the page
+  moves it into its form. Verifying an address takes a click, so mail
+  scanners that open links don't use the link up. Asking for a reset says the same thing whether or not an
   account has that address. A reset signs out all sessions.
 - Webhook deliveries are signed with HMAC-SHA256 when a secret is set
   (`X-Hub-Signature-256: sha256=…`), and can't target internal addresses by
   default (see above).
 - Personal access tokens are shown once and stored hashed; they can be
   read-only, expire, and be revoked individually. Changing a password signs
-  out all other sessions.
+  out all other sessions. An administrator's token only acts as an
+  administrator (every repository, the admin API) if it was created for
+  site administration; otherwise it reaches what its owner could without
+  being one, so a leaked CI token isn't a key to everything. (Tokens from
+  before 0.19 are everyday tokens.)
 - Strict Content Security Policy. Raw files are served with `sandbox` and
   never as `text/html`, so user content can't run scripts on keel's origin.
+- Images from other servers in Markdown (issues, comments, READMEs,
+  releases, wikis) load through keel's image proxy (`/_image`), like GitHub's
+  camo, so whoever posts one can't see who viewed it; pages may only load
+  keel's own images. Proxy URLs are signed (keel fetches only what its pages
+  show), fetched like webhooks (no private or blocked addresses), limited to
+  images up to 10 MiB, and served sandboxed.
+- Secrets that must be read back are encrypted in the database (see
+  `secret.key` above). At startup, a data directory or database file that
+  others can read is made private (`0700` and `0600`); SQLite gives its
+  `-wal` and `-shm` files the database's permissions. Under systemd, also
+  set `UMask=0077`.
 - Private repositories return 404 (web) or 401 (git) to anyone who can't see
   them, so their names don't leak. That includes fork lists and the
   repositories offered on the compare page.

@@ -198,7 +198,7 @@ impl Core {
         let site = &self.config.site_name;
         let body = format!(
             "Hi {name},\n\nPlease confirm that this is your email address on {site} by opening this link:\n\n\
-             {base}/email/verify?token={token}\n\n\
+             {base}/email/verify#token={token}\n\n\
              Until then, you won't get notification emails. The link works for 7 days.\n\
              If you didn't sign up, you can ignore this message.\n",
             name = user.username,
@@ -253,7 +253,7 @@ impl Core {
         let body = format!(
             "Hi {name},\n\nSomeone (hopefully you) asked to reset the password of your account on {site}.\n\
              To choose a new password, open this link within an hour:\n\n\
-             {base}/password/reset?token={token}\n\n\
+             {base}/password/reset#token={token}\n\n\
              If you didn't ask for this, ignore this message; your password stays the same.\n",
             name = user.username,
             base = self.config.base_url,

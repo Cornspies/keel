@@ -8,6 +8,7 @@
 use sha1::{Digest, Sha1};
 
 use crate::auth::{hash_token, new_token};
+use crate::secrets::Purpose;
 use crate::{Core, Result, User, invalid, now};
 
 const STEP: i64 = 30;
@@ -111,7 +112,7 @@ impl Core {
         let secret = base32_encode(&secret);
         sqlx::query("UPDATE users SET totp_pending = ?2 WHERE id = ?1")
             .bind(user.id)
-            .bind(&secret)
+            .bind(self.seal(Purpose::Totp, &secret)?)
             .execute(&self.db)
             .await?;
         Ok(secret)
@@ -122,7 +123,7 @@ impl Core {
             .bind(user_id)
             .fetch_optional(&self.db)
             .await?;
-        Ok(row.and_then(|(p,)| p))
+        row.and_then(|(p,)| p).map(|p| self.unseal(Purpose::Totp, &p)).transpose()
     }
 
     /// Turns two-factor authentication on once `code` shows the
@@ -197,7 +198,8 @@ impl Core {
                 .bind(user_id)
                 .fetch_optional(&self.db)
                 .await?;
-            let Some(key) = row.and_then(|(s,)| s).and_then(|s| base32_decode(&s)) else {
+            let secret = row.and_then(|(s,)| s).map(|s| self.unseal(Purpose::Totp, &s)).transpose()?;
+            let Some(key) = secret.and_then(|s| base32_decode(&s)) else {
                 return Ok(false);
             };
             let step = now() / STEP;
