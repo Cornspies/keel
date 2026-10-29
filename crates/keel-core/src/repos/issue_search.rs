@@ -13,7 +13,13 @@
 
 use serde_json::json;
 
-use crate::{Core, Issue, Result, User};
+use crate::{Core, Issue, Result, User, invalid};
+
+/// Most words, and most labels, one search can have: each becomes a
+/// condition checked for every issue, and anyone can search.
+const MAX_TERMS: usize = 10;
+/// Longest search, in characters.
+const MAX_SEARCH_CHARS: usize = 256;
 
 /// How results are ordered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -101,6 +107,21 @@ pub struct IssueQuery {
     pub sort: IssueSort,
     /// Words to find in titles and bodies.
     pub text: Vec<String>,
+    /// Of the search as written, in characters.
+    pub length: usize,
+}
+
+impl IssueQuery {
+    /// Whether the search is small enough to run.
+    fn check(&self) -> Result<()> {
+        let labels = self.labels.len() + self.not_labels.len();
+        if self.length > MAX_SEARCH_CHARS || self.text.len() > MAX_TERMS || labels > MAX_TERMS {
+            return invalid(format!(
+                "Searches are at most {MAX_SEARCH_CHARS} characters, with up to {MAX_TERMS} words and {MAX_TERMS} labels."
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Splits on whitespace, keeping quoted parts together (and unquoting
@@ -136,7 +157,7 @@ impl IssueQuery {
     /// Parses a search; `me` is who `@me` stands for. Unknown qualifiers are
     /// searched for as words.
     pub fn parse(q: &str, me: Option<&str>) -> Self {
-        let mut out = Self::default();
+        let mut out = Self { length: q.chars().count(), ..Self::default() };
         let user = |v: &str| -> String {
             match (v, me) {
                 ("@me", Some(me)) => me.to_owned(),
@@ -318,6 +339,7 @@ impl Core {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<IssueHit>, i64)> {
+        q.check()?;
         let repo = match (repo_id, &q.repo) {
             (Some(id), _) => Some(id),
             (None, Some(full)) => {
@@ -408,7 +430,7 @@ mod tests {
         let q = IssueQuery::parse("no:assignee repo:ada/engine is:merged milestone:\"v1.0\"", None);
         assert!(q.no_assignee && q.state == Some(StateFilter::Merged) && q.pulls == Some(true));
         assert_eq!((q.repo.as_deref(), q.milestone.as_deref()), (Some("ada/engine"), Some("v1.0")));
-        assert_eq!(IssueQuery::parse("  ", None), IssueQuery::default());
+        assert_eq!(IssueQuery::parse("  ", None), IssueQuery { length: 2, ..IssueQuery::default() });
         let q = IssueQuery::parse("is:draft", None);
         assert_eq!((q.draft, q.pulls), (Some(true), Some(true)));
         assert_eq!(IssueQuery::parse("draft:false", None).draft, Some(false));
@@ -446,6 +468,12 @@ mod tests {
         assert_eq!(find_in(&core, "repo:ada/secret", Some(&bob)).await.1, 0);
         assert_eq!(find_in(&core, "user:ada sort:created-asc", Some(&ada)).await.0, ["Crash on start", "Slow builds", "Secret crash"]);
         assert_eq!(find_in(&core, "is:pr", Some(&ada)).await.1, 0);
+        // Big searches are refused before they reach the database.
+        for q in ["crash ".repeat(11), "x".repeat(257), "label:a ".repeat(11)] {
+            let err = core.search_issues(None, None, &IssueQuery::parse(&q, None), 0, 10).await.unwrap_err();
+            assert!(err.to_string().contains("at most 256 characters"), "{err}");
+        }
+        assert_eq!(find_in(&core, &"crash ".repeat(10), None).await.1, 1, "ten words are fine");
         let q = IssueQuery::parse("", None);
         let (hits, total) = core.search_issues(Some(&ada), Some(secret.id), &q, 0, 10).await.unwrap();
         assert_eq!((hits[0].issue.id, total, hits[0].repo_name.as_str()), (hidden.id, 1, "secret"));

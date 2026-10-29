@@ -167,6 +167,7 @@ impl Core {
     pub async fn create_org(&self, creator: &User, name: &str) -> Result<User> {
         let name = name.trim();
         validate_username(name)?;
+        self.check_org_limit(creator).await?;
         let mut tx = self.db.begin().await?;
         let inserted = sqlx::query_as::<_, (i64,)>(
             "INSERT INTO users (username, kind, created_at) VALUES (?1, 'org', ?2) RETURNING id",

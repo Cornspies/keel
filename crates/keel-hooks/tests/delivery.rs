@@ -94,10 +94,11 @@ async fn refuses_private_addresses() {
         status: "pending".into(), attempts: 0, next_attempt_at: 0, response_status: None, response_body: None,
         error: None, duration_ms: None, created_at: 0, delivered_at: None,
     };
-    let attempt = keel_hooks::deliver(&keel_hooks::client(false), &delivery, &hook, false).await;
-    assert!(attempt.error.unwrap().contains("resolves only to private addresses"));
+    let strict = keel_core::Outbound::default();
+    let attempt = keel_hooks::deliver(&keel_hooks::client(&strict), &delivery, &hook, &strict).await;
+    assert!(attempt.error.unwrap().contains("resolves only to private or blocked addresses"));
     let literal = Webhook { url: url.replace("localhost", "127.0.0.1"), ..hook };
-    let attempt = keel_hooks::deliver(&keel_hooks::client(false), &delivery, &literal, false).await;
+    let attempt = keel_hooks::deliver(&keel_hooks::client(&strict), &delivery, &literal, &strict).await;
     assert!(attempt.error.unwrap().contains("private"));
     assert!(received.lock().unwrap().is_empty());
 }

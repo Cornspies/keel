@@ -16,8 +16,8 @@ use keel_core::{Access, Core, User};
 use keel_git::{Service, git_command};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::keys::{HashAlg, PrivateKey, PublicKey};
-use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Server, Session};
+use russh::keys::{HashAlg, PrivateKey};
+use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, PublicKeyOffer, Server, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, ChannelOpenFailure, MethodKind, MethodSet, SshId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -268,9 +268,17 @@ impl Connection {
         let kind = if request.service.is_write() { "receive-pack" } else { "upload-pack" };
         self.core.metrics().git_operation(kind, "ssh");
 
-        let Some(session) = self.core.git_session(&target, request.service.is_write()).await? else {
-            Self::fail(&handle, channel, "keel: this wiki has no pages yet; push to it or create one on the web").await;
-            return Ok(());
+        let session = match self.core.git_session(&target, request.service.is_write()).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                Self::fail(&handle, channel, "keel: this wiki has no pages yet; push to it or create one on the web").await;
+                return Ok(());
+            }
+            Err(keel_core::Error::Invalid(msg)) => {
+                Self::fail(&handle, channel, &format!("keel: {msg}")).await;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
         };
         let protocol = self.protocol.get(&channel).map(String::as_str);
         let mut cmd = tokio::process::Command::from(git_command(request.service, &session.path, false, false, protocol));
@@ -360,9 +368,9 @@ async fn finish(handle: &Handle, channel: ChannelId, code: u32) {
 impl russh::server::Handler for Connection {
     type Error = anyhow::Error;
 
-    async fn auth_publickey_offered(&mut self, _user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey_offered(&mut self, _user: &str, offer: PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
         // Skip the signature round-trip for keys we don't know.
-        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let fingerprint = offer.public_key.fingerprint(HashAlg::Sha256).to_string();
         Ok(if self.core.ssh_key_exists(&fingerprint).await? {
             Auth::Accept
         } else {
@@ -370,8 +378,8 @@ impl russh::server::Handler for Connection {
         })
     }
 
-    async fn auth_publickey(&mut self, _user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
-        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    async fn auth_publickey(&mut self, _user: &str, key: VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+        let fingerprint = key.public_key.fingerprint(HashAlg::Sha256).to_string();
         match self.core.user_by_ssh_fingerprint(&fingerprint).await? {
             Some(user) => {
                 tracing::info!(user = %user.username, peer = ?self.peer, "ssh login");

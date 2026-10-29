@@ -368,10 +368,13 @@ impl Core {
     /// Maintenance, the activity feed and `gollum` webhooks after the wiki
     /// changed. Failures are logged: the change itself happened.
     pub(crate) async fn after_wiki_change(&self, repo: &Repo, actor: Option<i64>, changes: Vec<WikiChange>) {
-        let path = self.wiki_path(repo.id);
+        let (path, core, repo_id) = (self.wiki_path(repo.id), self.clone(), repo.id);
         tokio::spawn(async move {
             if let Ok(Err(e)) = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&path)).await {
                 tracing::warn!("wiki maintenance failed: {e}");
+            }
+            if let Err(e) = core.measure_repo(repo_id).await {
+                tracing::warn!(repo = repo_id, "measuring disk usage failed: {e}");
             }
         });
         if changes.is_empty() {
@@ -435,6 +438,9 @@ impl Core {
     /// `None` when reading a wiki that doesn't exist yet; pushing creates it.
     pub async fn git_session(&self, target: &GitTarget, write: bool) -> Result<Option<GitSession>> {
         let id = target.repo.id;
+        if write {
+            self.check_storage(target.repo.owner_id, 1).await?;
+        }
         if !target.wiki {
             let (env, before) = if write {
                 (self.receive_pack_env(id).await?, self.ref_snapshot(id).await.ok())
@@ -450,8 +456,9 @@ impl Core {
             self.ensure_wiki(id).await?;
         }
         let before = if write { self.wiki_git(id, |g| g.refs_snapshot()).await.ok() } else { None };
-        // No branch protection in wikis.
-        Ok(Some(GitSession { path: self.wiki_path(id), env: Vec::new(), before }))
+        // No branch protection in wikis; the push size limit applies.
+        let env = if write { self.push_limits_env(&[]) } else { Vec::new() };
+        Ok(Some(GitSession { path: self.wiki_path(id), env, before }))
     }
 
     /// After a successful push to `target` by `pusher`.

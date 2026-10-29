@@ -132,6 +132,27 @@ pub fn sign(secret: &str, body: &[u8]) -> String {
     format!("sha256={}", hex::encode(outer))
 }
 
+/// Which addresses webhooks, mirrors and imports may connect to.
+#[derive(Clone, Debug, Default)]
+pub struct Outbound {
+    /// Private addresses too (`--webhook-allow-private`).
+    pub allow_private: bool,
+    /// Never these (`--block-outbound`), e.g. the server's own addresses.
+    pub blocked: Vec<crate::Network>,
+}
+
+impl Outbound {
+    pub fn allows(&self, ip: IpAddr) -> bool {
+        (self.allow_private || !is_private_ip(ip)) && !self.blocked.iter().any(|n| n.contains(ip))
+    }
+}
+
+impl crate::Config {
+    pub fn outbound(&self) -> Outbound {
+        Outbound { allow_private: self.webhook_allow_private, blocked: self.blocked_networks.clone() }
+    }
+}
+
 /// Whether an address is one webhooks may not reach unless private targets
 /// are allowed: loopback, private networks, link-local, and the like.
 pub fn is_private_ip(ip: IpAddr) -> bool {
@@ -173,7 +194,8 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
 
 /// Checks a hook URL as far as possible without resolving it (delivery
 /// checks resolved addresses again).
-fn validate_url(url: &str, allow_private: bool) -> Result<()> {
+fn validate_url(url: &str, outbound: &Outbound) -> Result<()> {
+    let allow_private = outbound.allow_private;
     let url = url.trim();
     let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else {
         return invalid("Webhook URLs start with http:// or https://.");
@@ -194,6 +216,9 @@ fn validate_url(url: &str, allow_private: bool) -> Result<()> {
                  (the administrator can allow it with --webhook-allow-private).",
             );
         }
+    }
+    if host.parse::<IpAddr>().is_ok_and(|ip| !outbound.allows(ip)) {
+        return invalid("Webhooks can't reach that address on this server.");
     }
     Ok(())
 }
@@ -267,7 +292,7 @@ impl Core {
         events: &[String],
         active: bool,
     ) -> Result<Webhook> {
-        validate_url(url, self.config.webhook_allow_private)?;
+        validate_url(url, &self.config.outbound())?;
         let events = validate_events(events)?;
         let (repo, org) = match owner {
             HookOwner::Repo(id) => (Some(id), None),
@@ -300,7 +325,7 @@ impl Core {
         events: &[String],
         active: bool,
     ) -> Result<()> {
-        validate_url(url, self.config.webhook_allow_private)?;
+        validate_url(url, &self.config.outbound())?;
         let events = validate_events(events)?;
         sqlx::query(
             "UPDATE webhooks SET url = ?2, secret = COALESCE(?3, secret), events = ?4, active = ?5 WHERE id = ?1",
@@ -528,13 +553,20 @@ mod tests {
         for ip in ["1.1.1.1", "93.184.216.34", "2606:4700::1111", "64:ff9b::101:101", "2002:101:101::1", "2001:4860::8888"] {
             assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
         }
-        assert!(validate_url("https://ci.example.com/hook", false).is_ok());
-        assert!(validate_url("http://localhost:8080/x", false).is_err());
-        assert!(validate_url("http://127.0.0.1/x", false).is_err());
-        assert!(validate_url("http://[::1]:80/x", false).is_err());
-        assert!(validate_url("http://127.0.0.1/x", true).is_ok());
-        assert!(validate_url("ftp://example.com", true).is_err());
-        assert!(validate_url("https://user:pw@example.com", true).is_err());
+        let strict = Outbound::default();
+        let open = Outbound { allow_private: true, ..Outbound::default() };
+        assert!(validate_url("https://ci.example.com/hook", &strict).is_ok());
+        assert!(validate_url("http://localhost:8080/x", &strict).is_err());
+        assert!(validate_url("http://127.0.0.1/x", &strict).is_err());
+        assert!(validate_url("http://[::1]:80/x", &strict).is_err());
+        assert!(validate_url("http://127.0.0.1/x", &open).is_ok());
+        assert!(validate_url("ftp://example.com", &open).is_err());
+        assert!(validate_url("https://user:pw@example.com", &open).is_err());
+        // Networks the administrator blocked (--block-outbound).
+        let blocked = Outbound { blocked: vec![crate::Network::parse("93.184.216.0/24").unwrap()], ..strict };
+        assert!(validate_url("http://93.184.216.9/x", &blocked).is_err());
+        assert!(validate_url("http://[::ffff:93.184.216.9]/x", &blocked).is_err());
+        assert!(validate_url("http://93.184.217.9/x", &blocked).is_ok());
     }
 
     #[tokio::test]

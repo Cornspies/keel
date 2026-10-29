@@ -160,6 +160,8 @@ struct RegisterPage {
     username: String,
     email: String,
     first_user: bool,
+    /// The first account needs the setup code from the server's log.
+    needs_code: bool,
     allowed: bool,
 }
 
@@ -176,6 +178,7 @@ async fn register_page(
         username,
         email,
         first_user,
+        needs_code: state.core.setup_code().await?.is_some(),
         allowed: first_user || state.core.registration_open(),
     })
 }
@@ -192,10 +195,13 @@ pub struct RegisterForm {
     username: String,
     email: String,
     password: String,
+    /// For the first account.
+    #[serde(default)]
+    setup_code: String,
 }
 
 pub async fn register(State(state): State<AppState>, Form(f): Form<RegisterForm>) -> AppResult {
-    match state.core.register(f.username.trim(), &f.email, &f.password).await {
+    match state.core.register_with_code(f.username.trim(), &f.email, &f.password, &f.setup_code).await {
         Ok(user) => {
             state.core.send_verification(&user).await?;
             let token = state.core.create_session(user.id).await?;

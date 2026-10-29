@@ -121,6 +121,10 @@ impl Core {
 
     /// Repositories `viewer` can read matching `q`, and how many match.
     pub async fn explore(&self, viewer: Option<&User>, q: &ExploreQuery, offset: i64, limit: i64) -> Result<(Vec<Repo>, i64)> {
+        // Anyone can search; a pattern is matched against every repository.
+        if q.text.chars().count() > 256 || q.topic.as_ref().is_some_and(|t| t.chars().count() > 256) {
+            return invalid("Searches are at most 256 characters.");
+        }
         let escaped = q.text.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let topic = q.topic.as_deref().unwrap_or_default();

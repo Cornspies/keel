@@ -83,7 +83,7 @@ for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/$SMTP_PORT) 2>/dev/null && 
 (cd "$T" && exec "$BIN" serve --data-dir data --http-addr "127.0.0.1:$HTTP_PORT" \
     --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
     --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" \
-    --metrics-token smoke-metrics >"$T/server.log" 2>&1) &
+    --metrics-token smoke-metrics --max-push-size 2 >"$T/server.log" 2>&1) &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 
@@ -97,8 +97,14 @@ post() { # post <jar> <path> <data...>
 }
 
 echo "== accounts"
-signup ada "$T/ada"
+CODE=$(grep -o 'setup code [A-Z0-9-]*' "$T/server.log" | cut -d' ' -f3)
+check "the setup code is printed at startup" is "${#CODE}" 19
+check "the first account needs it" contains "$(curl -s -H "$O" -d "username=eve&email=eve@example.com&password=password-eve" "$B/register")" "setup code"
+check "a wrong one is refused" contains "$(curl -s -H "$O" -d "username=eve&email=eve@example.com&password=password-eve&setup_code=AAAA-AAAA-AAAA-AAAA" "$B/register")" "setup code"
+curl -s -c "$T/ada" -o /dev/null -H "$O" -d "username=ada&email=ada@example.com&password=password-ada&setup_code=$CODE" "$B/register"
+check "with it, the first account is the administrator" is "$(status -b "$T/ada" "$B/admin")" 200
 signup bob "$T/bob"
+check "later sign-ups don't need it" is "$(status -b "$T/bob" "$B/settings/tokens")" 200
 check "signing in redirects to local paths only" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=bob&password=password-bob&next=/%09/evil.example" "$B/login")" "$B/"
 check "non-ASCII ones are encoded" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" --data-urlencode "login=bob" --data-urlencode "password=password-bob" --data-urlencode "next=/ada/é" "$B/login")" "$B/ada/%C3%A9"
 check "cross-origin POST is rejected" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: http://evil.example' -d x=1 "$B/new")" 403
@@ -117,6 +123,10 @@ check "anonymous push is refused" bash -c "! git -C '$W' push -q '$B/ada/engine.
 python3 -c 'import gzip, sys; sys.stdout.buffer.write(gzip.compress(b"0" * (65 << 20)))' >"$T/bomb.gz"
 check "oversized gzip requests are refused" is "$(status -H 'Content-Encoding: gzip' -H 'Content-Type: application/x-git-upload-pack-request' --data-binary "@$T/bomb.gz" "$B/ada/engine.git/git-upload-pack")" 413
 check "small ones aren't" is "$(printf 0000 | gzip | status -H 'Content-Encoding: gzip' -H 'Content-Type: application/x-git-upload-pack-request' --data-binary @- "$B/ada/engine.git/git-upload-pack")" 200
+head -c $((3 << 20)) /dev/urandom >"$T/big.bin"
+git init -q -b main "$T/big" && cp "$T/big.bin" "$T/big/" && git -C "$T/big" add -A && git -C "$T/big" commit -qm big
+check "pushes over --max-push-size are refused" bash -c "! git -C '$T/big' push -q 'http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/engine.git' main:big 2>/dev/null"
+check "and leave nothing behind" bash -c "! git ls-remote '$B/ada/engine.git' | grep -q refs/heads/big"
 check "bob cannot push" bash -c "! git -C '$W' push -q 'http://bob:password-bob@127.0.0.1:$HTTP_PORT/ada/engine.git' main"
 
 echo "== access tokens"
@@ -943,6 +953,7 @@ check "with qualifiers" contains "$(curl -s "$B/ada/engine/issues?q=is:open+auth
 check "that narrow it down" contains "$(curl -s "$B/ada/engine/issues?q=author:ada+hook")" "Nothing matches"
 check "across repositories" contains "$(curl -s "$B/issues?q=is:issue+hook")" 'issue-repo" href="/ada/engine"'
 check "your issues" contains "$(curl -s -b "$T/bob" "$B/issues")" "Hook me"
+check "overlong searches are refused" is "$(status "$API/search/issues?q=$(printf 'a%.0s' $(seq 300))")" 422
 check "search issues with the API" is "$(curl -s "$API/search/issues?q=hook+repo:ada/engine" | field '["items"][0]["title"]')" "Hook me"
 check "private issues stay private" is "$(curl -s "$API/search/issues?q=repo:ada/secret" | field '["total_count"]')" 0
 

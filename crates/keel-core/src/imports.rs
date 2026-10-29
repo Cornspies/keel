@@ -247,6 +247,7 @@ impl Core {
         options: ImportOptions,
     ) -> Result<Repo> {
         self.check_mirror_host(&parse_mirror_url(&source.git_url)?).await?;
+        self.check_storage(owner.id, 1).await?;
         let repo = self.create_repo(owner, name, description, is_private).await?;
         sqlx::query(
             "INSERT INTO imports (repo_id, service, url, api_url, token, with_issues, with_releases, with_wiki, created_by, created_at)
@@ -345,6 +346,7 @@ impl Core {
     /// Fetches the branches, tags and pull request heads, handled like a
     /// push. Returns the Git LFS files the commits need.
     pub async fn import_git(&self, repo_id: i64, remote: &MirrorRemote) -> Result<Vec<(String, u64)>> {
+        self.check_repo_storage(repo_id, 1).await?;
         let before = self.ref_snapshot(repo_id).await?;
         let path = self.config.repo_path(repo_id);
         self.with_remote(remote, move |r| keel_git::import_fetch(&path, r, FETCH_LIMIT)).await?;

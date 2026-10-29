@@ -142,6 +142,14 @@ pub async fn batch(
     // Transfers are authorized with a token rather than the password again.
     let auth = user.as_ref().map(|u| json!({ "Authorization": format!("Bearer {}", state.core.lfs_token(u, &repo, upload)) }));
     let max = state.core.config.lfs_max_bytes;
+    let mut room = if upload {
+        match state.core.storage_room(repo.owner_id).await {
+            Ok(r) => r,
+            Err(e) => return internal(e),
+        }
+    } else {
+        None
+    };
     let mut objects = Vec::new();
     for o in req.objects {
         let mut out = json!({ "oid": o.oid, "size": o.size, "authenticated": true });
@@ -166,7 +174,16 @@ pub async fn batch(
                 let msg = format!("Larger than this server's limit of {} MiB", max >> 20);
                 out["error"] = json!({ "code": 422, "message": msg });
             }
-            (true, None) => out["actions"] = json!({ "upload": action }),
+            (true, None) if room.is_some_and(|r| o.size as u64 > r) => {
+                let msg = format!("{} is out of storage on this server", repo.owner);
+                out["error"] = json!({ "code": 507, "message": msg });
+            }
+            (true, None) => {
+                if let Some(r) = room.as_mut() {
+                    *r -= o.size as u64;
+                }
+                out["actions"] = json!({ "upload": action });
+            }
         }
         objects.push(out);
     }
@@ -225,7 +242,11 @@ pub async fn upload(
     if !valid_oid(&oid) {
         return fail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid object id");
     }
-    match receive(&state, &oid, body).await {
+    let room = match state.core.storage_room(repo.owner_id).await {
+        Ok(r) => r,
+        Err(e) => return internal(e),
+    };
+    match receive(&state, &oid, body, room).await {
         Ok(Ok(size)) => match state.core.lfs_link(repo.id, &oid, size).await.inspect(|_| state.core.metrics().lfs_transfer("upload", size)) {
             Ok(()) => StatusCode::OK.into_response(),
             Err(e) => internal(e),
@@ -237,7 +258,8 @@ pub async fn upload(
 
 /// Writes an upload to a temporary file while hashing it, then moves it
 /// into place. Returns its size, or the response for a bad upload.
-async fn receive(state: &AppState, oid: &str, body: Body) -> std::io::Result<Result<u64, Response>> {
+/// `room` is how much more the repository's owner may store, if limited.
+async fn receive(state: &AppState, oid: &str, body: Body, room: Option<u64>) -> std::io::Result<Result<u64, Response>> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp_dir = state.core.lfs_tmp_dir();
     tokio::fs::create_dir_all(&tmp_dir).await?;
@@ -254,6 +276,9 @@ async fn receive(state: &AppState, oid: &str, body: Body) -> std::io::Result<Res
             if size > max {
                 let msg = format!("Larger than this server's limit of {} MiB", max >> 20);
                 return Ok(Err(fail(StatusCode::PAYLOAD_TOO_LARGE, &msg)));
+            }
+            if room.is_some_and(|r| size > r) {
+                return Ok(Err(fail(StatusCode::INSUFFICIENT_STORAGE, "The repository's owner is out of storage on this server")));
             }
             hasher.update(&chunk);
             file.write_all(&chunk).await?;

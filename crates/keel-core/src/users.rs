@@ -4,6 +4,16 @@ use crate::auth::{hash_password, hash_token, new_token, verify_password};
 use crate::{Core, Result, invalid, now, validate_username};
 
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+/// 80 random bits in four groups from an alphabet without look-alikes, e.g.
+/// `K7QM-2XDR-9WFA-HC3P`.
+fn new_setup_code() -> Result<String> {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    let chars: Vec<char> = bytes.iter().map(|b| ALPHABET[usize::from(b % 32)] as char).collect();
+    Ok(chars.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-"))
+}
+
 /// Wrong passwords allowed per account (or unknown name) in
 /// `LOGIN_WINDOW_SECS`; then signing in with a password is refused for a
 /// while.
@@ -93,7 +103,59 @@ impl Core {
     /// Creates an account. The very first account becomes the administrator
     /// and is allowed even when registration is closed.
     pub async fn register(&self, username: &str, email: &str, password: &str) -> Result<User> {
-        self.insert_user(username, email, password, false).await
+        self.register_with_code(username, email, password, "").await
+    }
+
+    /// Signs up; the first account (the administrator) needs the setup
+    /// code if the server requires one (see [`setup_code`](Self::setup_code)).
+    pub async fn register_with_code(&self, username: &str, email: &str, password: &str, code: &str) -> Result<User> {
+        if self.config.require_setup_code && !self.has_users().await? && !self.setup_code_matches(code) {
+            // Whoever starts keel can read it; nobody else can guess it.
+            return invalid(
+                "The first account is the administrator, so it needs the setup code that keel printed when it started.",
+            );
+        }
+        let user = self.insert_user(username, email, password, false).await?;
+        if user.is_admin {
+            *self.setup_code.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        Ok(user)
+    }
+
+    /// The one-time code for creating the first account, while there are
+    /// no accounts: random, kept in memory, and new at every start.
+    pub async fn setup_code(&self) -> Result<Option<String>> {
+        if !self.config.require_setup_code || self.has_users().await? {
+            return Ok(None);
+        }
+        let mut code = self.setup_code.lock().unwrap_or_else(|e| e.into_inner());
+        if code.is_none() {
+            *code = Some(new_setup_code()?);
+        }
+        Ok(code.clone())
+    }
+
+    /// Logs the setup code, if one is needed: at startup, so whoever runs
+    /// keel sees it in the terminal or the service's log.
+    pub(crate) async fn announce_setup_code(&self) -> Result<()> {
+        if let Some(code) = self.setup_code().await? {
+            tracing::warn!(
+                "no accounts yet: sign up at {}/register with the setup code {code} to become the administrator",
+                self.config.base_url
+            );
+        }
+        Ok(())
+    }
+
+    fn setup_code_matches(&self, given: &str) -> bool {
+        let normalize = |s: &str| -> Vec<u8> {
+            s.bytes().filter(|b| b.is_ascii_alphanumeric()).map(|b| b.to_ascii_uppercase()).collect()
+        };
+        let code = self.setup_code.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(code) = code.as_deref() else { return false };
+        let (want, got) = (normalize(code), normalize(given));
+        // Constant time, for codes of the right length.
+        want.len() == got.len() && want.iter().zip(&got).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
     }
 
     /// Creates an account; `by_admin` even when registration is closed.

@@ -90,6 +90,7 @@ impl Core {
         if owner.id == source.owner_id {
             return invalid("A repository can't be forked into the account that owns it.");
         }
+        self.check_storage(owner.id, self.repo_storage(source.id).await?).await?;
         let fork = self
             .insert_repo(owner, name, &source.description, source.is_private, Some(source))
             .await?;
@@ -108,6 +109,7 @@ impl Core {
     ) -> Result<Repo> {
         let name = name.trim();
         validate_repo_name(name)?;
+        self.check_repo_limit(owner).await?;
         let mut tx = self.db.begin().await?;
         let now = now();
         let inserted = sqlx::query_as::<_, (i64,)>(
@@ -332,6 +334,9 @@ impl Core {
             if let Ok(Err(e)) = maintenance {
                 tracing::warn!(repo = repo_id, "maintenance failed: {e}");
             }
+            if let Err(e) = core.measure_repo(repo_id).await {
+                tracing::warn!(repo = repo_id, "measuring disk usage failed: {e}");
+            }
             if let Some(before) = before {
                 match core.ref_snapshot(repo_id).await {
                     Ok(after) => {
@@ -390,6 +395,8 @@ impl Core {
         if !self.can_create_repo_in(new_owner, actor).await? {
             return invalid(format!("You can't move repositories to {}.", new_owner.username));
         }
+        self.check_repo_limit(new_owner).await?;
+        self.check_storage(new_owner.id, self.repo_storage(repo.id).await?).await?;
         self.move_repo(repo, new_owner, &repo.name).await
     }
 

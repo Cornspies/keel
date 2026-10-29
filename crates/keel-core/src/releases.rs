@@ -301,6 +301,7 @@ impl Core {
         if count >= MAX_ASSETS {
             return invalid(format!("A release can have at most {MAX_ASSETS} files."));
         }
+        self.check_repo_storage(release.repo_id, size).await?;
         let content_type = if content_type.is_empty() || content_type.len() > 100 || content_type.contains(['\r', '\n']) {
             "application/octet-stream"
         } else {

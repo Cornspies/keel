@@ -18,17 +18,18 @@ pub use lfs::endpoint;
 /// The HTTP client for LFS transfers: no proxies, no private addresses
 /// (unless allowed), a few checked redirects (storage services use them),
 /// and generous timeouts for large files.
-pub fn client(allow_private: bool) -> reqwest::Client {
+pub fn client(outbound: &keel_core::Outbound) -> reqwest::Client {
+    let checks = outbound.clone();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= 5 {
             attempt.error("too many redirects")
-        } else if let Err(e) = lfs::check_url(attempt.url(), allow_private) {
+        } else if let Err(e) = lfs::check_url(attempt.url(), &checks) {
             attempt.error(e)
         } else {
             attempt.follow()
         }
     });
-    keel_hooks::safe_client_builder(allow_private)
+    keel_hooks::safe_client_builder(outbound)
         .redirect(policy)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(3600))
@@ -45,7 +46,7 @@ fn message(e: keel_core::Error) -> String {
 
 /// Starts the workers (needs a Tokio runtime).
 pub fn start(core: Core) {
-    let client = client(core.config.webhook_allow_private);
+    let client = client(&core.config.outbound());
     start_imports(core.clone(), client.clone());
     tokio::spawn(async move {
         let wakeup = core.mirror_wakeup();

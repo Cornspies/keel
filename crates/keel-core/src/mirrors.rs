@@ -140,6 +140,7 @@ impl Core {
     ) -> Result<Repo> {
         let parsed = parse_mirror_url(url)?;
         self.check_interval(interval_secs)?;
+        self.check_storage(owner.id, 1).await?;
         self.check_mirror_host(&parsed).await?;
         let repo = self.create_repo(owner, name, description, is_private).await?;
         let username = parsed.username.clone().unwrap_or_else(|| username.trim().to_owned());
@@ -180,6 +181,10 @@ impl Core {
         }
         if !self.config.webhook_allow_private && addrs.iter().any(|ip| is_private_ip(*ip)) {
             return invalid("Mirrors can't fetch from private network addresses on this server.");
+        }
+        let outbound = self.config.outbound();
+        if addrs.iter().any(|ip| !outbound.allows(*ip)) {
+            return invalid("Mirrors can't reach that address on this server.");
         }
         Ok(addrs)
     }
@@ -283,6 +288,7 @@ impl Core {
     /// Errors are for the mirror's page.
     pub async fn fetch_mirror(&self, repo_id: i64) -> Result<Option<(MirrorRemote, Vec<(String, u64)>)>> {
         let Some(remote) = self.mirror_remote(repo_id).await? else { return Ok(None) };
+        self.check_repo_storage(repo_id, 1).await?;
         let before = self.ref_snapshot(repo_id).await?;
         let path = self.config.repo_path(repo_id);
         self.with_remote(&remote, move |r| keel_git::mirror_fetch(&path, r, FETCH_LIMIT)).await?;
