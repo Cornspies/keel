@@ -74,6 +74,12 @@ impl User {
     pub fn is_org(&self) -> bool {
         self.kind == "org"
     }
+
+    /// Accounts made by signing in with single sign-on have none until
+    /// their owner sets one.
+    pub fn has_password(&self) -> bool {
+        !self.password_hash.is_empty()
+    }
 }
 
 /// The theme choices: follow the system, or always light or dark.
@@ -229,7 +235,8 @@ impl Core {
         // Verify against a dummy hash for unknown users so response times
         // don't reveal which accounts exist.
         static DUMMY: OnceLock<String> = OnceLock::new();
-        let hash = match &user {
+        // Accounts without a password take as long, and never match.
+        let hash = match user.as_ref().filter(|u| u.has_password()) {
             Some(u) => u.password_hash.clone(),
             None => match DUMMY.get() {
                 Some(h) => h.clone(),
@@ -239,7 +246,7 @@ impl Core {
                 }
             },
         };
-        let ok = verify_password(password.to_owned(), hash).await?;
+        let ok = verify_password(password.to_owned(), hash).await? && user.as_ref().is_some_and(User::has_password);
         let mut failures = self.login_failures.lock().unwrap_or_else(|e| e.into_inner());
         if ok && user.is_some() {
             failures.0.remove(&key);
@@ -301,12 +308,38 @@ impl Core {
         Ok(())
     }
 
+    /// Sets the first password of an account made with single sign-on
+    /// (callers confirm it's its owner), and signs out all sessions.
+    pub async fn set_first_password(&self, user: &User, new: &str) -> Result<()> {
+        if user.has_password() {
+            return invalid("This account has a password already; change it with the current one.");
+        }
+        self.set_password(user.id, new).await
+    }
+
+    /// When the session `token` started, if it's valid: signing in again
+    /// is how accounts without a password confirm sensitive changes.
+    pub async fn session_started(&self, token: &str) -> Result<Option<i64>> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT created_at FROM sessions WHERE token_hash = ?1 AND expires_at > ?2")
+            .bind(hash_token(token))
+            .bind(now())
+            .fetch_optional(&self.db)
+            .await?;
+        Ok(row.map(|(t,)| t))
+    }
+
     /// Changes the email address, which then needs verifying again, after
     /// checking the password: password resets go to the new address.
     pub async fn change_email(&self, user: &User, password: &str, email: &str) -> Result<()> {
         if !self.confirm_password(user, password).await? {
             return invalid("Your password is incorrect.");
         }
+        self.set_email(user, email).await
+    }
+
+    /// [`change_email`](Self::change_email) without the password, for
+    /// callers that confirmed the owner another way.
+    pub async fn set_email(&self, user: &User, email: &str) -> Result<()> {
         let user_id = user.id;
         let email = email.trim();
         if !email.contains('@') || email.len() > 254 {

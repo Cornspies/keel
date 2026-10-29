@@ -87,6 +87,35 @@ pub fn token_from(headers: &HeaderMap) -> Option<&str> {
     session_token(headers)
 }
 
+/// How long after signing in accounts without a password may make the
+/// changes that otherwise ask for one.
+pub(crate) const RECENT_SIGN_IN_SECS: i64 = 600;
+
+/// Confirms a sensitive change by the signed-in `user` (adding keys and
+/// tokens, changing the address): their password; or, for an account
+/// without one (made with single sign-on), that this browser signed in in
+/// the last ten minutes. `Invalid`, saying what to do, otherwise.
+pub(crate) async fn confirm(state: &AppState, user: &User, headers: &HeaderMap, password: &str) -> keel_core::Result<()> {
+    if user.has_password() {
+        return if state.core.confirm_password(user, password).await? {
+            Ok(())
+        } else {
+            Err(keel_core::Error::Invalid("Your password is incorrect.".into()))
+        };
+    }
+    let started = match token_from(headers) {
+        Some(t) => state.core.session_started(t).await?,
+        None => None,
+    };
+    if started.is_some_and(|t| crate::now() - t <= RECENT_SIGN_IN_SECS) {
+        return Ok(());
+    }
+    let name = state.core.config.oidc.as_ref().map_or("single sign-on", |o| o.name.as_str());
+    Err(keel_core::Error::Invalid(format!(
+        "To confirm this, sign out and sign in again with {name}: changes like this work for ten minutes after signing in."
+    )))
+}
+
 /// Credentials from an `Authorization: Basic` header.
 pub fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;

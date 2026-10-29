@@ -68,7 +68,8 @@ One binary, one data directory, no external services.
 - **Email** (optional, via any SMTP server): notification emails, address
   verification and "forgot password".
 - **People:** accounts with optional two-factor authentication (authenticator
-  apps and recovery codes), organizations (owners and members),
+  apps and recovery codes), single sign-on with an OpenID Connect provider
+  (Keycloak, Authentik, Google, Microsoft Entra, …), organizations (owners and members),
   per-repository collaborators (read/write/admin), private repositories.
 - **Importing** from GitHub, Gitea or Forgejo: the code with Git LFS files,
   issues and pull requests (numbers kept), comments and reviews, labels,
@@ -182,6 +183,9 @@ Every flag can also be set as an environment variable.
 | `--max-push-size` | `KEEL_MAX_PUSH_SIZE` | `4096` (MiB) per push |
 | `--quota` | `KEEL_QUOTA` | no limit; MiB each account may store (git data, wikis, LFS and release files) |
 | `--max-repos` | `KEEL_MAX_REPOS` | no limit; repositories per account (and organizations a person may own) |
+| `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret` | `KEEL_OIDC_ISSUER`, `KEEL_OIDC_CLIENT_ID`, `KEEL_OIDC_CLIENT_SECRET` | no single sign-on; see below |
+| `--oidc-name` | `KEEL_OIDC_NAME` | `single sign-on`: the button says "Sign in with <name>" |
+| `--oidc-allow-signup` | `KEEL_OIDC_ALLOW_SIGNUP` | off: the provider creates accounts only while sign-ups are open |
 | `--secret-key-file` | `KEEL_SECRET_KEY_FILE` | `<data dir>/secret.key`; created if missing |
 | `--block-outbound` | `KEEL_BLOCK_OUTBOUND` | none; more networks webhooks, mirrors and imports can't reach, e.g. `203.0.113.0/24,2001:db8::/32` |
 | `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
@@ -209,6 +213,46 @@ an `https://` base URL. With open sign-ups, set `--quota` and `--max-repos`
 (keel warns otherwise). Add the server's own public addresses to
 `--block-outbound`: they count as public, so without it webhooks and mirrors
 can reach services listening on them.
+
+### Single sign-on
+
+People can sign in with an OpenID Connect provider. Register keel there as
+a confidential client (with a client secret) using the authorization code
+flow, with the redirect URI `https://git.example.com/login/oidc/callback`
+and the scopes `openid email profile`. Then:
+
+```sh
+KEEL_OIDC_CLIENT_SECRET='…' ./keel serve --base-url https://git.example.com \
+    --oidc-issuer https://id.example.com/realms/main --oidc-client-id keel --oidc-name "Example ID"
+```
+
+The sign-in page then offers "Sign in with Example ID". Which account that
+signs in to:
+
+1. the account it's connected to, if it is (Settings → Security →
+   Connect, or the first time it was used);
+2. otherwise, the account with the same email address, if the provider says
+   it verified the address and keel verified it too, so it's the same
+   person; the two are then connected;
+3. otherwise a new account, named after the provider's username, while
+   sign-ups are open, or always with `--oidc-allow-signup` (for a provider
+   that only has your own people; don't use it with a public provider like
+   Google). The first account, the administrator, can't be made this way: it
+   needs the setup code.
+
+Accounts made this way have no password. Where keel asks for the password
+(adding keys and tokens, changing the address), they're confirmed by having
+signed in in the last ten minutes, in that browser; they can set a password
+in Settings → Account. Two-factor authentication still applies after signing
+in with the provider, if it's on. Disconnecting needs a password, so the
+account can still be signed in to.
+
+keel uses the authorization code flow with PKCE, its state in a signed
+cookie for ten minutes. It checks the ID token's issuer, audience, expiry and
+nonce; it doesn't check its signature, which OpenID Connect allows because
+keel gets it directly from the provider's token endpoint over HTTPS (Core
+1.0, 3.1.3.7). So the issuer and its endpoints must be `https://` (or
+`http://` to localhost, for trying it out).
 
 ### Behind nginx
 

@@ -44,7 +44,7 @@
       <option value="">never</option>
     </select>
   </label>
-  <label>Your password <input name="password" type="password" autocomplete="current-password" required></label>
+  {% include "settings/confirm.html" %}
   <button class="btn btn-primary">Create token</button>
 </form>
 {% endblock %}

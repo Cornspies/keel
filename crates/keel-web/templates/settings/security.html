@@ -1,7 +1,8 @@
 {% extends "settings/layout.html" %}
 {% block settings %}
-<h1>Two-factor authentication</h1>
+<h1>Security</h1>
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+<h2>Two-factor authentication</h2>
 
 {% if !codes.is_empty() %}
 <div class="box recovery-box">
@@ -18,13 +19,13 @@
 <h2>Recovery codes</h2>
 <p class="muted">You have {{ codes_left }} unused recovery code{% if codes_left != 1 %}s{% endif %}. Making new ones replaces them all.</p>
 <form method="post" action="/settings/security/recovery" class="form form-inline">
-  <input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>
+  {% if page.has_password %}<input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>{% endif %}
   <button class="btn">Make new recovery codes</button>
 </form>
 
 <h2>Turn off</h2>
 <form method="post" action="/settings/security/disable" class="form form-inline">
-  <input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>
+  {% if page.has_password %}<input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>{% endif %}
   <button class="btn btn-danger">Turn off two-factor authentication</button>
 </form>
 {% else if let Some((secret, qr)) = setup %}
@@ -43,5 +44,20 @@
 {% else %}
 <p>Protect your account with a second step when signing in: a code from an authenticator app on your phone, so a stolen password alone isn't enough.</p>
 <form method="post" action="/settings/security/setup" class="form"><button class="btn btn-primary">Set up two-factor authentication</button></form>
+{% endif %}
+
+{% if let Some(sso) = sso %}
+<h2 id="sso">Single sign-on</h2>
+{% if let Some((email, since)) = sso.connected %}
+<p>Your account is connected to {{ sso.name }}{% if !email.is_empty() %} as <strong>{{ email }}</strong>{% endif %}, since {{ since }}: you can sign in with it.</p>
+{% if page.has_password %}
+<form method="post" action="/settings/security/sso/delete" class="form form-inline"><input type="hidden" name="x" value="1"><button class="btn btn-danger">Disconnect</button></form>
+{% else %}
+<p class="muted">To disconnect it, <a href="/settings/account">set a password</a> first, so you can still sign in.</p>
+{% endif %}
+{% else %}
+<p class="muted">Connect your account to {{ sso.name }} to sign in with it.</p>
+<form method="post" action="/settings/security/sso" class="form"><input type="hidden" name="x" value="1"><button class="btn">Connect {{ sso.name }}</button></form>
+{% endif %}
 {% endif %}
 {% endblock %}

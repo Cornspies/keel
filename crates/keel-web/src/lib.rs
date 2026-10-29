@@ -21,6 +21,7 @@ mod labels;
 mod lastcommit;
 mod lfs;
 mod notifications;
+mod oidc;
 mod orgs;
 mod hooks;
 mod images;
@@ -61,6 +62,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use error::AppError;
+pub use oidc::secure_url;
 use error::AppResult;
 
 pub(crate) fn now() -> i64 {
@@ -87,6 +89,8 @@ pub struct Inner {
     blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
     /// Limits how many blames run at once.
     blame_slots: tokio::sync::Semaphore,
+    /// The single sign-on provider, if configured.
+    oidc: Option<oidc::Provider>,
     /// Fetches images for [`images`], a few at a time.
     image_client: reqwest::Client,
     image_slots: Arc<tokio::sync::Semaphore>,
@@ -123,6 +127,7 @@ impl AppState {
         images::set_key(core.image_proxy_key());
         Self(Arc::new(Inner {
             image_client: images::client(&core.config.outbound()),
+            oidc: core.config.oidc.clone().map(oidc::Provider::new),
             image_slots: Arc::new(tokio::sync::Semaphore::new(images::CONCURRENT_IMAGES)),
             search: search::open_index(&core.config.data_dir),
             core,
@@ -180,6 +185,11 @@ pub(crate) struct Page {
     pub banner: String,
     /// `auto` (follow the system), `light` or `dark`.
     pub theme: &'static str,
+    /// What the single sign-on provider is called, if there's one.
+    pub sso_name: Option<String>,
+    /// Whether the viewer has a password to confirm changes with (not
+    /// accounts made with single sign-on, until they set one).
+    pub has_password: bool,
 }
 
 impl Page {
@@ -187,6 +197,8 @@ impl Page {
         Self {
             unread: viewer.as_ref().and_then(|v| state.unread.get(&v.id)).unwrap_or(0),
             theme: theme::current(viewer.as_ref()),
+            sso_name: state.core.config.oidc.as_ref().map(|o| o.name.clone()),
+            has_password: viewer.as_ref().is_none_or(User::has_password),
             mail_enabled: state.core.mail_enabled(),
             banner: state.core.site_settings().banner,
             title: title.into(),
@@ -254,6 +266,10 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/account/password", post(settings::change_password))
         .route("/settings/account/verify", post(settings::send_verification))
         .route("/settings/notifications", get(settings::notifications).post(settings::save_notifications))
+        .route("/login/oidc", get(oidc::start))
+        .route("/login/oidc/callback", get(oidc::callback))
+        .route("/settings/security/sso", post(oidc::link))
+        .route("/settings/security/sso/delete", post(oidc::unlink))
         .route("/password/forgot", get(password::forgot_form).post(password::forgot))
         .route("/password/reset", get(password::reset_form).post(password::reset))
         .route("/email/verify", get(password::verify_form).post(password::verify))

@@ -5,7 +5,11 @@
   {% if !allowed %}
   <p class="flash">Registration is closed on this server. Ask an administrator for an account.</p>
   {% else %}
-  {% if first_user %}<p class="flash">This is the first account on this server, so it will be the administrator.</p>{% endif %}
+  {% if first_user %}<p class="flash">This is the first account on this server, so it will be the administrator.</p>
+  {% else if let Some(name) = page.sso_name %}
+  <p><a class="btn btn-block" href="/login/oidc">Sign up with {{ name }}</a></p>
+  <p class="muted small or-divider">or make an account here</p>
+  {% endif %}
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
   <form method="post" action="/register" class="form">
     <label>Username <input name="username" value="{{ username }}" autocomplete="username" pattern="[A-Za-z0-9\-]+" maxlength="39" required autofocus></label>

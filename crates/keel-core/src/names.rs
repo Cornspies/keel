@@ -2,7 +2,7 @@ use crate::{Result, invalid};
 
 /// Top-level paths used by the web UI; users with these names would shadow
 /// them.
-const RESERVED_USERNAMES: &[&str] = &[
+pub(crate) const RESERVED_USERNAMES: &[&str] = &[
     "about", "admin", "api", "assets", "avatars", "email", "explore", "favicon.ico", "git", "health", "healthz", "help",
     "issues", "login", "logout", "metrics", "new", "notifications", "org", "orgs", "organizations", "password",
     "pulls", "register", "robots.txt", "root", "search", "settings", "static", "user", "users",

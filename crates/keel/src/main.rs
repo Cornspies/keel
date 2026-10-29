@@ -119,6 +119,30 @@ struct ServeArgs {
     #[arg(long, env = "KEEL_SECRET_KEY_FILE")]
     secret_key_file: Option<PathBuf>,
 
+    /// Sign in with an OpenID Connect provider: its issuer URL. Register
+    /// keel there as a confidential client with the redirect URI
+    /// <base URL>/login/oidc/callback.
+    #[arg(long, env = "KEEL_OIDC_ISSUER", requires_all = ["oidc_client_id", "oidc_client_secret"])]
+    oidc_issuer: Option<String>,
+
+    /// The client ID keel has at the provider.
+    #[arg(long, env = "KEEL_OIDC_CLIENT_ID", requires = "oidc_issuer")]
+    oidc_client_id: Option<String>,
+
+    /// The client secret keel has at the provider (prefer the environment
+    /// variable).
+    #[arg(long, env = "KEEL_OIDC_CLIENT_SECRET", hide_env_values = true, requires = "oidc_issuer")]
+    oidc_client_secret: Option<String>,
+
+    /// What the sign-in button calls the provider: "Sign in with <name>".
+    #[arg(long, env = "KEEL_OIDC_NAME", default_value = "single sign-on")]
+    oidc_name: String,
+
+    /// Create accounts for whoever the provider signs in, even with
+    /// --closed-registration (for a provider with only your own people).
+    #[arg(long, env = "KEEL_OIDC_ALLOW_SIGNUP")]
+    oidc_allow_signup: bool,
+
     /// Serve Prometheus metrics at /metrics to requests with this bearer
     /// token (off without one).
     #[arg(long, env = "KEEL_METRICS_TOKEN", hide_env_values = true)]
@@ -246,6 +270,22 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_repos: args.max_repos,
         blocked_networks: args.block_outbound,
         secret_key_file: args.secret_key_file,
+        oidc: match (args.oidc_issuer, args.oidc_client_id, args.oidc_client_secret) {
+            (Some(issuer), Some(client_id), Some(client_secret)) => {
+                let issuer = issuer.trim_end_matches('/').to_owned();
+                if !keel_web::secure_url(&issuer) {
+                    bail!("--oidc-issuer must be an https:// URL (http:// only for localhost)");
+                }
+                Some(keel_core::OidcConfig {
+                    issuer,
+                    client_id,
+                    client_secret,
+                    name: args.oidc_name,
+                    allow_signup: args.oidc_allow_signup,
+                })
+            }
+            _ => None,
+        },
     };
     // Easy mistakes when the server goes on the internet.
     if config.base_url.starts_with("https://") && args.http_addr.ip().is_unspecified() {

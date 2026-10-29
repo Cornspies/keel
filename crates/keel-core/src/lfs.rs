@@ -268,7 +268,12 @@ impl Core {
     /// A stable key for signing image proxy URLs (derived from the token
     /// secret, so it survives restarts).
     pub fn image_proxy_key(&self) -> String {
-        sign(&self.token_secret, b"image proxy")
+        self.derived_secret("image proxy")
+    }
+
+    /// A stable secret for `purpose`, derived from the token secret.
+    pub fn derived_secret(&self, purpose: &str) -> String {
+        sign(&self.token_secret, purpose.as_bytes())
     }
 
     /// The secret that signs tokens, created on first start.

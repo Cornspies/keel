@@ -935,3 +935,8 @@ button.reaction:hover, .reaction-add:hover { background: var(--bg-hover); }
 .board-add > summary { cursor: pointer; padding: 2px 2px; }
 .board-add .form { margin-top: 6px; }
 .board-new-column { background: none; border-style: dashed; }
+
+/* Signing in with single sign-on. */
+.btn-block { display: flex; justify-content: center; width: 100%; }
+.or-divider { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; }
+.or-divider::before, .or-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border-muted); }

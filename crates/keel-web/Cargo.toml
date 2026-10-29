@@ -9,7 +9,7 @@ keel-core.workspace = true
 keel-git.workspace = true
 keel-search.workspace = true
 keel-hooks.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json", "form"] }
 getrandom.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
