@@ -19,18 +19,8 @@ pub use lfs::endpoint;
 /// (unless allowed), a few checked redirects (storage services use them),
 /// and generous timeouts for large files.
 pub fn client(outbound: &keel_core::Outbound) -> reqwest::Client {
-    let checks = outbound.clone();
-    let policy = reqwest::redirect::Policy::custom(move |attempt| {
-        if attempt.previous().len() >= 5 {
-            attempt.error("too many redirects")
-        } else if let Err(e) = lfs::check_url(attempt.url(), &checks) {
-            attempt.error(e)
-        } else {
-            attempt.follow()
-        }
-    });
     keel_hooks::safe_client_builder(outbound)
-        .redirect(policy)
+        .redirect(keel_hooks::checked_redirects(outbound, 5))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(3600))
         .build()

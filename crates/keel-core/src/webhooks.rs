@@ -10,6 +10,7 @@ use std::net::IpAddr;
 
 use sha2::{Digest, Sha256};
 
+use crate::secrets::Purpose;
 use crate::{Core, Error, Result, invalid, now};
 
 /// Events a hook can subscribe to, with what they cover.
@@ -259,24 +260,32 @@ impl Core {
             HookOwner::Repo(id) => (Some(id), None),
             HookOwner::Org(id) => (None, Some(id)),
         };
-        Ok(sqlx::query_as("SELECT * FROM webhooks WHERE repo_id IS ?1 AND org_id IS ?2 ORDER BY id")
+        let hooks: Vec<Webhook> = sqlx::query_as("SELECT * FROM webhooks WHERE repo_id IS ?1 AND org_id IS ?2 ORDER BY id")
             .bind(repo)
             .bind(org)
             .fetch_all(&self.db)
-            .await?)
+            .await?;
+        hooks.into_iter().map(|h| self.reveal_hook(h)).collect()
+    }
+
+    /// Decrypts a hook's secret, as loaded from the database.
+    fn reveal_hook(&self, mut hook: Webhook) -> Result<Webhook> {
+        hook.secret = self.unseal(Purpose::Webhook, &hook.secret)?;
+        Ok(hook)
     }
 
     /// Hooks that get a repository's events: its own and its
     /// organization's.
     pub(crate) async fn hooks_for_repo(&self, repo_id: i64) -> Result<Vec<Webhook>> {
-        Ok(sqlx::query_as(
+        let hooks: Vec<Webhook> = sqlx::query_as(
             "SELECT * FROM webhooks WHERE repo_id = ?1
                 OR org_id = (SELECT owner_id FROM repositories WHERE id = ?1)
              ORDER BY id",
         )
         .bind(repo_id)
         .fetch_all(&self.db)
-        .await?)
+        .await?;
+        hooks.into_iter().map(|h| self.reveal_hook(h)).collect()
     }
 
     pub async fn webhook(&self, owner: HookOwner, id: i64) -> Result<Option<Webhook>> {
@@ -304,7 +313,7 @@ impl Core {
         )
         .bind(repo)
         .bind(url.trim())
-        .bind(secret.trim())
+        .bind(self.seal(Purpose::Webhook, secret.trim())?)
         .bind(events)
         .bind(active)
         .bind(now())
@@ -332,7 +341,7 @@ impl Core {
         )
         .bind(hook.id)
         .bind(url.trim())
-        .bind(secret.map(str::trim))
+        .bind(secret.map(|s| self.seal(Purpose::Webhook, s.trim())).transpose()?)
         .bind(events)
         .bind(active)
         .execute(&self.db)
@@ -475,7 +484,7 @@ impl Core {
                 .fetch_optional(&self.db)
                 .await?;
             if let Some(hook) = hook {
-                out.push((d, hook));
+                out.push((d, self.reveal_hook(hook)?));
             }
         }
         Ok(out)

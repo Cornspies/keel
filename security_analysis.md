@@ -16,7 +16,8 @@ anyone who can sign up, a cheap unauthenticated way to exhaust memory and CPU,
 and git accepting objects without checking them. Most of them are closed by
 deployment settings (section 1) plus a few small code changes (section 2).
 
-*Update:* the code changes of section 5 are in 0.17; see the status there.
+*Update:* the code changes of section 5 are in 0.17, and the low-severity
+findings are handled in 0.19; see the status there.
 
 ## Summary
 
@@ -438,6 +439,23 @@ Run `cargo audit` again before each release; the database changes.
   advisories left are inside the newest `pgp`, `askama` and `syntect`, with
   the exposure described in section 4. syntect no longer pulls in
   `yaml-rust`.
+
+The low-severity findings, in 0.19:
+
+- A-1: no code change (keel can't see client addresses behind a proxy);
+  the README's "Behind nginx" section has a tested configuration with
+  per-address limits for sign-in, sign-up, resets and git over HTTP.
+- A-2: tokens act as site administrators only if created for it; everyday
+  tokens of administrators reach what a non-administrator could.
+- A-3: two-factor secrets, webhook secrets, mirror passwords and import
+  tokens are encrypted (AES-256-GCM) with a key outside the database
+  (`secret.key`, or `--secret-key-file`); loose permissions on old data
+  directories are tightened at startup.
+- P-1: images from other servers go through a signed image proxy, and the
+  CSP only allows keel's own images.
+- P-2: email links carry the token in the URL fragment, which isn't sent
+  to servers; verifying takes a click.
+- P-3: `/healthz` shows the version and uptime only with the metrics token.
 
 The original list:
 

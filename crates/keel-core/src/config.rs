@@ -38,6 +38,9 @@ pub struct Config {
     /// Networks webhooks, mirrors and imports may not reach, besides the
     /// private ones (e.g. the server's own public addresses).
     pub blocked_networks: Vec<Network>,
+    /// The key secrets in the database are encrypted with (see
+    /// `secrets`); `secret.key` in the data directory by default.
+    pub secret_key_file: Option<PathBuf>,
 }
 
 /// An IP network, like `203.0.113.7/32` or `2001:db8::/48`.
@@ -115,6 +118,7 @@ impl Default for Config {
             quota_bytes: None,
             max_repos: None,
             blocked_networks: Vec::new(),
+            secret_key_file: None,
         }
     }
 }
@@ -127,6 +131,10 @@ impl Config {
     /// Git hooks keel runs (see `protection.rs`).
     pub fn hooks_dir(&self) -> PathBuf {
         self.data_dir.join("hooks")
+    }
+
+    pub fn secret_key_path(&self) -> PathBuf {
+        self.secret_key_file.clone().unwrap_or_else(|| self.data_dir.join(crate::secrets::KEY_FILE))
     }
 
     pub fn repos_dir(&self) -> PathBuf {

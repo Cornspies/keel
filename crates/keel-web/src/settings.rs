@@ -363,6 +363,7 @@ struct TokenView {
     name: String,
     hint: String,
     can_write: bool,
+    site_admin: bool,
     created: String,
     last_used: Option<String>,
     expires: Option<String>,
@@ -377,6 +378,7 @@ impl From<AccessToken> for TokenView {
             name: t.name,
             hint: t.hint,
             can_write: t.can_write,
+            site_admin: t.site_admin,
             created: date(t.created_at),
             last_used: t.last_used_at.map(relative_time),
             expires: t.expires_at.map(date),
@@ -395,12 +397,14 @@ struct TokensPage {
     created: Option<String>,
     username: String,
     clone_example: String,
+    is_admin: bool,
 }
 
 async fn tokens_page(state: &AppState, user: User, error: Option<String>, created: Option<String>) -> AppResult {
     let tokens = state.core.tokens(user.id).await?.into_iter().map(TokenView::from).collect();
     html(TokensPage {
         username: user.username.clone(),
+        is_admin: user.is_admin,
         clone_example: state.core.config.http_clone_url(&user.username, "<repo>"),
         page: Page::new(state, Some(user), "Access tokens"),
         nav: "tokens",
@@ -418,6 +422,8 @@ pub async fn tokens(State(state): State<AppState>, SignedIn(user): SignedIn) -> 
 pub struct TokenForm {
     name: String,
     write: Option<String>,
+    /// For administrators: the token may administer the site.
+    admin: Option<String>,
     /// Days until expiry; empty for never.
     #[serde(default)]
     expires: String,
@@ -433,7 +439,7 @@ pub async fn create_token(
     let expires = f.expires.trim().parse::<i64>().ok().filter(|d| *d > 0);
     let created = async {
         confirm(&state, &user, &f.password).await?;
-        state.core.create_token(user.id, &f.name, f.write.is_some(), expires).await
+        state.core.create_token(user.id, &f.name, f.write.is_some(), f.admin.is_some(), expires).await
     }
     .await;
     match created {

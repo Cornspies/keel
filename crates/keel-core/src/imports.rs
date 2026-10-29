@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use crate::mirrors::{FETCH_LIMIT, MirrorRemote, parse_mirror_url};
+use crate::secrets::Purpose;
 use crate::{Core, Release, Repo, Result, User, invalid, now};
 
 /// Where a repository is imported from.
@@ -257,7 +258,7 @@ impl Core {
         .bind(source.service.as_str())
         .bind(&source.url)
         .bind(&source.api_url)
-        .bind(token.trim())
+        .bind(self.seal(Purpose::Import, token.trim())?)
         .bind(options.issues)
         .bind(options.releases)
         .bind(options.wiki)
@@ -286,7 +287,7 @@ impl Core {
             .bind(repo_id)
             .fetch_one(&self.db)
             .await?;
-        Ok(token)
+        self.unseal(Purpose::Import, &token)
     }
 
     /// Takes the next queued import, marking it as running.

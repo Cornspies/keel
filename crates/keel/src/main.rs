@@ -112,6 +112,13 @@ struct ServeArgs {
     #[arg(long, env = "KEEL_BLOCK_OUTBOUND", value_delimiter = ',', value_parser = parse_network)]
     block_outbound: Vec<Network>,
 
+    /// The key two-factor secrets, webhook secrets, mirror passwords and
+    /// import tokens are encrypted with in the database; created if
+    /// missing. Keep it outside the data directory to keep it out of its
+    /// backups [default: <data dir>/secret.key].
+    #[arg(long, env = "KEEL_SECRET_KEY_FILE")]
+    secret_key_file: Option<PathBuf>,
+
     /// Serve Prometheus metrics at /metrics to requests with this bearer
     /// token (off without one).
     #[arg(long, env = "KEEL_METRICS_TOKEN", hide_env_values = true)]
@@ -147,6 +154,12 @@ fn main() -> anyhow::Result<()> {
                 report.bytes as f64 / 1e6,
                 report.took.as_secs_f64(),
             );
+            if !data_dir.join("secret.key").is_file() {
+                println!(
+                    "The key the database's secrets are encrypted with isn't in the data directory \
+                     (--secret-key-file): keep a copy of it, a restore needs it."
+                );
+            }
             Ok(())
         }
         Command::Hook { name } if name == "pre-receive" => std::process::exit(keel_core::pre_receive()),
@@ -232,6 +245,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         quota_bytes: args.quota.map(|q| q.saturating_mul(1 << 20)),
         max_repos: args.max_repos,
         blocked_networks: args.block_outbound,
+        secret_key_file: args.secret_key_file,
     };
     // Easy mistakes when the server goes on the internet.
     if config.base_url.starts_with("https://") && args.http_addr.ip().is_unspecified() {

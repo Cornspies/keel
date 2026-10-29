@@ -232,20 +232,29 @@ impl Core {
     /// Checks an LFS token for `repo`: its user, and whether it allows
     /// uploads.
     pub async fn check_lfs_token(&self, token: &str, repo: &Repo) -> Result<Option<(User, bool)>> {
-        let Some((payload, mac)) = token.rsplit_once('.') else { return Ok(None) };
+        let Some((user_id, write)) = self.lfs_token_claims(token, "lfs1", repo) else { return Ok(None) };
+        Ok(self.user_by_id(user_id).await?.filter(|u| !u.disabled).map(|u| (u, write)))
+    }
+
+    /// The subject (a user) and the write bit of a valid, unexpired token
+    /// of kind `tag` for `repo`.
+    fn lfs_token_claims(&self, token: &str, tag: &str, repo: &Repo) -> Option<(i64, bool)> {
+        let (payload, mac) = token.rsplit_once('.')?;
         let expected = sign(&self.token_secret, payload.as_bytes());
         let expected = expected.trim_start_matches("sha256=");
         if expected.len() != mac.len() || expected.bytes().zip(mac.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) != 0 {
-            return Ok(None);
+            return None;
         }
         let parts: Vec<&str> = payload.split('.').collect();
-        let [tag, user, repo_id, write, expires] = parts[..] else { return Ok(None) };
-        let parsed = (user.parse::<i64>(), repo_id.parse::<i64>(), expires.parse::<i64>());
-        let (Ok(user_id), Ok(repo_id), Ok(expires)) = parsed else { return Ok(None) };
-        if tag != "lfs1" || repo_id != repo.id || expires < now() {
-            return Ok(None);
-        }
-        Ok(self.user_by_id(user_id).await?.filter(|u| !u.disabled).map(|u| (u, write == "1")))
+        let [kind, subject, repo_id, write, expires] = parts[..] else { return None };
+        let (subject, repo_id, expires) = (subject.parse::<i64>().ok()?, repo_id.parse::<i64>().ok()?, expires.parse::<i64>().ok()?);
+        (kind == tag && repo_id == repo.id && expires >= now()).then_some((subject, write == "1"))
+    }
+
+    /// A stable key for signing image proxy URLs (derived from the token
+    /// secret, so it survives restarts).
+    pub fn image_proxy_key(&self) -> String {
+        sign(&self.token_secret, b"image proxy")
     }
 
     /// The secret that signs tokens, created on first start.

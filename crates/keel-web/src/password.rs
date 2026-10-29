@@ -65,10 +65,16 @@ pub async fn forgot(State(state): State<AppState>, Form(f): Form<ForgotForm>) ->
 #[template(path = "password_reset.html")]
 struct ResetPage {
     page: Page,
+    /// Empty when it's in the link's fragment, for the page's script to
+    /// fill in.
     token: String,
     error: Option<String>,
 }
 
+/// Links put the token in the fragment (`#token=…`), which browsers don't
+/// send, so it never reaches the server's or a proxy's request log; a
+/// script on the page moves it into the form. Links sent before that have
+/// it in the query.
 #[derive(Deserialize)]
 pub struct TokenQuery {
     #[serde(default)]
@@ -76,7 +82,7 @@ pub struct TokenQuery {
 }
 
 pub async fn reset_form(State(state): State<AppState>, Query(q): Query<TokenQuery>) -> AppResult {
-    if !state.core.reset_token_valid(&q.token).await? {
+    if !q.token.is_empty() && !state.core.reset_token_valid(&q.token).await? {
         return message(
             &state,
             None,
@@ -102,7 +108,7 @@ pub async fn reset(State(state): State<AppState>, Form(f): Form<ResetForm>) -> A
     if f.new != f.confirm {
         return page("The passwords don’t match.".into());
     }
-    match state.core.reset_password(&f.token, &f.new).await {
+    match state.core.reset_password(f.token.trim(), &f.new).await {
         // With two-factor authentication, the second step still applies.
         Ok(user) => crate::twofactor::sign_in(&state, &user, "/").await,
         Err(keel_core::Error::Invalid(msg)) => page(msg),
@@ -110,8 +116,27 @@ pub async fn reset(State(state): State<AppState>, Form(f): Form<ResetForm>) -> A
     }
 }
 
-pub async fn verify(State(state): State<AppState>, Viewer(viewer): Viewer, Query(q): Query<TokenQuery>) -> AppResult {
-    match state.core.verify_email(&q.token).await {
+#[derive(Template)]
+#[template(path = "email_verify.html")]
+struct VerifyPage {
+    page: Page,
+    token: String,
+}
+
+/// The page a verification link opens: verifying takes a click (a POST),
+/// so mail scanners that open links don't use it up.
+pub async fn verify_form(State(state): State<AppState>, Viewer(viewer): Viewer, Query(q): Query<TokenQuery>) -> AppResult {
+    html(VerifyPage { page: Page::new(&state, viewer, "Verify your email address"), token: q.token })
+}
+
+#[derive(Deserialize)]
+pub struct VerifyForm {
+    #[serde(default)]
+    token: String,
+}
+
+pub async fn verify(State(state): State<AppState>, Viewer(viewer): Viewer, Form(f): Form<VerifyForm>) -> AppResult {
+    match state.core.verify_email(f.token.trim()).await {
         Ok(user) => {
             let text = format!("Thanks! {} is verified, so you can now get notification emails.", user.email);
             message(&state, viewer, "Email address verified", &text, ("/settings/notifications", "Email settings"))

@@ -22,6 +22,7 @@ mod lfs;
 mod notifications;
 mod orgs;
 mod hooks;
+mod images;
 mod pages;
 mod password;
 mod profile;
@@ -85,6 +86,9 @@ pub struct Inner {
     blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
     /// Limits how many blames run at once.
     blame_slots: tokio::sync::Semaphore,
+    /// Fetches images for [`images`], a few at a time.
+    image_client: reqwest::Client,
+    image_slots: Arc<tokio::sync::Semaphore>,
     /// Merge result per (base, head); `None` if head is already merged.
     mergeability: Cache<(Oid, Oid), Option<keel_git::Mergeability>>,
     /// Unread notifications per user id, looked up with the session on each
@@ -115,7 +119,10 @@ impl AppState {
 
     fn build(core: Core) -> Self {
         let mib = |n: u64| n * 1024 * 1024;
+        images::set_key(core.image_proxy_key());
         Self(Arc::new(Inner {
+            image_client: images::client(&core.config.outbound()),
+            image_slots: Arc::new(tokio::sync::Semaphore::new(images::CONCURRENT_IMAGES)),
             search: search::open_index(&core.config.data_dir),
             core,
             assets: assets::Assets::new(),
@@ -248,7 +255,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/notifications", get(settings::notifications).post(settings::save_notifications))
         .route("/password/forgot", get(password::forgot_form).post(password::forgot))
         .route("/password/reset", get(password::reset_form).post(password::reset))
-        .route("/email/verify", get(password::verify))
+        .route("/email/verify", get(password::verify_form).post(password::verify))
         .route("/settings/keys", get(settings::keys).post(settings::add_key))
         .route("/settings/keys/{id}/delete", post(settings::delete_key))
         .route("/settings/gpg-keys", post(settings::add_gpg_key))
@@ -407,6 +414,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/info/lfs/locks", get(lfs::list_locks).post(lfs::create_lock))
         .route("/{owner}/{repo}/info/lfs/locks/{id}/unlock", post(lfs::unlock))
         .route("/healthz", get(health))
+        .route("/_image", get(images::image))
         .route("/metrics", get(metrics))
         .route("/signing-key.pub", get(signing_key));
 
@@ -434,19 +442,25 @@ async fn track(State(state): State<AppState>, req: Request, next: Next) -> Respo
     res
 }
 
-/// Prometheus metrics, for requests with the configured bearer token.
-async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let Some(token) = state.core.config.metrics_token.as_deref() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+/// Whether the request carries the configured metrics token
+/// (`Authorization: Bearer …`).
+fn has_metrics_token(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(token) = state.core.config.metrics_token.as_deref() else { return false };
     let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
     // Constant-time, so the token can't be guessed byte by byte.
-    let ok = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0;
-    if !ok {
+    given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |a, (x, y)| a | (x ^ y)) == 0
+}
+
+/// Prometheus metrics, for requests with the configured bearer token.
+async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if state.core.config.metrics_token.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !has_metrics_token(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], "Unauthorized\n").into_response();
     }
     match state.core.metrics_text().await {
@@ -459,15 +473,17 @@ async fn metrics(State(state): State<AppState>, headers: axum::http::HeaderMap) 
 }
 
 /// For monitoring and load balancers: 200 if the server can use its
-/// database, 503 otherwise.
-async fn health(State(state): State<AppState>) -> Response {
+/// database, 503 otherwise. The version and uptime only go to requests
+/// with the metrics token: to others the version would say which known
+/// vulnerabilities to try.
+async fn health(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let database = state.core.database_ok().await;
-    let body = serde_json::json!({
-        "status": if database { "ok" } else { "unavailable" },
-        "version": env!("CARGO_PKG_VERSION"),
-        "database": database,
-        "uptime_seconds": state.started.elapsed().as_secs(),
-    });
+    let mut body = serde_json::json!({ "status": if database { "ok" } else { "unavailable" } });
+    if has_metrics_token(&state, &headers) {
+        body["version"] = env!("CARGO_PKG_VERSION").into();
+        body["database"] = database.into();
+        body["uptime_seconds"] = state.started.elapsed().as_secs().into();
+    }
     let status = if database { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, [(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
 }
@@ -503,7 +519,7 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     let defaults = [
         (
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src * data:; \
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; \
              form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),

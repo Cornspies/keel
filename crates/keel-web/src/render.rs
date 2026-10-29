@@ -295,7 +295,22 @@ fn finish_markdown<'a>(events: impl Iterator<Item = Event<'a>>, base: &LinkBase<
     });
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, events);
-    ammonia::clean(&html)
+    sanitize(&html)
+}
+
+/// Removes anything unsafe (scripts, event handlers, unknown tags), and
+/// sends images on other servers through the image proxy, raw `<img>` tags
+/// included.
+fn sanitize(html: &str) -> String {
+    ammonia::Builder::default()
+        .attribute_filter(|element, attribute, value| match (element, attribute) {
+            ("img", "src") => Some(crate::images::img_src(value).into()),
+            // Would bypass `src`.
+            ("img", "srcset") => None,
+            _ => Some(value.into()),
+        })
+        .clean(html)
+        .to_string()
 }
 
 /// Splits text into plain text and links for `#123` and `@name`.
@@ -482,6 +497,20 @@ mod tests {
         assert!(html.contains(r#"src="/ada/engine/raw/main/docs/img/logo.png""#));
         assert!(!html.contains("<script"));
         assert_eq!(resolve_relative("", "../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn images_elsewhere_go_through_the_proxy() {
+        let base = LinkBase { blob: "/a/r/blob/main", raw: "/a/r/raw/main", dir: "" };
+        let html = markdown(
+            "![ci](https://ci.example.com/badge.svg) ![local](logo.png)\n\n\
+             <img src=\"//tracker.example/pixel.gif\" srcset=\"https://tracker.example/2x.gif 2x\">",
+            &base,
+        );
+        assert!(html.contains(r#"src="/_image?url=https%3A%2F%2Fci.example.com%2Fbadge.svg&amp;sig="#), "{html}");
+        assert!(html.contains(r#"src="/_image?url=https%3A%2F%2Ftracker.example%2Fpixel.gif&amp;sig="#), "{html}");
+        assert!(html.contains(r#"src="/a/r/raw/main/logo.png""#));
+        assert!(!html.contains("srcset") && !html.contains("\"https://") && !html.contains("\"//"), "{html}");
     }
 
     #[test]

@@ -20,6 +20,7 @@
     <div>
       <strong>{{ t.name }}</strong> <span class="mono muted small">keel_…{{ t.hint }}</span>
       {% if t.can_write %}<span class="badge">read &amp; write</span>{% else %}<span class="badge">read-only</span>{% endif %}
+      {% if t.site_admin %}<span class="badge badge-danger">site administration</span>{% endif %}
       {% if t.expired %}<span class="badge badge-danger">expired</span>{% endif %}
       <div class="muted small">Created {{ t.created }} · {% if let Some(u) = t.last_used %}Last used {{ u }}{% else %}Never used{% endif %}{% if let Some(e) = t.expires %} · {% if t.expired %}Expired{% else %}Expires{% endif %} {{ e }}{% endif %}</div>
     </div>
@@ -34,6 +35,7 @@
 <form method="post" action="/settings/tokens" class="form">
   <label>Name <input name="name" placeholder="e.g. work laptop" maxlength="100" required></label>
   <label class="check"><input type="checkbox" name="write"> Allow pushing <span class="hint">Without this, the token can only clone and fetch.</span></label>
+  {% if is_admin %}<label class="check"><input type="checkbox" name="admin"> Site administration <span class="hint">Without this, the token reaches only what you could reach without being an administrator: your own repositories, your organizations' and those you collaborate on. Give CI an everyday token.</span></label>{% endif %}
   <label>Expires
     <select name="expires">
       <option value="30">in 30 days</option>

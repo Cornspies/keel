@@ -50,6 +50,35 @@ pub fn safe_client_builder(outbound: &Outbound) -> reqwest::ClientBuilder {
         .dns_resolver(Arc::new(Allowed(Arc::new(outbound.clone()))))
 }
 
+/// Whether `url` may be requested by a [`safe_client_builder`] client:
+/// http(s) only, and a literal address only if `outbound` allows it (names
+/// are checked by the client's resolver).
+pub fn check_url(url: &reqwest::Url, outbound: &Outbound) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{} isn't an http(s) URL", url.scheme()));
+    }
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<IpAddr>().is_ok_and(|ip| !outbound.allows(ip)) {
+        return Err("that address may not be reached".into());
+    }
+    Ok(())
+}
+
+/// Follows up to `max` redirects, each checked with [`check_url`], for
+/// services that redirect (storage services, image hosts).
+pub fn checked_redirects(outbound: &Outbound, max: usize) -> reqwest::redirect::Policy {
+    let checks = outbound.clone();
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= max {
+            attempt.error("too many redirects")
+        } else if let Err(e) = check_url(attempt.url(), &checks) {
+            attempt.error(e)
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 pub fn client(outbound: &Outbound) -> reqwest::Client {
     safe_client_builder(outbound).timeout(TIMEOUT).build().expect("valid HTTP client configuration")
 }

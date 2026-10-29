@@ -346,7 +346,8 @@ check "main has the fork's change" is "$(curl -s "$B/ada/engine/raw/main/bob.txt
 check "fork branch was deleted" is "$(git ls-remote "$BOB_FORK" refs/heads/topic 2>/dev/null | wc -l)" 0
 
 echo "== webhooks"
-# A receiver that saves each request's event, signature and body.
+# A receiver that saves each request's event, signature and body, and
+# serves an image and a page for the image proxy.
 HOOK_PORT=$((HTTP_PORT + 2))
 mkdir -p "$T/hooks"
 python3 - "$HOOK_PORT" "$T/hooks" <<'PY' &
@@ -360,6 +361,10 @@ class H(http.server.BaseHTTPRequestHandler):
         open(f"{out}/{i}.json", "wb").write(body)
         open(f"{out}/{i}.hdr", "w").write(f"{self.headers['X-GitHub-Event']} {self.headers.get('X-Hub-Signature-256', '')}\n")
         self.send_response(200); self.end_headers(); self.wfile.write(b"thanks")
+    def do_GET(self):
+        kind, body = {"/dot.png": ("image/png", bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a4b70000000049454e44ae426082")),
+                      "/page.html": ("text/html", b"<script>alert(1)</script>")}.get(self.path, ("text/plain", b"hi"))
+        self.send_response(200); self.send_header("Content-Type", kind); self.end_headers(); self.wfile.write(body)
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
@@ -405,6 +410,18 @@ check "as gollum events" received gollum '"page_name":"Home"'
 check "stars are delivered" is "$(post "$T/bob" /ada/engine/star to=on)" 303
 check "as star events" received star '"action":"created"'
 check "unstar" is "$(post "$T/bob" /ada/engine/star to=off)" 303
+
+echo "== images from other servers"
+check "pages only load keel's images" contains "$(curl -sI "$B/ada/engine/issues/1" | tr -d '\r')" "img-src 'self' data:"
+post "$T/bob" /ada/engine/issues/1/comments action=comment \
+    body="![dot](http://127.0.0.1:$HOOK_PORT/dot.png) <img src=\"http://127.0.0.1:$HOOK_PORT/page.html\">" >/dev/null
+page=$(curl -s "$B/ada/engine/issues/1")
+IMG=$(grep -o '/_image?url=[^"]*dot\.png[^"]*' <<<"$page" | head -1 | sed 's/&amp;/\&/g')
+NOTIMG=$(grep -o '/_image?url=[^"]*page\.html[^"]*' <<<"$page" | head -1 | sed 's/&amp;/\&/g')
+check "go through keel" is "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$B$IMG")" "200 image/png"
+check "sandboxed" contains "$(curl -sI "$B$IMG" | tr -d '\r')" "sandbox"
+check "only with keel's signature" is "$(status "$B${IMG%sig=*}sig=00000000000000000000000000000000")" 404
+check "and only images" is "$(status "$B$NOTIMG")" 404
 kill "$HOOK_PID" 2>/dev/null
 
 echo "== notifications"
@@ -440,9 +457,10 @@ mail_to() { # mail_to <address> <text>: waits up to 5s for a message to <address
     echo "no mail to $1 containing '$2'"
     return 1
 }
-check "signing up sends a verification link" mail_to ada@example.com "/email/verify?token="
-VERIFY=$(grep -o '/email/verify?token=[A-Za-z0-9_-]*' "$(mail_to ada@example.com /email/verify)" | head -1)
-check "the link verifies the address" contains "$(curl -s "$B$VERIFY")" "is verified"
+check "signing up sends a verification link" mail_to ada@example.com "/email/verify#token="
+VERIFY=$(grep -o '/email/verify#token=[A-Za-z0-9_-]*' "$(mail_to ada@example.com /email/verify)" | head -1 | cut -d= -f2)
+check "opening it verifies nothing yet" bash -c "! curl -s '$B/email/verify' | grep -q 'is verified'"
+check "confirming does" contains "$(curl -s -H "$O" --data-urlencode "token=$VERIFY" "$B/email/verify")" "is verified"
 check "account settings show it" contains "$(curl -s -b "$T/ada" "$B/settings/account")" "Verified"
 check "email everything" is "$(post "$T/ada" /settings/notifications email=all)" 303
 check "bob opens an issue" is "$(post "$T/bob" /ada/engine/issues title="Mail me" body="Watch this")" 303
@@ -452,8 +470,10 @@ check "unverified addresses get none" bash -c "! grep -l 'Mail me' '$T'/mail/*.e
 check "login offers password resets" contains "$(curl -s "$B/login")" "Forgot your password?"
 check "unknown addresses look the same" contains "$(curl -s -H "$O" -d "email=nobody@example.com" "$B/password/forgot")" "Check your email"
 check "request a reset" contains "$(curl -s -H "$O" -d "email=eve@example.com" "$B/password/forgot")" "Check your email"
+check "reset links keep the token out of requests" mail_to eve@example.com "/password/reset#token="
 RESET=$(grep -o 'token=[A-Za-z0-9_-]*' "$(mail_to eve@example.com /password/reset)" | head -1 | cut -d= -f2)
-check "reset form" is "$(status "$B/password/reset?token=$RESET")" 200
+check "reset form" is "$(status "$B/password/reset")" 200
+check "links from before still work" contains "$(curl -s "$B/password/reset?token=$RESET")" "value=\"$RESET\""
 check "set a new password" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/eve2" -H "$O" --data-urlencode "token=$RESET" -d "new=password-reset&confirm=password-reset" "$B/password/reset")" 303
 check "signed in afterwards" contains "$(curl -s -b "$T/eve2" "$B/settings/account")" "eve@example.com"
 check "old sessions are signed out" is "$(status -b "$T/eve" "$B/settings/account")" 303
@@ -754,6 +774,8 @@ check "new pushes follow by themselves" synced engine-backup refs/heads/pushed-l
 
 echo "== backups and health"
 check "health" is "$(curl -s "$B/healthz" | field '["status"]')" ok
+check "without telling strangers the version" bash -c "! curl -s '$B/healthz' | grep -q version"
+check "but telling monitoring" contains "$(curl -s -H 'Authorization: Bearer smoke-metrics' "$B/healthz")" '"version"'
 check "backup a running server" bash -c "'$BIN' backup --data-dir '$T/data' '$T/backup' | grep -q 'Backed up'"
 check "the copy has the repositories" git clone -q "$T/backup/repos/1.git" "$T/restored"
 check "with their branches" is "$(git -C "$T/restored" rev-parse HEAD 2>/dev/null)" "$(git --git-dir "$T/data/repos/1.git" rev-parse HEAD)"

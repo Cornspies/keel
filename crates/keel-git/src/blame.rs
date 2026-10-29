@@ -87,13 +87,13 @@ impl GitRepo {
         });
         let deadline = Instant::now() + timeout;
         let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(None);
+            }
+            if let Some(status) = child.try_wait()? {
+                break status;
             }
             std::thread::sleep(Duration::from_millis(5));
         };
