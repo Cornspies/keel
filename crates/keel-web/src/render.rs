@@ -36,13 +36,20 @@ pub fn highlight_css() -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let dark = strip(dark);
+    let dark = indigo(&strip(dark));
     format!(
         "{}\n@media (prefers-color-scheme: dark) {{\n{}\n}}\n{}\n",
         strip(light),
         scope_css(&dark, ":root:not([data-theme=\"light\"])"),
         scope_css(&dark, ":root[data-theme=\"dark\"]")
     )
+}
+
+/// One Half Dark, tuned to the dark theme's indigo: cooler keywords,
+/// functions and comments, a softer orange for numbers.
+fn indigo(css: &str) -> String {
+    const SWAPS: [(&str, &str); 4] = [("#c678dd", "#c39bf0"), ("#61afef", "#7fa8ff"), ("#d19a66", "#e0a46e"), ("#5c6370", "#5f6680")];
+    SWAPS.iter().fold(css.to_owned(), |css, (from, to)| css.replace(from, to))
 }
 
 /// Puts `scope` in front of every selector of `css` (as syntect writes it:
@@ -457,6 +464,10 @@ mod tests {
         assert!(css.contains(":root[data-theme=\"dark\"] .hl-comment"), "{css}");
         assert!(css.contains(":root:not([data-theme=\"light\"]) .hl-comment"));
         assert_eq!(scope_css(".a, .b.c {\n color: red;\n}", "S"), "S .a, S .b.c {\n color: red;\n}");
+        // The dark theme's code colours are tuned to its indigo.
+        let dark = &css[css.find("@media").unwrap()..];
+        assert!(dark.contains("#c39bf0") && dark.contains("#5f6680"), "{dark}");
+        assert!(!dark.contains("#c678dd") && css.contains("#a626a4"), "light keeps One Half Light");
     }
 
     #[test]

@@ -114,11 +114,11 @@ impl Home {
             Some((repo, access)) => Some(RepoView::new(state, repo, *access, viewer, "projects", "").await?),
             None => None,
         };
-        Ok(HomeView {
-            repo,
-            org: self.org.as_ref().map(|o| (o.username.clone(), o.avatar_version)),
-            url: self.url(),
-        })
+        let org = match &self.org {
+            Some(o) => Some(crate::orgs::org_head(state, o, viewer, "projects").await?),
+            None => None,
+        };
+        Ok(HomeView { repo, org, url: self.url() })
     }
 }
 
@@ -126,8 +126,8 @@ impl Home {
 pub(crate) struct HomeView {
     /// A repository's boards: its header.
     pub repo: Option<RepoView>,
-    /// An organization's: its name and avatar version.
-    pub org: Option<(String, i64)>,
+    /// An organization's: the top of its pages.
+    pub org: Option<crate::orgs::OrgHead>,
     /// The list of boards.
     pub url: String,
 }

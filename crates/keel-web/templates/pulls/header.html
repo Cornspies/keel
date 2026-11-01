@@ -1,7 +1,7 @@
 {% include "issues/conversation_head.html" %}
 <p class="pr-branches muted">
   {% if conv.state == "merged" %}<strong>{% if let Some(m) = pr.merged_by %}{{ m }}{% else %}Someone{% endif %}</strong> merged {{ pr.commit_count }} {% if pr.commit_count == 1 %}commit{% else %}commits{% endif %} into
-  {% else %}<strong>{{ conv.author }}</strong> wants to merge {{ pr.commit_count }} {% if pr.commit_count == 1 %}commit{% else %}commits{% endif %} into{% endif %}
+  {% else %}<a class="author-link" href="{{ conv.author_url }}">{{ conv.author }}</a> wants to merge {{ pr.commit_count }} {% if pr.commit_count == 1 %}commit{% else %}commits{% endif %} into{% endif %}
   <span class="branch">{{ pr.base_ref }}</span> from {% if let Some(u) = pr.head_url %}<a class="branch" href="{{ u }}">{{ pr.head_label }}</a>{% else %}<span class="branch">{{ pr.head_label }}</span>{% endif %}
   {% if let Some((short, url)) = pr.merge_commit %}in <a class="mono" href="{{ url }}">{{ short }}</a>{% endif %}
 </p>

@@ -1,0 +1,22 @@
+<header class="org-head">
+  <img class="avatar org-avatar" src="/avatars/{{ head.name }}?v={{ head.avatar_version }}" width="88" height="88" alt="">
+  <div class="org-who">
+    <h1 class="org-names">
+      {% if head.profile.full_name.is_empty() %}<a href="/{{ head.name }}">{{ head.name }}</a>{% else %}<a href="/{{ head.name }}">{{ head.profile.full_name }}</a> <span class="org-login">{{ head.name }}</span>{% endif %}
+    </h1>
+    {% if !head.profile.bio.is_empty() %}<p class="org-bio">{{ head.profile.bio }}</p>{% endif %}
+    <ul class="org-facts">
+      {% if !head.profile.location.is_empty() %}<li><span class="side-icon side-icon-pin" aria-hidden="true"></span><span>{{ head.profile.location }}</span></li>{% endif %}
+      {% if !head.profile.website.is_empty() %}<li><span class="side-icon side-icon-link" aria-hidden="true"></span><a href="{{ head.profile.website }}" rel="nofollow ugc noopener noreferrer" data-no-prefetch>{{ head.website_label }}</a></li>{% endif %}
+      <li><span class="side-icon side-icon-people" aria-hidden="true"></span><a href="/{{ head.name }}?tab=people"><strong>{{ head.people_count }}</strong> {% if head.people_count == 1 %}member{% else %}members{% endif %}</a></li>
+    </ul>
+  </div>
+  {% if head.is_member %}<div class="org-actions"><a class="btn btn-primary" href="/new?owner={{ head.name }}">New repository</a></div>{% endif %}
+</header>
+<nav class="tabs org-tabs" aria-label="{{ head.name }}">
+  <a href="/{{ head.name }}"{% if head.tab == "overview" %} class="active" aria-current="page"{% endif %}><span class="side-icon side-icon-book" aria-hidden="true"></span>Overview</a>
+  <a href="/{{ head.name }}?tab=repositories"{% if head.tab == "repositories" %} class="active" aria-current="page"{% endif %}><span class="side-icon side-icon-repo" aria-hidden="true"></span>Repositories <span class="count">{{ head.repo_count }}</span></a>
+  {% if let Some(n) = head.project_count %}<a href="/org/{{ head.name }}/projects"{% if head.tab == "projects" %} class="active" aria-current="page"{% endif %}><span class="side-icon side-icon-board" aria-hidden="true"></span>Projects{% if *n > 0 %} <span class="count">{{ n }}</span>{% endif %}</a>{% endif %}
+  <a href="/{{ head.name }}?tab=people"{% if head.tab == "people" %} class="active" aria-current="page"{% endif %}><span class="side-icon side-icon-people" aria-hidden="true"></span>People <span class="count">{{ head.people_count }}</span></a>
+  {% if head.is_owner %}<a href="/org/{{ head.name }}/settings"><span class="side-icon side-icon-gear" aria-hidden="true"></span>Settings</a>{% endif %}
+</nav>

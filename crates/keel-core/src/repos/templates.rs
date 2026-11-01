@@ -102,7 +102,7 @@ impl Core {
         .map_err(anyhow::Error::from)??;
 
         let now = now();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE repositories SET template_id = ?2 WHERE id = ?1")
             .bind(repo.id)
             .bind(template.id)

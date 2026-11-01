@@ -26,6 +26,8 @@ pub struct ListQuery {
     page: Option<i64>,
     /// Set after saving the settings.
     saved: Option<String>,
+    /// Set after inviting someone: their username.
+    invited: Option<String>,
 }
 
 fn page_url(base: &str, q: &str, page: i64) -> String {
@@ -127,6 +129,7 @@ struct UsersPage {
     newer_url: Option<String>,
     older_url: Option<String>,
     error: Option<String>,
+    notice: Option<String>,
     /// The create-account form after an error.
     new_username: String,
     new_email: String,
@@ -138,6 +141,20 @@ async fn users_page(
     q: String,
     page_no: i64,
     error: Option<String>,
+    new_username: String,
+    new_email: String,
+) -> AppResult {
+    users_page_with(state, user, q, page_no, error, None, new_username, new_email).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn users_page_with(
+    state: &AppState,
+    user: User,
+    q: String,
+    page_no: i64,
+    error: Option<String>,
+    notice: Option<String>,
     new_username: String,
     new_email: String,
 ) -> AppResult {
@@ -167,6 +184,7 @@ async fn users_page(
         older_url: more.then(|| page_url("/admin/users", &q, page_no + 1)),
         q,
         error,
+        notice,
         new_username,
         new_email,
     })
@@ -174,7 +192,8 @@ async fn users_page(
 
 pub async fn users(State(state): State<AppState>, SignedIn(user): SignedIn, Query(q): Query<ListQuery>) -> AppResult {
     require_admin(&user)?;
-    users_page(&state, user, q.q, q.page.unwrap_or(1).max(1), None, String::new(), String::new()).await
+    let notice = q.invited.map(|name| format!("Invited {name}: they got an email with a link to choose their password, which works for a week."));
+    users_page_with(&state, user, q.q, q.page.unwrap_or(1).max(1), None, notice, String::new(), String::new()).await
 }
 
 #[derive(Deserialize)]
@@ -191,6 +210,23 @@ pub async fn create_user(State(state): State<AppState>, SignedIn(user): SignedIn
             state.core.send_verification(&created).await?;
             Ok(Redirect::to("/admin/users").into_response())
         }
+        Err(keel_core::Error::Invalid(msg)) => {
+            users_page(&state, user, String::new(), 1, Some(msg), f.username, f.email).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InviteForm {
+    username: String,
+    email: String,
+}
+
+pub async fn invite_user(State(state): State<AppState>, SignedIn(user): SignedIn, Form(f): Form<InviteForm>) -> AppResult {
+    require_admin(&user)?;
+    match state.core.invite_user(&user, f.username.trim(), &f.email).await {
+        Ok(invited) => Ok(Redirect::to(&format!("/admin/users?invited={}", invited.username)).into_response()),
         Err(keel_core::Error::Invalid(msg)) => {
             users_page(&state, user, String::new(), 1, Some(msg), f.username, f.email).await
         }

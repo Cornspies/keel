@@ -1,6 +1,6 @@
 {% if let Some(c) = latest %}
 <div class="latest">
-  <span class="latest-msg"><strong>{{ c.author }}</strong> <a href="{{ c.url }}">{{ c.summary }}</a></span>
+  <span class="latest-msg">{% include "repo/author.html" %} <a href="{{ c.url }}">{{ c.summary }}</a></span>
   <span class="muted small nowrap">{% include "repo/signature.html" %} {{ c.status|safe }} <a class="mono" href="{{ c.url }}">{{ c.short }}</a> · <time title="{{ c.when_full }}">{{ c.when }}</time> · <a href="{{ history_url }}">History</a></span>
 </div>
 {% endif %}

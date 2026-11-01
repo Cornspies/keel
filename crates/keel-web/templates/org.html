@@ -1,41 +1,70 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="profile section-head">
-  <div class="profile-head">
-    <img class="avatar avatar-large" src="/avatars/{{ name }}?v={{ avatar_version }}" width="96" height="96" alt="">
-    <div>
-      <h1>{{ name }} <span class="badge">Organization</span></h1>
-      <p class="muted">Created {{ created }}</p>
-    </div>
-  </div>
-  <div class="row-actions">
-    {% if is_member || is_owner %}<a class="btn" href="/org/{{ name }}/projects">Projects</a>{% endif %}
-    {% if is_owner %}<a class="btn" href="/org/{{ name }}/settings">Settings</a>{% endif %}
-  </div>
-</div>
-<div class="columns">
-  <section class="column-main">
-    {% if !pinned.is_empty() %}
-    <h2 class="pinned-title">Pinned</h2>
-    <ul class="pinned">{% for r in pinned %}<li class="box pinned-card">{% include "pinned_card.html" %}</li>{% endfor %}</ul>
+{% include "org/head.html" %}
+
+{% if head.tab == "overview" %}
+<div class="org-overview">
+  <div class="org-main">
+    {% if !showcase.is_empty() %}
+    <section>
+      <div class="person-section-head"><h2>{% if showcase_pinned %}Pinned{% else %}Popular repositories{% endif %}</h2>{% if head.is_owner %}<a class="muted small" href="/org/{{ head.name }}/settings/profile#pins">Customize pins</a>{% endif %}</div>
+      <ul class="pinned">{% for r in showcase %}<li class="box pinned-card">{% include "pinned_card.html" %}</li>{% endfor %}</ul>
+    </section>
     {% endif %}
-    <div class="section-head">
-      <h2>Repositories</h2>
-      {% if is_member %}<a class="btn btn-small" href="/new?owner={{ name }}">New</a>{% endif %}
-    </div>
-    {% if repos.is_empty() %}
-    <p class="empty">No repositories yet.</p>
-    {% else %}
-    <ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+    <section>
+      <div class="person-section-head"><h2>Repositories</h2>{% if head.repo_count > recent.len() %}<a class="small" href="/{{ head.name }}?tab=repositories">View all {{ head.repo_count }}</a>{% endif %}</div>
+      {% if recent.is_empty() %}
+      <p class="empty">No repositories yet{% if !head.is_member %} that you can see{% endif %}.{% if head.is_member %} <a href="/new?owner={{ head.name }}">Create the first one</a>.{% endif %}</p>
+      {% else %}
+      <ul class="card-list">{% for r in recent %}{% include "repo_card.html" %}{% endfor %}</ul>
+      {% endif %}
+    </section>
+  </div>
+  <aside class="org-side">
+    <section>
+      <h2><a href="/{{ head.name }}?tab=people">People</a></h2>
+      <p class="org-people">{% for p in people %}<a href="/{{ p.username }}" title="{{ p.username }}{% if p.is_owner %} (owner){% endif %}"><img class="avatar" src="/avatars/{{ p.username }}" width="32" height="32" alt="{{ p.username }}"></a>{% endfor %}</p>
+      {% if head.people_count > people.len() %}<p class="side-more small"><a href="/{{ head.name }}?tab=people">View all {{ head.people_count }}</a></p>{% endif %}
+    </section>
+    {% if !languages.is_empty() %}
+    <section>
+      <h2>Top languages</h2>
+      <ul class="side-langs">{% for l in languages %}<li title="The main language of {{ l.count }} of the recently changed repositories"><svg width="8" height="8" aria-hidden="true"><circle cx="4" cy="4" r="4" fill="{{ l.color }}"/></svg>{{ l.name }}</li>{% endfor %}</ul>
+    </section>
     {% endif %}
-  </section>
-  <aside class="column-side">
-    <h2>People</h2>
-    <ul class="people">
-      {% for (username, role) in members %}
-      <li><a href="/{{ username }}"><img class="avatar" src="/avatars/{{ username }}" width="20" height="20" alt=""> {{ username }}</a>{% if *role == "owner" %} <span class="badge">owner</span>{% endif %}</li>
-      {% endfor %}
-    </ul>
+    {% if !topics.is_empty() %}
+    <section>
+      <h2>Most used topics</h2>
+      <p class="topics">{% for t in topics %}<a class="topic" href="/{{ head.name }}?tab=repositories&amp;q={{ t.name }}" title="{{ t.count }} repositor{% if t.count == 1 %}y{% else %}ies{% endif %}">{{ t.name }}</a>{% endfor %}</p>
+    </section>
+    {% endif %}
   </aside>
 </div>
+
+{% else if head.tab == "repositories" %}
+{% if head.repo_count > 0 %}{% include "repo_filter.html" %}{% endif %}
+{% if repos.is_empty() %}
+<p class="empty">{% if filter.narrowed() %}No repositories match. <a href="/{{ head.name }}?tab=repositories">Show all</a>{% else %}No repositories yet{% if !head.is_member %} that you can see{% endif %}.{% endif %}</p>
+{% else %}
+<ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+{% endif %}
+
+{% else %}
+<div class="toolbar">
+  <h2 class="toolbar-title">{{ head.people_count }} {% if head.people_count == 1 %}member{% else %}members{% endif %}</h2>
+  <div class="spacer"></div>
+  {% if head.is_owner %}<a class="btn" href="/org/{{ head.name }}/settings">Manage members</a>{% endif %}
+</div>
+<ul class="card-list org-members">
+  {% for p in people %}
+  <li class="card-row">
+    <a class="org-member" href="/{{ p.username }}">
+      <img class="avatar" src="/avatars/{{ p.username }}" width="40" height="40" alt="">
+      <span>{% if !p.full_name.is_empty() %}<strong>{{ p.full_name }}</strong> <span class="muted">{{ p.username }}</span>{% else %}<strong>{{ p.username }}</strong>{% endif %}</span>
+    </a>
+    <span class="badge">{% if p.is_owner %}Owner{% else %}Member{% endif %}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
 {% endblock %}

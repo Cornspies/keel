@@ -26,6 +26,8 @@ pub(crate) struct HunkView {
     pub short: String,
     pub summary: String,
     pub author: String,
+    /// The file's history filtered to the author's commits.
+    pub author_url: String,
     pub when: String,
     pub when_full: String,
     /// The file's blame before this commit, if it existed.
@@ -61,11 +63,11 @@ struct BlamePage {
     crumbs: Vec<Crumb>,
     refs: RefNames,
     blob_url: String,
-    raw_url: String,
     history_url: String,
-    /// How many commits the lines come from.
-    commit_count: usize,
     content: BlameContent,
+    bar: crate::file_view::FileBar,
+    /// The file tree beside it (HTML).
+    tree: String,
 }
 
 /// `GET /{owner}/{repo}/blame/{rev}/{path}`.
@@ -84,10 +86,11 @@ pub async fn blame(
         }
         let blob = g.blob(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
         let refs = RefNames::load(g, &link_base, "tree")?;
-        Ok(Ok((r, blob, refs, g.default_branch()?.unwrap_or_default())))
+        let tree = crate::file_view::tree_html(g, &link_base, &r.rev, r.commit, &r.path)?;
+        Ok(Ok((r, blob, refs, g.default_branch()?.unwrap_or_default(), tree)))
     })
     .await?;
-    let (r, blob, refs, default_branch) = match found {
+    let (r, blob, refs, default_branch, tree) = match found {
         Ok(v) => v,
         Err(r) => {
             return Ok(Redirect::to(&format!("{base}/tree/{}/{}", encode_path(&r.rev), encode_path(&r.path)))
@@ -104,21 +107,31 @@ pub async fn blame(
         match blame_of(&state, &repo, r.commit, &r.path).await? {
             Some(b) => {
                 commit_count = b.commits.len();
-                BlameContent::Rows(rows(&base, &b, &highlighted(&state, &blob, &filename)))
+                let history = format!("{base}/commits/{}/{}", encode_path(&r.rev), encode_path(&r.path));
+                BlameContent::Rows(rows(&base, &history, &b, &highlighted(&state, &blob, &filename)))
             }
             None => BlameContent::TooSlow,
         }
     };
     let (rev_url, path_url) = (encode_path(&r.rev), encode_path(&r.path));
+    let markdown = matches!(filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref(), Some("md" | "markdown"));
+    let mut bar = crate::file_view::FileBar::new(&base, &rev_url, &r.path, "blame", markdown, true);
+    bar.copyable = !blob.binary;
+    bar.meta = match commit_count {
+        0 => String::new(),
+        1 => "1 commit".into(),
+        n => format!("{n} commits"),
+    };
+    bar.age_scale = commit_count > 1;
     html(BlamePage {
+        bar,
+        tree,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Blame of {} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
         crumbs: crumbs(&base, &r.rev, &r.path),
         blob_url: format!("{base}/blob/{rev_url}/{path_url}"),
-        raw_url: format!("{base}/raw/{rev_url}/{path_url}"),
         history_url: format!("{base}/commits/{rev_url}/{path_url}"),
         refs,
-        commit_count,
         content,
         rev: r.rev,
         rev_url,
@@ -149,7 +162,7 @@ async fn blame_of(state: &AppState, repo: &keel_core::Repo, commit: Oid, path: &
 
 /// One row per line, with the commit's details on the first line of each
 /// hunk.
-fn rows(base: &str, blame: &Blame, lines: &[String]) -> Vec<BlameRow> {
+fn rows(base: &str, history: &str, blame: &Blame, lines: &[String]) -> Vec<BlameRow> {
     let times = blame.commits.values().map(|c| c.time);
     let (oldest, newest) = (times.clone().min().unwrap_or(0), times.max().unwrap_or(0));
     let mut out: Vec<BlameRow> =
@@ -173,6 +186,7 @@ fn rows(base: &str, blame: &Blame, lines: &[String]) -> Vec<BlameRow> {
             short: h.commit.to_string()[..7].to_owned(),
             summary: c.summary.clone(),
             author: c.author.clone(),
+            author_url: format!("{history}?author={}", form_urlencoded::byte_serialize(c.email.as_bytes()).collect::<String>()),
             when: relative_time(c.time),
             when_full: datetime(c.time),
             prior_url: h.previous.as_ref().map(|(id, path)| {
@@ -206,7 +220,7 @@ mod tests {
             commits: [(a, commit(100)), (b, commit(200))].into(),
         };
         let lines: Vec<String> = ["1", "2", "3"].map(String::from).into();
-        let rows = rows("/ada/engine", &blame, &lines);
+        let rows = rows("/ada/engine", "/ada/engine/commits/main/x", &blame, &lines);
         assert_eq!(rows.len(), 3);
         let first = rows[0].hunk.as_ref().unwrap();
         assert_eq!((first.rows, first.age, first.prior_url.as_deref()), (2, 0, None));
@@ -218,7 +232,7 @@ mod tests {
 
         // A line no hunk covers gets an empty cell.
         let short = Blame { hunks: vec![hunk(a, 1, 2, None)], commits: blame.commits.clone() };
-        let rows = super::rows("/ada/engine", &short, &lines);
+        let rows = super::rows("/ada/engine", "/ada/engine/commits/main/x", &short, &lines);
         assert_eq!(rows.iter().map(|r| r.uncovered).collect::<Vec<_>>(), [false, false, true]);
     }
 }

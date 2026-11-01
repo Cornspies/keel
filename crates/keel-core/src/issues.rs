@@ -344,7 +344,7 @@ impl Core {
 
     pub async fn add_comment(&self, issue: &Issue, author: &User, body: &str) -> Result<i64> {
         validate_comment(body)?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let id = insert_comment(&mut tx, issue.id, Some(author.id), "comment", body).await?;
         tx.commit().await?;
         self.record(Activity::Comment { issue_id: issue.id, comment_id: id }).await;
@@ -357,7 +357,7 @@ impl Core {
         if issue.state == "merged" || issue.is_open() == open {
             return Ok(());
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE issues SET state = ?2, closed_at = ?3 WHERE id = ?1")
             .bind(issue.id)
             .bind(if open { "open" } else { "closed" })
@@ -399,7 +399,7 @@ impl Core {
 
     /// Deletes a comment; for an inline comment, with its replies.
     pub async fn delete_comment(&self, comment: &Comment) -> Result<()> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         ensure_issue_unarchived(&mut *tx, comment.issue_id).await?;
         sqlx::query("DELETE FROM comments WHERE id = ?1 AND kind IN ('comment', 'inline')")
             .bind(comment.id)

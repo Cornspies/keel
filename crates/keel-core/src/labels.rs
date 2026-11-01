@@ -185,7 +185,7 @@ impl Core {
             .into_iter()
             .map(|l| l.id)
             .collect();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let mut changed = Vec::new();
         for label in &available {
             let (was, is) = (current.contains(&label.id), label_ids.contains(&label.id));
@@ -256,7 +256,7 @@ impl Core {
             return invalid(format!("At most {MAX_ASSIGNEES} people can be assigned."));
         }
         let current = self.assignees_of(&[issue.id]).await?.remove(&issue.id).unwrap_or_default();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let mut changed = Vec::new();
         for user in &candidates {
             let (was, is) = (current.contains(&user.username), user_ids.contains(&user.id));

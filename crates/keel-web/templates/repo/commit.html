@@ -5,7 +5,7 @@
   <h2 class="commit-title">{{ commit.summary }}</h2>
   {% if !body.is_empty() %}<pre class="commit-body">{{ body }}</pre>{% endif %}
   <div class="commit-meta muted small">
-    <span><strong>{{ commit.author }}</strong> authored <time title="{{ commit.when_full }}">{{ commit.when }}</time>{% if committer != commit.author %} · committed by <strong>{{ committer }}</strong>{% endif %}</span>
+    <span>{% let c = commit %}{% include "repo/author.html" %} authored <time title="{{ commit.when_full }}">{{ commit.when }}</time>{% if committer != commit.author %} · committed by <strong>{{ committer }}</strong>{% endif %}</span>
     <span class="spacer"></span>
     {% if parents.len() > 0 %}<span>{% if parents.len() == 1 %}parent{% else %}parents{% endif %} {% for (short, url) in parents %}<a class="mono" href="{{ url }}">{{ short }}</a> {% endfor %}</span> ·{% endif %}
     <span>commit <span class="mono">{{ commit.id }}</span></span>

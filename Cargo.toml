@@ -43,6 +43,7 @@ ammonia = "4"
 moka = { version = "0.12", features = ["sync"] }
 argon2 = "0.6"
 getrandom = "0.4"
+libc = "0.2"
 sha2 = "0.11"
 sha1 = "0.11"
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
@@ -52,6 +53,7 @@ form_urlencoded = "1"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "hostname", "builder", "tokio1-rustls", "aws-lc-rs", "rustls-platform-verifier"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 flate2 = "1"
+brotli = "9"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 russh = "0.65"
@@ -61,6 +63,12 @@ pgp = { version = "0.21", default-features = false }
 tempfile = "3"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tantivy = { version = "0.27", default-features = false, features = ["mmap", "lz4-compression"] }
+
+# Debug builds of keel run with optimized dependencies (SQLite, libgit2,
+# syntax highlighting, compression): much faster pages while developing,
+# for a slower first build only.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

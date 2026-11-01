@@ -19,7 +19,7 @@
         {% if r.draft %}<span class="badge badge-danger">Draft</span>{% endif %}
         {% if r.prerelease %}<span class="badge">Pre-release</span>{% endif %}
         {% if r.latest %}<span class="badge badge-latest">Latest</span>{% endif %}
-        <span class="muted small">{{ r.author }} {% if r.draft %}drafted{% else %}released{% endif %} this <time title="{{ r.when_full }}">{{ r.when }}</time></span>
+        <span class="muted small"><a class="author-link" href="/{{ r.author }}">{{ r.author }}</a> {% if r.draft %}drafted{% else %}released{% endif %} this <time title="{{ r.when_full }}">{{ r.when }}</time></span>
       </div>
     </div>
     {% if can_edit %}<a class="btn btn-small" href="{{ r.edit_url }}">Edit</a>{% endif %}

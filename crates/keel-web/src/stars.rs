@@ -3,7 +3,10 @@
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, Query, State};
-use axum::response::{IntoResponse, Redirect};
+use axum::Json;
+use axum::http::{HeaderMap, header};
+use axum::response::{IntoResponse, Redirect, Response};
+use serde_json::json;
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
@@ -20,14 +23,32 @@ pub struct StarForm {
     to: String,
 }
 
+/// Whether the page sent the request itself (`app.js`) and wants the new
+/// state rather than a redirect to reload the page.
+pub(crate) fn wants_json(headers: &HeaderMap) -> bool {
+    headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("application/json"))
+}
+
+/// What a watch or star button shows after a click: whether it's on now,
+/// and the new count.
+pub(crate) fn toggled(on: bool, count: i64) -> Response {
+    ([(header::CACHE_CONTROL, "no-store")], Json(json!({ "on": on, "count": count }))).into_response()
+}
+
 pub async fn star(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     Path((owner, name)): Path<(String, String)>,
+    headers: HeaderMap,
     Form(f): Form<StarForm>,
 ) -> AppResult {
     let (repo, _) = load(&state, Some(&user), &owner, &name).await?;
-    state.core.set_star(&user, &repo, f.to == "on").await?;
+    let on = f.to == "on";
+    state.core.set_star(&user, &repo, on).await?;
+    if wants_json(&headers) {
+        let stars = state.core.repo_by_id(repo.id).await?.map_or(0, |r| r.stars);
+        return Ok(toggled(on, stars));
+    }
     Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
 }
 

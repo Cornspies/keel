@@ -13,6 +13,8 @@ const RETRY_DELAYS: &[i64] = &[60, 300, 1800, 7200];
 const LEASE_SECS: i64 = 300;
 const VERIFY_TTL: i64 = 7 * 86_400;
 const RESET_TTL: i64 = 3600;
+/// How long an invitation's link to choose a password works.
+const INVITE_TTL: i64 = 7 * 86_400;
 /// At most one verification or reset mail per account in this many seconds.
 const RESEND_AFTER: i64 = 60;
 /// Longest comment quoted in a notification email.
@@ -261,6 +263,34 @@ impl Core {
         self.queue_mail(&user.email, &format!("[{site}] Reset your password"), &body, None).await
     }
 
+    /// Creates an account for someone else and emails them a link to choose
+    /// their password (works for a week), so the administrator never knows
+    /// it. The account gets a long random password in the meantime. The
+    /// link, not a password, goes in the email: a password would stay in
+    /// their mailbox, and in the outbox here until it's pruned.
+    pub async fn invite_user(&self, inviter: &User, username: &str, email: &str) -> Result<User> {
+        if !self.mail_enabled() {
+            return invalid("Invitations are sent by email, which isn't set up on this server (--smtp-url).");
+        }
+        let user = self.insert_user(username, email, &new_token()?, true).await?;
+        let token = self
+            .email_token(&user, "reset", INVITE_TTL)
+            .await?
+            .ok_or_else(|| Error::Invalid("The invitation couldn't be made; try again in a minute.".into()))?;
+        let site = &self.config.site_name;
+        let body = format!(
+            "Hi {name},\n\n{inviter} made you an account on {site}. Your username is {name}.\n\
+             To choose your password and sign in, open this link within 7 days:\n\n\
+             {base}/password/reset#token={token}\n\n\
+             After that, \"Forgot your password?\" on the sign-in page sends you a new link.\n",
+            name = user.username,
+            inviter = inviter.username,
+            base = self.config.base_url,
+        );
+        self.queue_mail(&user.email, &format!("[{site}] You're invited"), &body, None).await?;
+        Ok(user)
+    }
+
     /// Whether a reset link is still good (to show the form).
     pub async fn reset_token_valid(&self, token: &str) -> Result<bool> {
         Ok(self.token_user(token, "reset").await?.is_some())
@@ -400,6 +430,27 @@ mod tests {
         assert!(core.next_mail_due().await.unwrap().unwrap() > now());
         core.finish_mail(&m, Err("550 no such user".into()), true).await.unwrap();
         assert_eq!(core.next_mail_due().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn invitations() {
+        let (plain, _d) = Core::for_tests().await;
+        let ada = plain.register("ada", "ada@example.com", "password1").await.unwrap();
+        assert!(plain.invite_user(&ada, "bob", "bob@example.com").await.is_err(), "needs email");
+
+        let (core, _dir) = mail_core().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.invite_user(&ada, "bob", "bob@example.com").await.unwrap();
+        assert!(!bob.is_admin && !bob.email_verified);
+        assert!(core.invite_user(&ada, "bob", "other@example.com").await.is_err(), "name taken");
+        let mail = core.claim_mail(10).await.unwrap();
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].to_addr, "bob@example.com");
+        assert!(mail[0].body.contains("ada made you an account") && mail[0].body.contains("/password/reset#token="));
+        let token = token_in(&mail[0].body);
+        let bob = core.reset_password(&token, "bobs own password").await.unwrap();
+        assert!(bob.email_verified, "choosing the password proved the address");
+        assert!(core.authenticate("bob", "bobs own password").await.unwrap().is_some());
     }
 
     #[tokio::test]

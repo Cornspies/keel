@@ -118,16 +118,28 @@ pub(crate) fn summarize(commit: &git2::Commit<'_>) -> CommitSummary {
 
 /// `git log` limited to `path`. See [`GitRepo::log`].
 fn git_log_path(git_dir: &Path, start: Oid, path: &str, skip: usize, limit: usize) -> Result<Vec<CommitSummary>> {
-    let out = crate::command()
-        .arg("--git-dir")
+    git_log(git_dir, start, path, None, skip, limit)
+}
+
+/// `git log` from `start`, limited to `path` (if not empty) and to commits
+/// whose author's email is `author` (if given).
+fn git_log(git_dir: &Path, start: Oid, path: &str, author: Option<&str>, skip: usize, limit: usize) -> Result<Vec<CommitSummary>> {
+    let mut cmd = crate::command();
+    cmd.arg("--git-dir")
         .arg(git_dir)
         .args(["-c", "log.showSignature=false", "log", "--no-color"])
         .arg("--format=%H%x1f%an%x1f%ae%x1f%at%x1f%s%x1e")
         .arg(format!("--skip={skip}"))
-        .arg(format!("--max-count={limit}"))
+        .arg(format!("--max-count={limit}"));
+    if let Some(email) = author {
+        // A fixed string, not a pattern; the brackets make it the whole
+        // address rather than part of one.
+        cmd.arg("--fixed-strings").arg(format!("--author=<{email}>"));
+    }
+    let out = cmd
         .arg(start.to_string())
         .arg("--")
-        .arg(path)
+        .args((!path.is_empty()).then_some(path))
         // Paths are literal, never pathspec magic like `:(glob)`.
         .env("GIT_LITERAL_PATHSPECS", "1")
         .output()?;
@@ -355,6 +367,12 @@ impl GitRepo {
 
     /// History starting at `start`, optionally limited to commits that
     /// changed `path` (with git's default history simplification).
+    /// Like [`log`](Self::log), but only commits authored by the address
+    /// `email`.
+    pub fn log_by(&self, start: Oid, path: &str, email: &str, skip: usize, limit: usize) -> Result<Vec<CommitSummary>> {
+        git_log(self.repo.path(), start, path, Some(email), skip, limit)
+    }
+
     pub fn log(
         &self,
         start: Oid,
@@ -705,6 +723,24 @@ pub(crate) mod tests {
                 repo: Repository::open(self.dir.path()).unwrap(),
             }
         }
+    }
+
+    #[test]
+    fn log_by_author() {
+        let s = Scratch::new();
+        s.write("a", "1");
+        let ada = s.commit("by ada");
+        s.write("b", "2");
+        s.git(&["-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-q", "-m", "x", "--author=Bob <bob@example.com>", "--allow-empty"]);
+        s.write("a", "3");
+        let ada2 = s.commit("ada again");
+        let repo = s.open();
+        let ids = |v: Vec<CommitSummary>| v.into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(repo.log_by(ada2, "", "ada@example.com", 0, 10).unwrap()), [ada2, ada]);
+        assert_eq!(ids(repo.log_by(ada2, "a", "ada@example.com", 1, 10).unwrap()), [ada]);
+        assert_eq!(repo.log_by(ada2, "", "bob@example.com", 0, 10).unwrap().len(), 1);
+        assert!(repo.log_by(ada2, "", "da@example.com", 0, 10).unwrap().is_empty(), "the whole address");
+        assert!(repo.log_by(ada2, "", ".*", 0, 10).unwrap().is_empty(), "not a pattern");
     }
 
     #[test]

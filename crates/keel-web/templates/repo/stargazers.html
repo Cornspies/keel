@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<h2>Stargazers <span class="muted">{{ repo.stars }}</span></h2>
+<div class="toolbar"><h2 class="toolbar-title">Stargazers <span class="muted">{{ repo.stars }}</span></h2></div>
 {% if gazers.is_empty() %}
 <p class="empty">Nobody has starred this repository yet.</p>
 {% else %}

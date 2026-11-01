@@ -1,9 +1,16 @@
 {% extends "base.html" %}
+{% block body_class %}{% if !tree.is_empty() %}page-wide{% endif %}{% endblock %}
 {% block content %}
 {% include "repo/header.html" %}
+{% if !tree.is_empty() %}<div class="code-view">{% include "repo/file_tree.html" %}{% endif %}
+<div class="{% if side.is_some() %}repo-home{% endif %}{% if !tree.is_empty() %}code-main{% endif %}">
+<div class="repo-main">
 <div class="toolbar">
   {% include "repo/refswitch.html" %}
-  {% if !path.is_empty() %}{% include "repo/crumbs.html" %}{% endif %}
+  {% if path.is_empty() %}
+  <a class="ref-count" href="/{{ repo.owner }}/{{ repo.name }}/branches"><span class="side-icon side-icon-branch" aria-hidden="true"></span><strong>{{ refs.branches.len() }}</strong> {% if refs.branches.len() == 1 %}Branch{% else %}Branches{% endif %}</a>
+  <a class="ref-count" href="/{{ repo.owner }}/{{ repo.name }}/branches#tags"><span class="side-icon side-icon-tag" aria-hidden="true"></span><strong>{{ refs.tags.len() }}</strong> {% if refs.tags.len() == 1 %}Tag{% else %}Tags{% endif %}</a>
+  {% else %}{% include "repo/crumbs.html" %}{% endif %}
   <div class="spacer"></div>
   {% if let Some(new_url) = new_file_url %}
   <details class="dropdown dropdown-right">
@@ -39,9 +46,13 @@
   </table>
 </div>
 {% if let Some(html) = readme %}
-<div class="box readme">
+<div class="box readme" id="readme">
   <div class="box-head">{{ readme_name }}</div>
   <article class="markdown">{{ html|safe }}</article>
 </div>
 {% endif %}
+</div>
+{% if let Some(s) = side %}{% include "repo/side.html" %}{% endif %}
+</div>
+{% if !tree.is_empty() %}</div>{% endif %}
 {% endblock %}

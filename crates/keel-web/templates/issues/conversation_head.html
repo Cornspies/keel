@@ -4,5 +4,5 @@
 </div>
 <p class="issue-meta">
   {% if conv.draft %}<span class="state-badge state-draft">draft</span>{% else %}<span class="state-badge state-{{ conv.state }}">{{ conv.state }}</span>{% endif %}
-  <strong>{{ conv.author }}</strong> opened this {{ conv.opened }} · {{ conv.comment_count }} {% if conv.comment_count == 1 %}comment{% else %}comments{% endif %}
+  <a class="author-link" href="{{ conv.author_url }}">{{ conv.author }}</a> opened this {{ conv.opened }} · {{ conv.comment_count }} {% if conv.comment_count == 1 %}comment{% else %}comments{% endif %}
 </p>

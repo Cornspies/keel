@@ -87,11 +87,11 @@ pub async fn reset_form(State(state): State<AppState>, Query(q): Query<TokenQuer
             &state,
             None,
             "This link has expired",
-            "Password reset links work once, for an hour. Request a new one.",
+            "Links to choose a password work once: for an hour after asking for a reset, or a week after an invitation. Request a new one.",
             ("/password/forgot", "Reset your password"),
         );
     }
-    html(ResetPage { page: Page::new(&state, None, "Choose a new password"), token: q.token, error: None })
+    html(ResetPage { page: Page::new(&state, None, "Choose a password"), token: q.token, error: None })
 }
 
 #[derive(Deserialize)]
@@ -103,7 +103,7 @@ pub struct ResetForm {
 
 pub async fn reset(State(state): State<AppState>, Form(f): Form<ResetForm>) -> AppResult {
     let page = |error: String| {
-        html(ResetPage { page: Page::new(&state, None, "Choose a new password"), token: f.token.clone(), error: Some(error) })
+        html(ResetPage { page: Page::new(&state, None, "Choose a password"), token: f.token.clone(), error: Some(error) })
     };
     if f.new != f.confirm {
         return page("The passwords don’t match.".into());

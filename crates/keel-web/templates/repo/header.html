@@ -12,26 +12,30 @@
     <div class="fork-button">
       {% match repo.watching %}
       {% when Some(watching) %}
-      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/watch" class="inline">
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/watch" class="inline" data-toggle>
         <input type="hidden" name="to" value="{% if *watching %}off{% else %}on{% endif %}">
-        <button class="btn btn-small" title="{% if *watching %}Stop getting notifications about all issues and pull requests{% else %}Get notified about all issues and pull requests{% endif %}">{% if *watching %}Unwatch{% else %}Watch{% endif %}</button>
+        <button class="btn btn-small" aria-pressed="{{ watching }}"
+          data-on-title="Stop getting notifications about all issues and pull requests" data-off-title="Get notified about all issues and pull requests"
+          title="{% if *watching %}Stop getting notifications about all issues and pull requests{% else %}Get notified about all issues and pull requests{% endif %}"><span data-on="Unwatch" data-off="Watch">{% if *watching %}Unwatch{% else %}Watch{% endif %}</span></button>
       </form>
       {% when None %}
       <a class="btn btn-small" href="/login">Watch</a>
       {% endmatch %}
-      <span class="btn btn-small count-button" title="Watchers" aria-label="Watchers: {{ repo.watchers }}">{{ repo.watchers }}</span>
+      <span class="btn btn-small count-button" title="Watchers" aria-label="Watchers: {{ repo.watchers }}" data-count="Watchers">{{ repo.watchers }}</span>
     </div>
     <div class="fork-button">
       {% match repo.starred %}
       {% when Some(starred) %}
-      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/star" class="inline">
+      <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/star" class="inline" data-toggle>
         <input type="hidden" name="to" value="{% if *starred %}off{% else %}on{% endif %}">
-        <button class="btn btn-small{% if *starred %} starred{% endif %}" title="{% if *starred %}Remove from your starred repositories{% else %}Add to your starred repositories{% endif %}"><span aria-hidden="true">{% if *starred %}★{% else %}☆{% endif %}</span> {% if *starred %}Starred{% else %}Star{% endif %}</button>
+        <button class="btn btn-small{% if *starred %} starred{% endif %}" aria-pressed="{{ starred }}" data-on-class="starred"
+          data-on-title="Remove from your starred repositories" data-off-title="Add to your starred repositories"
+          title="{% if *starred %}Remove from your starred repositories{% else %}Add to your starred repositories{% endif %}"><span aria-hidden="true" data-on="★" data-off="☆">{% if *starred %}★{% else %}☆{% endif %}</span> <span data-on="Starred" data-off="Star">{% if *starred %}Starred{% else %}Star{% endif %}</span></button>
       </form>
       {% when None %}
       <a class="btn btn-small" href="/login"><span aria-hidden="true">☆</span> Star</a>
       {% endmatch %}
-      <a class="btn btn-small count-button" href="/{{ repo.owner }}/{{ repo.name }}/stargazers" title="Stargazers" aria-label="Stars: {{ repo.stars }}">{{ repo.stars }}</a>
+      <a class="btn btn-small count-button" href="/{{ repo.owner }}/{{ repo.name }}/stargazers" title="Stargazers" aria-label="Stars: {{ repo.stars }}" data-count="Stars">{{ repo.stars }}</a>
     </div>
     <div class="fork-button">
       <a class="btn btn-small" href="/{{ repo.owner }}/{{ repo.name }}/fork">Fork</a>
@@ -55,8 +59,11 @@
   {% endif %}
   {% endif %}
   {% if let Some(when) = repo.archived %}<p class="flash flash-warn archived-note">This repository was archived on {{ when }}. It is read-only.</p>{% endif %}
-  {% if !repo.description.is_empty() %}<p class="muted repo-desc">{{ repo.description }}</p>{% endif %}
-  {% if !repo.topics.is_empty() %}<p class="topics">{% for t in repo.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
+  {# The front page's sidebar shows these; on narrow screens, where the sidebar comes last, they show here instead. #}
+  {% if repo.about_in_side %}
+  {% if !repo.description.is_empty() %}<p class="muted repo-desc narrow-only">{{ repo.description }}</p>{% endif %}
+  {% if !repo.topics.is_empty() %}<p class="topics narrow-only">{% for t in repo.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
+  {% endif %}
   <nav class="tabs">
     <a href="/{{ repo.owner }}/{{ repo.name }}"{% if repo.tab == "code" %} class="active"{% endif %}>Code</a>
     <a href="/{{ repo.owner }}/{{ repo.name }}/issues"{% if repo.tab == "issues" || repo.tab == "labels" || repo.tab == "milestones" %} class="active"{% endif %}>Issues{% if repo.open_issues > 0 %} <span class="count">{{ repo.open_issues }}</span>{% endif %}</a>

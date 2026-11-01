@@ -44,7 +44,7 @@ impl Core {
 
     pub async fn store_last_commits(&self, repo_id: i64, path: &str, commit: &str, entries: &EntryCommits) -> Result<()> {
         let json = serde_json::to_string(entries).map_err(anyhow::Error::from)?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query(
             "INSERT OR REPLACE INTO last_commit_cache (repo_id, path, commit_id, entries, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",

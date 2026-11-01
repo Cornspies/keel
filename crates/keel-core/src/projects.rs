@@ -274,7 +274,7 @@ impl Core {
     pub async fn create_project(&self, owner: ProjectOwner, user: &User, title: &str, description: &str, kanban: bool) -> Result<Project> {
         validate_project(title, description)?;
         let (repo, org) = owner.ids();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         if let ProjectOwner::Repo(repo) = owner {
             crate::issues::ensure_unarchived(&mut *tx, repo).await?;
         }
@@ -380,7 +380,7 @@ impl Core {
 
     pub async fn add_project_column(&self, project: &Project, name: &str, user: &User) -> Result<i64> {
         validate_column(name)?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM project_columns WHERE project_id = ?1")
             .bind(project.id)
             .fetch_one(&mut *tx)
@@ -407,7 +407,7 @@ impl Core {
     pub async fn edit_project_column(&self, project: &Project, column_id: i64, name: &str, done: bool, user: &User) -> Result<()> {
         validate_column(name)?;
         self.column_of(project, column_id).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         if done {
             sqlx::query("UPDATE project_columns SET is_done = 0 WHERE project_id = ?1").bind(project.id).execute(&mut *tx).await?;
         }
@@ -427,7 +427,7 @@ impl Core {
     /// Moves a column to `position` (clamped) among the board's columns.
     pub async fn move_project_column(&self, project: &Project, column_id: i64, position: i64, user: &User) -> Result<()> {
         let column = self.column_of(project, column_id).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let mut ids: Vec<(i64,)> = sqlx::query_as("SELECT id FROM project_columns WHERE project_id = ?1 AND id != ?2 ORDER BY position, id")
             .bind(project.id)
             .bind(column.id)
@@ -449,7 +449,7 @@ impl Core {
     pub async fn delete_project_column(&self, project: &Project, column_id: i64, user: &User) -> Result<()> {
         let column = self.column_of(project, column_id).await?;
         let cards = self.card_rows(project.id, Some(column.id), None).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("DELETE FROM project_columns WHERE id = ?1").bind(column.id).execute(&mut *tx).await?;
         sqlx::query("UPDATE project_columns SET position = position - 1 WHERE project_id = ?1 AND position > ?2")
             .bind(project.id)
@@ -467,7 +467,7 @@ impl Core {
 
     async fn insert_card(&self, project: &Project, column_id: i64, issue_id: Option<i64>, note: Option<&str>, user: &User) -> Result<i64> {
         self.column_of(project, column_id).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM project_cards WHERE project_id = ?1")
             .bind(project.id)
             .fetch_one(&mut *tx)
@@ -551,7 +551,7 @@ impl Core {
         let before = self.card_row(project, card_id).await?;
         let from = self.column_of(project, before.column_id).await?;
         self.column_of(project, column_id).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         place(&mut tx, card_id, column_id, position).await?;
         touch(&mut tx, project.id).await?;
         tx.commit().await?;
@@ -585,7 +585,7 @@ impl Core {
             .bind(card_id)
             .fetch_one(&self.db)
             .await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("DELETE FROM project_cards WHERE id = ?1").bind(card_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE project_cards SET position = position - 1 WHERE column_id = ?1 AND position > ?2")
             .bind(column)
@@ -640,7 +640,7 @@ impl Core {
             let Some(project) = project else { continue };
             let before = self.card_row(&project, card).await?;
             let from = self.column_of(&project, before.column_id).await?;
-            let mut tx = self.db.begin().await?;
+            let mut tx = self.write_tx().await?;
             place(&mut tx, card, column, 0).await?;
             touch(&mut tx, project.id).await?;
             tx.commit().await?;
@@ -684,7 +684,7 @@ impl Core {
                     "column": card.column_name,
                     "from": from,
                 });
-                let mut tx = self.db.begin().await?;
+                let mut tx = self.write_tx().await?;
                 match insert_comment(&mut tx, issue_id, actor, kind, &body.to_string()).await {
                     Ok(_) => tx.commit().await?,
                     // An archived repository's issue keeps its timeline.

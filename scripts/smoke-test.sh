@@ -211,6 +211,31 @@ check "and links to the blame before it" contains "$page" 'class="blame-prior" h
 check "files link to their blame" contains "$(curl -s "$B/ada/engine/blob/main/README.md")" '/ada/engine/blame/main/README.md'
 check "directories go to the tree" is "$(curl -s -o /dev/null -w '%{redirect_url}' "$B/ada/engine/blame/main/src")" "$B/ada/engine/tree/main/src"
 check "private repositories stay hidden" is "$(status "$B/ada/secret/blame/main/README.md")" 404
+
+echo "== file view"
+check "files show the file tree" contains "$(curl -s "$B/ada/engine/blob/main/src/main.rs")" 'class="file-tree"'
+check "with the file marked" contains "$(curl -s "$B/ada/engine/blob/main/src/main.rs")" 'main.rs</a>' 
+check "folders load when opened" contains "$(curl -s "$B/ada/engine/tree-list/main/src")" '"name":"main.rs"'
+check "raw files download" contains "$(curl -sI "$B/ada/engine/raw/main/README.md?download=1" | tr -d '\r')" 'attachment; filename="README.md"'
+check "authors link to their commits" contains "$(curl -s "$B/ada/engine/commits/main")" '/ada/engine/commits/main?author='
+check "which shows only theirs" contains "$(curl -s "$B/ada/engine/commits/main?author=ada@example.com")" 'Commits by'
+check "and nobody else's" bash -c "! curl -s '$B/ada/engine/commits/main?author=nobody@example.com' | grep -q commit-summary"
+check "the front page counts branches and tags" contains "$(curl -s "$B/ada/engine")" 'class="ref-count" href="/ada/engine/branches"'
+CSS=$(curl -s "$B/" | grep -o '/static/style.css?v=[0-9a-f]*')
+check "static files come compressed once" contains "$(curl -s -o /dev/null -D - -H 'Accept-Encoding: br' "$B$CSS" | tr -d '\r')" 'content-encoding: br'
+check "or not, for clients that don't ask" is "$(curl -s "$B$CSS" | head -c 7)" '/* keel'
+check "favicon.ico leads to the icon" is "$(status "$B/favicon.ico")" 308
+check "pages say which links to load ahead" contains "$(curl -sI "$B/ada/engine" | tr -d '\r')" 'speculation-rules: "/static/speculation-rules.json'
+check "the rules are JSON" bash -c "curl -s '$B/static/speculation-rules.json' | python3 -c 'import json,sys; json.load(sys.stdin)'"
+check "people describe themselves" is "$(post "$T/ada" /settings/profile/about full_name="Ada Lovelace" bio="Writes programs." location=London website=https://ada.example.com)" 303
+check "on their profile" contains "$(curl -s "$B/ada")" '<span class="person-name">Ada Lovelace</span>'
+check "with a contribution calendar" contains "$(curl -s "$B/ada")" 'contributions in the last year'
+check "websites are links only with https" contains "$(curl -s -b "$T/ada" -H "$O" -d website=javascript:alert -d full_name=x "$B/settings/profile/about")" 'starting with https://'
+check "the API says so too" contains "$(curl -s "$B/api/v1/users/ada")" '"location":"London"'
+check "the repositories tab lists them" contains "$(curl -s "$B/ada?tab=repositories")" 'href="/ada/engine"'
+check "folders show the file tree" contains "$(curl -s "$B/ada/engine/tree/main/src")" 'class="file-tree"'
+check "branches link their authors" contains "$(curl -s "$B/ada/engine/branches")" '/ada/engine/commits?author='
+check "pages below the tabs don't repeat the description" bash -c "! curl -s '$B/ada/engine/issues' | grep -q 'repo-desc'"
 check "clone over SSH" git clone -q "ssh://git@127.0.0.1:$SSH_PORT/ada/engine.git" "$T/c3"
 
 echo "== collaborators"
@@ -229,7 +254,7 @@ check "eve still can't see it" is "$(status -b "$T/eve" "$B/ada/secret")" 404
 
 echo "== organizations"
 check "create org" is "$(post "$T/ada" /org/new name=acme)" 303
-check "org page" contains "$(curl -s "$B/acme")" "Organization"
+check "org page" contains "$(curl -s "$B/acme")" 'class="org-head"'
 check "org name is taken for users" contains "$(curl -s -H "$O" -d "username=acme&email=x@example.com&password=password-x" "$B/register")" "taken"
 check "org can't sign in" contains "$(curl -s -H "$O" -d "login=acme&password=" "$B/login")" "Incorrect"
 check "create private org repo" is "$(post "$T/ada" /new owner=acme name=tool private=on)" 303
@@ -243,6 +268,21 @@ check "member can't change repo settings" is "$(status -b "$T/eve" "$B/acme/tool
 check "last owner can't leave" contains "$(curl -s -b "$T/ada" -H "$O" -X POST "$B/org/acme/members/1/remove")" "at least one owner"
 check "org with repos can't be deleted" contains "$(curl -s -b "$T/ada" -H "$O" -X POST "$B/org/acme/delete")" "repositories first"
 check "home lists org repos for members" contains "$(curl -s -b "$T/eve" "$B/")" "acme/<strong>tool"
+check "owners describe the org" is "$(post "$T/ada" /org/acme/settings/profile/about full_name="Acme Inc" bio="We make tools." location=Berlin website=https://acme.example.com)" 303
+check "members can't" is "$(post "$T/eve" /org/acme/settings/profile/about full_name=Evil)" 403
+curl -s "$B/acme" >"$T/org.html"
+check "the org page shows who it is" bash -c "grep -q 'Acme Inc' '$T/org.html' && grep -q 'We make tools.' '$T/org.html' && grep -q 'acme.example.com' '$T/org.html'"
+check "anonymous visitors don't see its projects" bash -c "! grep -q '/org/acme/projects' '$T/org.html'"
+check "members do" contains "$(curl -s -b "$T/eve" "$B/acme")" 'href="/org/acme/projects"'
+check "the projects page has the org's tabs" contains "$(curl -s -b "$T/eve" "$B/org/acme/projects")" 'class="tabs org-tabs"'
+check "the people tab lists members" contains "$(curl -s "$B/acme?tab=people")" 'href="/eve"'
+check "the overview has its people" contains "$(curl -s "$B/acme")" 'class="org-people"'
+check "org repositories can be searched" contains "$(curl -s -b "$T/eve" "$B/acme?tab=repositories&q=too")" "acme/<strong>tool"
+check "with nothing found" contains "$(curl -s -b "$T/eve" "$B/acme?tab=repositories&q=zzz")" "No repositories match"
+check "and by type" contains "$(curl -s -b "$T/eve" "$B/acme?tab=repositories&type=forks")" "No repositories match"
+check "people's repositories too" contains "$(curl -s "$B/ada?tab=repositories&q=eng&sort=name")" "ada/<strong>engine"
+check "the API describes the org" contains "$(curl -s "$B/api/v1/orgs/acme")" '"description":"We make tools."'
+check "users aren't orgs there" is "$(status "$B/api/v1/orgs/ada")" 404
 
 echo "== issues"
 check "anonymous can't open issues" is "$(status "$B/ada/engine/issues/new")" 303
@@ -718,6 +758,14 @@ check "and keeps it out" contains "$(curl -s -H "$O" -d "login=zed&password=pass
 check "the last admin stays" contains "$(curl -s -b "$T/ada" -H "$O" -d to=off "$B/admin/users/1/admin")" "at least one administrator"
 check "delete the account" is "$(post "$T/ada" "/admin/users/$Z/delete" x=1)" 303
 check "it's gone" is "$(status "$B/zed")" 404
+check "admins invite people" is "$(curl -s -o /dev/null -w '%{redirect_url}' -b "$T/ada" -H "$O" -d "username=ivy&email=ivy@example.com" "$B/admin/users/invite")" "$B/admin/users?invited=ivy"
+check "who get a link to choose a password" mail_to ivy@example.com "ada made you an account"
+INVITE=$(grep -o 'token=[A-Za-z0-9_-]*' "$(mail_to ivy@example.com 'made you an account')" | head -1 | cut -d= -f2)
+check "and choose one" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/ivy" -H "$O" --data-urlencode "token=$INVITE" -d "new=password-ivy&confirm=password-ivy" "$B/password/reset")" 303
+check "then sign in with it" is "$(curl -s -o /dev/null -w '%{http_code}' -H "$O" -d "login=ivy&password=password-ivy" "$B/login")" 303
+check "the system page shows memory and storage" contains "$(curl -s -b "$T/ada" "$B/admin/system")" "Machine memory"
+check "with the repositories' share" contains "$(curl -s -b "$T/ada" "$B/admin/system")" "<th scope=\"row\">Repositories</th>"
+check "for administrators only" is "$(status -b "$T/bob" "$B/admin/system")" 404
 check "reopen sign-ups" is "$(post "$T/ada" /admin/settings banner=)" 303
 check "the notice is gone" bash -c "! curl -s '$B/' | grep -q 'Maintenance tonight'"
 
@@ -1065,6 +1113,13 @@ check "blank issues" contains "$(curl -s -b "$T/bob" "$B/ada/tracker/issues/new?
 echo "== stars and reactions"
 check "star a repository" is "$(post "$T/bob" /ada/engine/star to=on)" 303
 check "the header counts stars" contains "$(curl -s "$B/ada/engine")" 'aria-label="Stars: 1"'
+check "the page's own requests get the new state, not a page" is "$(curl -s -b "$T/eve2" -H "$O" -H 'Accept: application/json' -d to=on "$B/ada/engine/star")" '{"count":2,"on":true}'
+check "and unstar" is "$(curl -s -b "$T/eve2" -H "$O" -H 'Accept: application/json' -d to=off "$B/ada/engine/star")" '{"count":1,"on":false}'
+check "watching too" contains "$(curl -s -b "$T/eve2" -H "$O" -H 'Accept: application/json' -d to=on "$B/ada/engine/watch")" '"on":true'
+check "the front page has a sidebar" contains "$(curl -s "$B/ada/engine")" 'aria-label="About this repository"'
+check "with the languages" contains "$(curl -s "$B/ada/engine")" '<strong>Rust</strong>'
+check "and contributors" contains "$(curl -s "$B/ada/engine")" '/graphs/contributors">Contributors</a>'
+check "other directories don't" bash -c "! curl -s '$B/ada/engine/tree/main/src' | grep -q 'repo-side'"
 check "stargazers" contains "$(curl -s "$B/ada/engine/stargazers")" '<strong>bob</strong>'
 check "profiles list stars" contains "$(curl -s "$B/bob?tab=stars")" 'href="/ada/engine"'
 check "starring shows in the feed" contains "$(curl -s "$B/bob")" 'starred <a href="/ada/engine">'
@@ -1426,7 +1481,7 @@ for p in / /ada /acme /ada/engine /ada/engine/tree/main/src /ada/engine/blob/mai
     /ada/engine/settings /ada/engine/pulls "/ada/engine/pulls?state=closed" /ada/engine/compare/main...conflict \
     /notifications "/notifications?all=1" /ada/engine/settings/hooks /org/acme/settings/hooks /settings/notifications /ada/engine/labels /ada/engine/forks "/ada/engine/compare/main...bob/engine:main" "/ada/engine/pull/$FPR/files?comment=file-0-n1" \
     "/search?q=engine" "/ada/engine/search?q=engine" \
-    /admin /admin/users /admin/repos /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
+    /admin /admin/users /admin/repos /admin/system /ada/engine/milestones /ada/engine/milestones/new "/ada/engine/milestones/$MS/edit" /ada/engine/settings/branches \
     /ada/engine/releases /ada/engine/releases/new "/ada/engine/releases/$REL/edit" /settings/security /org/acme/settings /settings/account /settings/keys /settings/tokens \
     /explore "/explore?sort=name&page=2" /ada/engine/stargazers "/ada?tab=stars" /ada/tracker/issues/new /ada/tracker/new/main/docs \
     /ada/tracker/upload/main /ada/tracker/edit/main/docs/README.md /ada/tracker/delete/main/docs/README.md \

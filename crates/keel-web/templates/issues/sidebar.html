@@ -98,10 +98,10 @@
   {% if let Some(sub) = conv.subscription %}
   <section>
     <div class="sidebar-head"><h3>Notifications</h3></div>
-    <form method="post" action="{{ conv.base_url }}/subscription" class="subscription">
+    <form method="post" action="{{ conv.base_url }}/subscription" class="subscription" data-toggle>
       <input type="hidden" name="to" value="{% if sub.subscribed %}off{% else %}on{% endif %}">
-      <button class="btn btn-small">{% if sub.subscribed %}Unsubscribe{% else %}Subscribe{% endif %}</button>
-      <p class="muted small">{% match sub.reason %}
+      <button class="btn btn-small" aria-pressed="{{ sub.subscribed }}" data-on-title="" data-off-title=""><span data-on="Unsubscribe" data-off="Subscribe">{% if sub.subscribed %}Unsubscribe{% else %}Subscribe{% endif %}</span></button>
+      <p class="muted small" data-on="You're subscribed to this thread." data-off="You won't get notifications about this.">{% match sub.reason %}
         {% when "assigned" %}You're getting notifications because you're assigned.
         {% when "review_requested" %}You're getting notifications because your review was requested.
         {% when "author" %}You're getting notifications because you opened this.

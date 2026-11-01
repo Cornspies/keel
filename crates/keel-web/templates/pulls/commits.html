@@ -11,7 +11,7 @@
   <li class="card-row">
     <div class="commit-main">
       <a class="commit-summary" href="{{ c.url }}">{{ c.summary }}</a>
-      <div class="muted small"><strong>{{ c.author }}</strong> committed <time title="{{ c.when_full }}">{{ c.when }}</time></div>
+      <div class="muted small">{% include "repo/author.html" %} committed <time title="{{ c.when_full }}">{{ c.when }}</time></div>
     </div>
     <span class="commit-side">{% include "repo/signature.html" %}{{ c.status|safe }}<a class="btn btn-small mono" href="{{ c.url }}">{{ c.short }}</a></span>
   </li>

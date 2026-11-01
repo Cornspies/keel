@@ -55,6 +55,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/repos/{owner}/{repo}/pulls/comments/{comment}/reactions/{id}", axum::routing::delete(delete_comment_reaction))
         .route("/api/v1/users/{name}", get(user))
         .route("/api/v1/users/{name}/repos", get(user_repos))
+        .route("/api/v1/orgs/{org}", get(org))
         .route("/api/v1/orgs/{org}/repos", get(user_repos).post(create_org_repo))
         .route("/api/v1/repos/{owner}/{repo}", get(repo).patch(update_repo).delete(delete_repo))
         .route("/api/v1/repos/{owner}/{repo}/generate", post(generate))
@@ -388,6 +389,7 @@ async fn me(State(state): State<AppState>, caller: Caller) -> ApiResult<Json<Val
     let user = caller.user()?;
     let mut v = user_value(&state, user);
     v["email"] = json!(user.email);
+    add_profile(&state, user, &mut v).await?;
     Ok(Json(v))
 }
 
@@ -536,7 +538,34 @@ async fn delete_gpg_key(State(state): State<AppState>, caller: Caller, Path(id):
 
 async fn user(State(state): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let u = state.core.user_by_name(&name).await?.ok_or_else(not_found_error)?;
-    Ok(Json(user_value(&state, &u)))
+    let mut v = user_value(&state, &u);
+    add_profile(&state, &u, &mut v).await?;
+    Ok(Json(v))
+}
+
+/// `GET /orgs/{org}`: as GitHub, with a `description` rather than a bio.
+async fn org(State(state): State<AppState>, Path(name): Path<String>) -> ApiResult<Json<Value>> {
+    let org = state.core.user_by_name(&name).await?.filter(User::is_org).ok_or_else(not_found_error)?;
+    let mut v = user_value(&state, &org);
+    add_profile(&state, &org, &mut v).await?;
+    if let Some(map) = v.as_object_mut()
+        && let Some(bio) = map.remove("bio")
+    {
+        map.insert("description".into(), bio);
+    }
+    v["public_repos"] = json!(state.core.repos_of(org.id, None).await?.len());
+    Ok(Json(v))
+}
+
+/// What people say about themselves, under GitHub's names.
+async fn add_profile(state: &AppState, u: &User, v: &mut Value) -> ApiResult<()> {
+    let p = state.core.profile(u.id).await?;
+    let or_null = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
+    v["name"] = or_null(&p.full_name);
+    v["bio"] = or_null(&p.bio);
+    v["location"] = or_null(&p.location);
+    v["blog"] = json!(p.website);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

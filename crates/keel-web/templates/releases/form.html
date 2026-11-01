@@ -9,7 +9,7 @@
   <h2>New release</h2>
   <form method="post" action="/{{ repo.owner }}/{{ repo.name }}/releases" class="form">
     <div class="form-row">
-      <label>Tag <span class="hint">An existing tag, or a new one</span>
+      <label><span>Tag <span class="hint">an existing tag, or a new one</span></span>
         <input name="tag" value="{{ tag }}" list="tags" placeholder="v1.0.0" required class="mono">
         <datalist id="tags">{% for t in tags %}<option value="{{ t }}">{% endfor %}</datalist>
       </label>

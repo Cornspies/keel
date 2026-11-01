@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<h2>Compare changes</h2>
+<div class="toolbar"><h2 class="toolbar-title">Compare changes</h2></div>
 <form method="get" action="/{{ repo.owner }}/{{ repo.name }}/compare" class="form form-inline compare-form" data-autosubmit>
   {% if base_repos.len() > 1 %}<label class="inline-label">base repository <select name="base_repo">{% for r in base_repos %}<option{% if *r == base_repo %} selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>{% endif %}
   <label class="inline-label">base <select name="base">{% for b in branches %}<option{% if *b == base %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
@@ -43,7 +43,7 @@
     <li class="card-row">
       <div class="commit-main">
         <a class="commit-summary" href="{{ cm.url }}">{{ cm.summary }}</a>
-        <div class="muted small"><strong>{{ cm.author }}</strong> committed <time title="{{ cm.when_full }}">{{ cm.when }}</time></div>
+        <div class="muted small">{% let c = cm %}{% include "repo/author.html" %} committed <time title="{{ cm.when_full }}">{{ cm.when }}</time></div>
       </div>
       <a class="btn btn-small mono" href="{{ cm.url }}">{{ cm.short }}</a>
     </li>

@@ -110,7 +110,7 @@ impl Core {
         let name = name.trim();
         validate_repo_name(name)?;
         self.check_repo_limit(owner).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let now = now();
         let inserted = sqlx::query_as::<_, (i64,)>(
             "INSERT INTO repositories (owner_id, name, description, is_private, created_at, updated_at, forked_from)
@@ -406,7 +406,7 @@ impl Core {
         if owner.id == repo.owner_id && name == repo.name {
             return Ok(repo.clone());
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let moved = sqlx::query("UPDATE repositories SET owner_id = ?2, name = ?3 WHERE id = ?1")
             .bind(repo.id)
             .bind(owner.id)

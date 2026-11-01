@@ -201,7 +201,7 @@ impl Core {
         if current.as_ref().map(|m| m.id) == target.as_ref().map(|m| m.id) {
             return Ok(());
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE issues SET milestone_id = ?2 WHERE id = ?1")
             .bind(issue.id)
             .bind(target.as_ref().map(|m| m.id))

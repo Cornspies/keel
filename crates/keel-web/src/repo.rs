@@ -136,6 +136,9 @@ pub(crate) struct RepoView {
     pub projects_tab: bool,
     /// An import that's running, or ended recently with problems.
     pub import: Option<ImportView>,
+    /// The front page's sidebar shows the description and topics, so the
+    /// header leaves them out.
+    pub about_in_side: bool,
 }
 
 pub(crate) struct ImportView {
@@ -227,6 +230,7 @@ impl RepoView {
             ssh_url: cfg.ssh_clone_url(&repo.owner, &repo.name),
             tab,
             default_rev: encode_path(default_rev),
+            about_in_side: false,
         })
     }
 }
@@ -236,6 +240,12 @@ pub(crate) struct CommitView {
     pub short: String,
     pub summary: String,
     pub author: String,
+    pub author_email: String,
+    /// The history filtered to the author's commits (set by
+    /// [`link_authors`]).
+    pub author_url: Option<String>,
+    /// The author's account, if their address belongs to one.
+    pub author_username: Option<String>,
     pub when: String,
     pub when_full: String,
     pub url: String,
@@ -245,6 +255,23 @@ pub(crate) struct CommitView {
     pub signature: Option<crate::signatures::SignatureView>,
 }
 
+/// Makes the authors of `commits` links: their name to the history at
+/// `history` filtered to their commits, and their avatar to their profile
+/// if their address belongs to an account.
+pub(crate) async fn link_authors(state: &AppState, history: &str, commits: &mut [&mut CommitView]) -> AppResult<()> {
+    let emails: Vec<String> = commits.iter().map(|c| c.author_email.to_lowercase()).collect();
+    let accounts = state.core.commit_authors(&emails.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+    for (c, email) in commits.iter_mut().zip(&emails) {
+        if c.author_email.is_empty() {
+            continue;
+        }
+        let encoded: String = form_urlencoded::byte_serialize(c.author_email.as_bytes()).collect();
+        c.author_url = Some(format!("{history}?author={encoded}"));
+        c.author_username = accounts.get(email).cloned();
+    }
+    Ok(())
+}
+
 impl CommitView {
     pub(crate) fn new(base: &str, c: &CommitSummary) -> Self {
         Self {
@@ -252,6 +279,9 @@ impl CommitView {
             short: c.short_id(),
             summary: c.summary.clone(),
             author: c.author.name.clone(),
+            author_email: c.author.email.clone(),
+            author_url: None,
+            author_username: None,
             when: relative_time(c.author.time),
             when_full: datetime(c.author.time),
             url: format!("{base}/commit/{}", c.id),
@@ -338,6 +368,10 @@ struct TreePage {
     /// Where to add files here, for people who can.
     new_file_url: Option<String>,
     upload_url: Option<String>,
+    /// On the front page (the top of the tree).
+    side: Option<crate::repo_side::RepoSide>,
+    /// In a folder: the file tree beside it (HTML), as beside files.
+    tree: String,
 }
 
 #[derive(Template)]
@@ -373,6 +407,9 @@ enum TreeData {
         latest: Option<CommitSummary>,
         readme: Option<(String, Arc<String>)>,
         refs: RefNames,
+        /// At the top of the tree: the license file and which license it is.
+        license: Option<(String, Option<&'static str>)>,
+        tree: String,
     },
 }
 
@@ -444,7 +481,27 @@ async fn render_tree(
             None => None,
         };
 
+        let license = match entries.iter().find(|e| {
+            resolved.path.is_empty()
+                && matches!(e.kind, EntryKind::File | EntryKind::Executable)
+                && crate::repo_side::is_license_file(&e.name)
+        }) {
+            Some(e) => {
+                let text = g.blob(resolved.commit, &e.name)?.filter(|b| !b.binary && b.data.len() <= 256 * 1024);
+                let kind = text.and_then(|b| crate::repo_side::license_name(&String::from_utf8_lossy(&b.data)));
+                Some((e.name.clone(), kind))
+            }
+            None => None,
+        };
+
+        let tree = if resolved.path.is_empty() {
+            String::new()
+        } else {
+            crate::file_view::tree_html(g, &link_base, &resolved.rev, resolved.commit, &format!("{}/", resolved.path))?
+        };
         Ok(TreeData::Dir {
+            tree,
+            license,
             refs: RefNames::load(g, &link_base, "tree")?,
             default_branch: default_branch.unwrap_or_default(),
             resolved,
@@ -463,7 +520,7 @@ async fn render_tree(
             encode_path(&r.path)
         ))
         .into_response()),
-        TreeData::Dir { resolved, default_branch, entries, latest, readme, refs } => {
+        TreeData::Dir { resolved, default_branch, entries, latest, readme, refs, license, tree } => {
             let last = last_commits_for(&state, &repo, resolved.commit, &resolved.path, LAST_COMMIT_SYNC_WALK).await?;
             let rev_url = encode_path(&resolved.rev);
             let entries = entries
@@ -495,14 +552,25 @@ async fn render_tree(
                 None => (String::new(), None),
             };
             let mut latest = latest.as_ref().map(|c| CommitView::new(&base, c));
+            let history = format!("{base}/commits/{rev_url}/{}", encode_path(&resolved.path));
             if let Some(c) = latest.as_mut() {
                 crate::statuses::attach(&state, &repo, &mut [&mut *c]).await?;
-                crate::signatures::attach(&state, &repo, &mut [c]).await?;
+                crate::signatures::attach(&state, &repo, &mut [&mut *c]).await?;
+                link_authors(&state, history.trim_end_matches('/'), &mut [c]).await?;
             }
-            let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
+            let mut view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
+            let side = if resolved.path.is_empty() {
+                view.about_in_side = true;
+                let has_readme = readme.is_some();
+                Some(crate::repo_side::load(&state, &repo, &view, &resolved.rev, resolved.commit, has_readme, license).await?)
+            } else {
+                None
+            };
             let here = (view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == resolved.rev))
                 .then(|| format!("{rev_url}{}", if resolved.path.is_empty() { String::new() } else { format!("/{}", encode_path(&resolved.path)) }));
             html(TreePage {
+                side,
+                tree,
                 new_file_url: here.as_ref().map(|h| format!("{base}/new/{h}")),
                 upload_url: here.map(|h| format!("{base}/upload/{h}")),
                 repo: view,
@@ -615,21 +683,15 @@ struct BlobPage {
     rev_url: String,
     path: String,
     crumbs: Vec<Crumb>,
-    size: String,
-    line_count: usize,
     content: BlobContent,
-    is_markdown: bool,
-    plain: bool,
     raw_url: String,
     history_url: String,
-    blame_url: Option<String>,
     latest: Option<CommitView>,
     refs: RefNames,
-    /// Who locked the file with Git LFS.
-    locked_by: Option<String>,
-    /// For people who can change the file (on a branch).
-    edit_url: Option<String>,
-    delete_url: Option<String>,
+    /// The bar above the content: views, raw, copy, download, edit, delete.
+    bar: crate::file_view::FileBar,
+    /// The file tree beside it (HTML).
+    tree: String,
 }
 
 #[derive(Deserialize)]
@@ -688,11 +750,12 @@ pub async fn blob(
         };
         let latest = g.log(r.commit, &r.path, 0, 1)?.into_iter().next();
         let image = IMAGE_EXTENSIONS.contains(&ext.as_str());
-        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(g, &link_base, "tree")?, lfs, image)))
+        let tree = crate::file_view::tree_html(g, &link_base, &r.rev, r.commit, &r.path)?;
+        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(g, &link_base, "tree")?, lfs, image, tree)))
     })
     .await?;
 
-    let (r, default_branch, size, line_count, mut content, is_markdown, latest, refs, lfs, image) = match result {
+    let (r, default_branch, size, line_count, mut content, is_markdown, latest, refs, lfs, image, tree) = match result {
         Ok(v) => v,
         Err(r) => {
             return Ok(Redirect::to(&format!("{base}/tree/{}/{}", encode_path(&r.rev), encode_path(&r.path)))
@@ -720,23 +783,27 @@ pub async fn blob(
     let view = RepoView::new(&state, &repo, access, viewer.as_ref(), "code", &default_branch).await?;
     let changeable = view.can_write && view.mirror.is_none() && refs.branches.iter().any(|b| b.name == r.rev);
     let editable = changeable && size <= 1024 * 1024 && matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_));
-    let blame_url = matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_)).then(|| format!("{base}/blame/{rev_url}/{path_url}"));
+    let mut latest = latest.as_ref().map(|c| CommitView::new(&base, c));
+    if let Some(c) = latest.as_mut() {
+        link_authors(&state, &format!("{base}/commits/{rev_url}/{path_url}"), &mut [c]).await?;
+    }
+    let text = matches!(content, BlobContent::Lines(_) | BlobContent::Rendered(_));
+    let mode = if is_markdown && !plain && text { "preview" } else { "code" };
+    let mut bar = crate::file_view::FileBar::new(&base, &rev_url, &r.path, mode, is_markdown && text, text);
+    bar.meta = if line_count > 0 { format!("{line_count} lines · {shown_size}") } else { shown_size.clone() };
+    bar.edit_url = editable.then(|| format!("{base}/edit/{rev_url}/{path_url}"));
+    bar.delete_url = changeable.then(|| format!("{base}/delete/{rev_url}/{path_url}"));
+    bar.locked_by = locked_by;
     html(BlobPage {
-        edit_url: editable.then(|| format!("{base}/edit/{rev_url}/{path_url}")),
-        delete_url: changeable.then(|| format!("{base}/delete/{rev_url}/{path_url}")),
-        locked_by,
+        bar,
+        tree,
         repo: view,
         page: Page::new(&state, viewer, format!("{} at {} · {}/{}", r.path, r.rev, repo.owner, repo.name)),
         crumbs: crumbs(&base, &r.rev, &r.path),
-        size: shown_size,
-        line_count,
         content,
-        is_markdown,
-        plain,
         raw_url: format!("{base}/raw/{rev_url}/{path_url}"),
         history_url: format!("{base}/commits/{rev_url}/{path_url}"),
-        blame_url,
-        latest: latest.as_ref().map(|c| CommitView::new(&base, c)),
+        latest,
         rev: r.rev,
         rev_url,
         path: r.path,
@@ -760,12 +827,32 @@ fn bytecount_lines(data: &[u8]) -> usize {
     data.iter().filter(|&&b| b == b'\n').count()
 }
 
+#[derive(Deserialize)]
+pub struct RawQuery {
+    /// Save the file rather than show it.
+    download: Option<String>,
+}
+
+/// `attachment` with the file's name, for `?download=1` (RFC 6266; the
+/// UTF-8 form for names that aren't plain ASCII).
+fn attachment(path: &str) -> HeaderValue {
+    let name = path.rsplit('/').next().unwrap_or("download");
+    let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' }).collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")).expect("ASCII")
+}
+
 pub async fn raw(
     State(state): State<AppState>,
     Viewer(viewer): Viewer,
     Path((owner, name, rest)): Path<(String, String, String)>,
+    Query(q): Query<RawQuery>,
     headers: HeaderMap,
 ) -> AppResult {
+    let download = q.download.is_some_and(|d| d != "0");
     let (repo, _) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let (r, blob) = with_git(&state, &repo, move |g| {
         let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
@@ -790,6 +877,9 @@ pub async fn raw(
         let h = res.headers_mut();
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if repo.is_private { "private, no-cache" } else { "public, no-cache" }));
         h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'"));
+        if download {
+            h.insert(header::CONTENT_DISPOSITION, attachment(&r.path));
+        }
         return Ok(res);
     }
     let etag = format!("\"{}\"", blob.id);
@@ -811,6 +901,9 @@ pub async fn raw(
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(RAW_CSP));
+    if download {
+        h.insert(header::CONTENT_DISPOSITION, attachment(&r.path));
+    }
     Ok(res)
 }
 
@@ -843,6 +936,8 @@ pub(crate) const RAW_CSP: &str = "sandbox; default-src 'none'; img-src 'self'; s
 #[derive(Template)]
 #[template(path = "repo/commits.html")]
 struct CommitsPage {
+    /// Filtered to one author: their name, and the unfiltered history.
+    author_filter: Option<(String, String)>,
     page: Page,
     repo: RepoView,
     rev: String,
@@ -856,17 +951,22 @@ struct CommitsPage {
 #[derive(Deserialize)]
 pub struct PageQuery {
     page: Option<usize>,
+    /// Only commits by the author with this address.
+    author: Option<String>,
 }
 
 pub async fn commits_default(
     State(state): State<AppState>,
     Viewer(viewer): Viewer,
     Path((owner, name)): Path<(String, String)>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> AppResult {
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let branch = with_git(&state, &repo, |g| Ok(g.default_branch()?)).await?;
+    // Filters like `?author=` carry over.
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     match branch {
-        Some(b) => Ok(Redirect::to(&format!("/{}/{}/commits/{}", repo.owner, repo.name, encode_path(&b))).into_response()),
+        Some(b) => Ok(Redirect::to(&format!("/{}/{}/commits/{}{query}", repo.owner, repo.name, encode_path(&b))).into_response()),
         None => empty_page(&state, &repo, access, viewer, "commits").await,
     }
 }
@@ -881,10 +981,16 @@ pub async fn commits(
     let base = format!("/{}/{}", repo.owner, repo.name);
     let page_no = q.page.unwrap_or(1).max(1);
     let link_base = base.clone();
+    let author = q.author.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty() && a.len() <= 254);
+    let by = author.clone();
     let (r, default_branch, mut list, refs) = with_git(&state, &repo, move |g| {
         let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
         // One extra to know whether there is an older page.
-        let list = g.log(r.commit, &r.path, (page_no - 1) * COMMITS_PER_PAGE, COMMITS_PER_PAGE + 1)?;
+        let (skip, limit) = ((page_no - 1) * COMMITS_PER_PAGE, COMMITS_PER_PAGE + 1);
+        let list = match &by {
+            Some(email) => g.log_by(r.commit, &r.path, email, skip, limit)?,
+            None => g.log(r.commit, &r.path, skip, limit)?,
+        };
         Ok((r, g.default_branch()?.unwrap_or_default(), list, RefNames::load(g, &link_base, "commits")?))
     })
     .await?;
@@ -896,12 +1002,23 @@ pub async fn commits(
     let mut commits: Vec<CommitView> = list.iter().map(|c| CommitView::new(&base, c)).collect();
     crate::statuses::attach(&state, &repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
     crate::signatures::attach(&state, &repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
+    link_authors(&state, &here, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
+    // Who the list is filtered to: their name on these commits, or the address.
+    let author_filter = author.as_ref().map(|email| {
+        let name = commits.first().map_or_else(|| email.clone(), |c| c.author.clone());
+        (name, here.clone())
+    });
+    let page_query = match &author {
+        Some(a) => format!("&author={}", form_urlencoded::byte_serialize(a.as_bytes()).collect::<String>()),
+        None => String::new(),
+    };
     html(CommitsPage {
+        author_filter,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Commits · {}/{}", repo.owner, repo.name)),
         commits,
-        newer_url: (page_no > 1).then(|| format!("{here}?page={}", page_no - 1)),
-        older_url: has_older.then(|| format!("{here}?page={}", page_no + 1)),
+        newer_url: (page_no > 1).then(|| format!("{here}?page={}{page_query}", page_no - 1)),
+        older_url: has_older.then(|| format!("{here}?page={}{page_query}", page_no + 1)),
         rev: r.rev,
         path: r.path,
         refs,
@@ -1057,6 +1174,7 @@ pub async fn commit(
 
     let mut commit = CommitView::new(&base, &detail.commit);
     crate::signatures::attach(&state, &repo, &mut [&mut commit]).await?;
+    link_authors(&state, &format!("{base}/commits/{}", detail.commit.id), &mut [&mut commit]).await?;
     html(CommitPage {
         checks,
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "commits", &default_branch).await?,
@@ -1122,12 +1240,15 @@ pub async fn refs(
         name: r.name.clone(),
     };
     let mut branches: Vec<RefView> = branches.iter().map(|b| view(b, true)).collect();
+    let mut tags: Vec<RefView> = tags.iter().map(|t| view(t, false)).collect();
     crate::statuses::attach(&state, &repo, &mut branches.iter_mut().map(|b| &mut b.commit).collect::<Vec<_>>()).await?;
+    let mut commits: Vec<&mut CommitView> = branches.iter_mut().chain(tags.iter_mut()).map(|r| &mut r.commit).collect();
+    link_authors(&state, &format!("{base}/commits"), &mut commits).await?;
     html(RefsPage {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "branches", &default_branch).await?,
         page: Page::new(&state, viewer, format!("Branches · {}/{}", repo.owner, repo.name)),
         branches,
-        tags: tags.iter().map(|t| view(t, false)).collect(),
+        tags,
     })
 }
 

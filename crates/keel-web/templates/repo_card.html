@@ -6,5 +6,5 @@
     {% if !r.description.is_empty() %}<p class="muted small">{{ r.description }}</p>{% endif %}
     {% if !r.topics.is_empty() %}<p class="topics">{% for t in r.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
   </div>
-  <span class="muted small nowrap">{% if r.stars > 0 %}<span class="card-stars" title="Stars">★ {{ r.stars }}</span> · {% endif %}Updated {{ r.updated }}</span>
+  <span class="muted small nowrap">{% if let Some((lang, color)) = r.language %}<span class="lang"><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="5" fill="{{ color }}"/></svg>{{ lang }}</span> · {% endif %}{% if r.stars > 0 %}<span class="card-stars" title="Stars">★ {{ r.stars }}</span> · {% endif %}Updated {{ r.updated }}</span>
 </li>

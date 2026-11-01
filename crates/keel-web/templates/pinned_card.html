@@ -1,3 +1,3 @@
 <a class="repo-link" href="/{{ r.owner }}/{{ r.name }}">{{ r.name }}</a>{% if r.is_private %} <span class="badge">Private</span>{% endif %}
 <p class="muted small">{{ r.description }}</p>
-<p class="muted small pinned-meta">{% if r.stars > 0 %}<span title="Stars">★ {{ r.stars }}</span> · {% endif %}Updated {{ r.updated }}</p>
+<p class="muted small pinned-meta">{% if let Some((lang, color)) = r.language %}<span class="lang"><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="5" fill="{{ color }}"/></svg>{{ lang }}</span>{% endif %}{% if r.stars > 0 %}<a class="pinned-stars" href="/{{ r.owner }}/{{ r.name }}/stargazers" title="Stars">★ {{ r.stars }}</a>{% endif %}<span>Updated {{ r.updated }}</span></p>

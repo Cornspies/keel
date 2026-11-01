@@ -1,0 +1,17 @@
+<div class="box-head file-bar">
+  <nav class="seg" aria-label="View">{% for m in bar.modes %}<a href="{{ m.url }}"{% if m.active %} aria-current="page"{% endif %}{% if m.label == "Blame" %} rel="nofollow"{% endif %}>{{ m.label }}</a>{% endfor %}</nav>
+  <span class="muted small file-meta">{{ bar.meta }}{% if let Some(who) = bar.locked_by %} · <span class="badge" title="Locked with git lfs lock">locked by {{ who }}</span>{% endif %}</span>
+  {% if bar.age_scale %}<span class="blame-scale muted small" title="Older to newer changes"><span>Older</span><span class="blame-scale-bar"></span><span>Newer</span></span>{% endif %}
+  <span class="spacer"></span>
+  <span class="btn-group">
+    <a class="btn btn-small" href="{{ bar.raw_url }}">Raw</a>
+    {% if bar.copyable %}<button type="button" class="btn btn-small btn-icon" data-copy-raw="{{ bar.raw_url }}" title="Copy raw file" aria-label="Copy raw file" hidden><span class="glyph glyph-copy" aria-hidden="true"></span></button>{% endif %}
+    <a class="btn btn-small btn-icon" href="{{ bar.download_url }}" title="Download raw file" aria-label="Download raw file"><span class="glyph glyph-download" aria-hidden="true"></span></a>
+  </span>
+  {% if bar.edit_url.is_some() || bar.delete_url.is_some() %}
+  <span class="btn-group">
+    {% if let Some(u) = bar.edit_url %}<a class="btn btn-small btn-icon" href="{{ u }}" title="Edit this file" aria-label="Edit this file"><span class="glyph glyph-pencil" aria-hidden="true"></span></a>{% endif %}
+    {% if let Some(u) = bar.delete_url %}<a class="btn btn-small btn-icon btn-danger" href="{{ u }}" title="Delete this file" aria-label="Delete this file"><span class="glyph glyph-trash" aria-hidden="true"></span></a>{% endif %}
+  </span>
+  {% endif %}
+</div>

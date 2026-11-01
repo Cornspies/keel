@@ -1,0 +1,1 @@
+{% if let Some(u) = c.author_username %}<a class="author-avatar" href="/{{ u }}" title="{{ u }}"><img class="avatar" src="/avatars/{{ u }}" width="16" height="16" alt="{{ u }}"></a>{% endif %}{% if let Some(url) = c.author_url %}<a class="author-link" href="{{ url }}" title="Commits by {{ c.author }}">{{ c.author }}</a>{% else %}<strong>{{ c.author }}</strong>{% endif %}

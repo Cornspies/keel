@@ -57,6 +57,7 @@ async fn changes(state: &AppState, repo: &Repo, head_repo: &Repo, base: Oid, hea
     .await?;
     let mut commits: Vec<CommitView> = commits.iter().map(|c| CommitView::new(&url, c)).collect();
     crate::signatures::attach(state, head_repo, &mut commits.iter_mut().collect::<Vec<_>>()).await?;
+    crate::repo::link_authors(state, &format!("{url}/commits/{head}"), &mut commits.iter_mut().collect::<Vec<_>>()).await?;
     Ok(Changes {
         commits,
         files: file_views(&url, &head.to_string(), &diff),

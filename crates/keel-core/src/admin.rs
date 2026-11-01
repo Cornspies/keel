@@ -72,7 +72,7 @@ impl Core {
         if banner.chars().count() > MAX_BANNER {
             return invalid(format!("The notice can be at most {MAX_BANNER} characters."));
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         for (key, value) in [
             ("registration_closed", if s.registration_closed { "1" } else { "0" }),
             ("banner", banner),
@@ -234,7 +234,7 @@ impl Core {
         if user.is_org() {
             return invalid("Organizations can't be disabled.");
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE users SET disabled_at = ?2 WHERE id = ?1")
             .bind(user.id)
             .bind(disabled.then(now))

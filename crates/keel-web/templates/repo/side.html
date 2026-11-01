@@ -1,0 +1,58 @@
+<aside class="repo-side" aria-label="About this repository">
+  <section>
+    <h2 class="side-head">About{% if repo.can_admin %} <a class="side-edit muted small" href="/{{ repo.owner }}/{{ repo.name }}/settings" title="Edit the description and topics">Edit</a>{% endif %}</h2>
+    {% if repo.description.is_empty() %}<p class="muted"><em>No description{% if repo.topics.is_empty() %} or topics{% endif %}.</em></p>{% else %}<p class="side-desc">{{ repo.description }}</p>{% endif %}
+    {% if !repo.topics.is_empty() %}<p class="topics">{% for t in repo.topics %}<a class="topic" href="/explore?topic={{ t }}">{{ t }}</a>{% endfor %}</p>{% endif %}
+    <ul class="side-links">
+      {% if s.readme %}<li><span class="side-icon side-icon-book" aria-hidden="true"></span><a href="#readme">Readme</a></li>{% endif %}
+      {% if let Some((name, url)) = s.license %}<li><span class="side-icon side-icon-law" aria-hidden="true"></span><a href="{{ url }}">{{ name }}</a></li>{% endif %}
+      <li><span class="side-icon side-icon-star" aria-hidden="true"></span><a href="/{{ repo.owner }}/{{ repo.name }}/stargazers"><strong>{{ repo.stars }}</strong> star{% if repo.stars != 1 %}s{% endif %}</a></li>
+      <li><span class="side-icon side-icon-eye" aria-hidden="true"></span><span><strong>{{ repo.watchers }}</strong> watching</span></li>
+      <li><span class="side-icon side-icon-fork" aria-hidden="true"></span><a href="/{{ repo.owner }}/{{ repo.name }}/forks"><strong>{{ repo.fork_count }}</strong> fork{% if repo.fork_count != 1 %}s{% endif %}</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 class="side-head"><a href="/{{ repo.owner }}/{{ repo.name }}/releases">Releases</a>{% if repo.releases > 0 %} <span class="count">{{ repo.releases }}</span>{% endif %}</h2>
+    {% if let Some(r) = s.latest_release %}
+    <a class="side-release" href="{{ r.url }}">
+      <span class="side-icon side-icon-tag" aria-hidden="true"></span>
+      <span class="side-release-text"><span><strong>{{ r.name }}</strong> <span class="badge badge-latest">Latest</span></span>
+        <span class="muted small"><time title="{{ r.when_full }}">{{ r.when }}</time>{% if r.name != r.tag %} · {{ r.tag }}{% endif %}</span></span>
+    </a>
+    {% if repo.releases > 1 %}<p class="small side-more"><a href="/{{ repo.owner }}/{{ repo.name }}/releases">+ {{ repo.releases - 1 }} release{% if repo.releases != 2 %}s{% endif %}</a></p>{% endif %}
+    {% else if repo.releases > 0 %}
+    <p class="muted small">Only pre-releases so far. <a href="/{{ repo.owner }}/{{ repo.name }}/releases">See them</a>.</p>
+    {% else if let Some(u) = s.new_release_url %}
+    <p class="muted small">No releases yet. <a href="{{ u }}">Create a release</a></p>
+    {% else %}
+    <p class="muted small">No releases yet.</p>
+    {% endif %}
+  </section>
+
+  {% if !s.people.is_empty() %}
+  <section>
+    <h2 class="side-head"><a href="/{{ repo.owner }}/{{ repo.name }}/graphs/contributors">Contributors</a> <span class="count">{{ s.people_total }}</span></h2>
+    <ul class="side-people">
+      {% for p in s.people %}
+      <li>
+        {% if let Some(u) = p.username %}<a href="/{{ u }}" title="{{ p.name }} ({{ u }})"><img class="avatar" src="/avatars/{{ u }}" width="20" height="20" alt=""></a><a href="/{{ u }}">{{ p.name }}</a>
+        {% else %}<span class="avatar avatar-initial" aria-hidden="true">{{ p.initial }}</span><span>{{ p.name }}</span>{% endif %}
+        <span class="muted small side-commits">{{ p.commits }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% if s.people_total > s.people.len() %}<p class="small side-more"><a href="/{{ repo.owner }}/{{ repo.name }}/graphs/contributors">+ {{ s.people_total - s.people.len() }} more</a></p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if !s.languages.is_empty() %}
+  <section>
+    <h2 class="side-head">Languages</h2>
+    <span class="lang-bar-wrap">{{ s.language_bar|safe }}</span>
+    <ul class="side-langs">
+      {% for l in s.languages %}<li><svg width="8" height="8" aria-hidden="true"><circle cx="4" cy="4" r="4" fill="{{ l.color }}"/></svg><strong>{{ l.name }}</strong> <span class="muted">{{ l.percent }}</span></li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</aside>

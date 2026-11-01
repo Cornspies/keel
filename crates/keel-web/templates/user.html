@@ -1,43 +1,78 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="profile profile-head">
-  <img class="avatar avatar-large" src="/avatars/{{ username }}?v={{ avatar_version }}" width="96" height="96" alt="">
-  <div>
-    <h1>{{ username }}</h1>
-    <p class="muted">Joined {{ joined }}{% if is_self %} · <a href="/settings/profile">Edit profile</a>{% endif %}</p>
+<div class="person">
+  <aside class="person-card" aria-label="About {{ username }}">
+    <img class="avatar person-avatar" src="/avatars/{{ username }}?v={{ avatar_version }}" width="260" height="260" alt="">
+    <h1 class="person-names">
+      {% if !profile.full_name.is_empty() %}<span class="person-name">{{ profile.full_name }}</span>{% endif %}
+      <span class="person-login">{{ username }}</span>
+    </h1>
+    {% if !profile.bio.is_empty() %}<p class="person-bio">{{ profile.bio }}</p>{% endif %}
+    {% if is_self %}<a class="btn btn-block person-edit" href="/settings/profile">Edit profile</a>{% endif %}
+    <ul class="person-facts">
+      {% if !profile.location.is_empty() %}<li><span class="side-icon side-icon-pin" aria-hidden="true"></span><span>{{ profile.location }}</span></li>{% endif %}
+      {% if !profile.website.is_empty() %}<li><span class="side-icon side-icon-link" aria-hidden="true"></span><a href="{{ profile.website }}" rel="nofollow ugc noopener noreferrer" data-no-prefetch>{{ website_label }}</a></li>{% endif %}
+      <li><span class="side-icon side-icon-calendar" aria-hidden="true"></span><span>Joined {{ joined }}</span></li>
+      <li><span class="side-icon side-icon-repo" aria-hidden="true"></span><a href="/{{ username }}?tab=repositories"><strong>{{ repo_count }}</strong> repositor{% if repo_count == 1 %}y{% else %}ies{% endif %}</a></li>
+      <li><span class="side-icon side-icon-star" aria-hidden="true"></span><a href="/{{ username }}?tab=stars"><strong>{{ star_count }}</strong> starred</a></li>
+    </ul>
     {% if !orgs.is_empty() %}
-    <p class="org-list"><span class="muted">Organizations:</span> {% for o in orgs %}<a class="badge" href="/{{ o }}"><img class="avatar" src="/avatars/{{ o }}" width="14" height="14" alt=""> {{ o }}</a> {% endfor %}</p>
+    <section class="person-orgs">
+      <h2>Organizations</h2>
+      <p>{% for o in orgs %}<a href="/{{ o }}" title="{{ o }}"><img class="avatar" src="/avatars/{{ o }}" width="32" height="32" alt="{{ o }}"></a>{% endfor %}</p>
+    </section>
+    {% endif %}
+  </aside>
+
+  <div class="person-main">
+    <nav class="tabs person-tabs">
+      <a href="/{{ username }}"{% if tab == "overview" %} class="active"{% endif %}>Overview</a>
+      <a href="/{{ username }}?tab=repositories"{% if tab == "repositories" %} class="active"{% endif %}>Repositories <span class="count">{{ repo_count }}</span></a>
+      <a href="/{{ username }}?tab=stars"{% if tab == "stars" %} class="active"{% endif %}>Stars <span class="count">{{ star_count }}</span></a>
+    </nav>
+
+    {% if tab == "overview" %}
+    {% if !showcase.is_empty() %}
+    <section>
+      <div class="person-section-head"><h2>{% if showcase_pinned %}Pinned{% else %}Popular repositories{% endif %}</h2>{% if is_self %}<a class="muted small" href="/settings/profile#pins">Customize your pins</a>{% endif %}</div>
+      <ul class="pinned">{% for r in showcase %}<li class="box pinned-card">{% include "pinned_card.html" %}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+    <section>
+      <div class="person-section-head"><h2>{{ contributions }} contribution{% if contributions != 1 %}s{% endif %} in the last year</h2></div>
+      <div class="box calendar-box">
+        <div class="calendar-scroll">{{ calendar|safe }}</div>
+        <p class="calendar-legend muted small"><span>Commits pushed, issues and pull requests opened, releases and new repositories.</span><span class="spacer"></span>Less <span class="cal-key cal-0"></span><span class="cal-key cal-1"></span><span class="cal-key cal-2"></span><span class="cal-key cal-3"></span><span class="cal-key cal-4"></span> More</p>
+      </div>
+    </section>
+    <section>
+      <div class="person-section-head"><h2>Recent activity</h2></div>
+      {% if activity.is_empty() %}
+      <p class="empty">No activity yet{% if !is_self %} that you can see{% endif %}.</p>
+      {% else %}
+      {% let events = activity %}{% include "feed.html" %}
+      {% endif %}
+    </section>
+
+    {% else if tab == "repositories" %}
+    {% if repo_count > 0 %}<div class="repo-filter-row">{% include "repo_filter.html" %}{% if is_self %}<a class="btn btn-primary" href="/new">New</a>{% endif %}</div>{% else if is_self %}<div class="toolbar"><div class="spacer"></div><a class="btn btn-primary" href="/new">New repository</a></div>{% endif %}
+    {% if repos.is_empty() %}
+    <p class="empty">{% if filter.narrowed() %}No repositories match. <a href="/{{ username }}?tab=repositories">Show all</a>{% else %}No repositories yet.{% endif %}</p>
+    {% else %}
+    <ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
+    {% endif %}
+
+    {% else %}
+    {% if starred.is_empty() %}
+    <p class="empty">{% if is_self %}You haven't{% else %}{{ username }} hasn't{% endif %} starred any repositories yet.{% if is_self %} Star repositories to keep track of them; <a href="/explore">explore</a> to find some.{% endif %}</p>
+    {% else %}
+    <ul class="card-list">{% for r in starred %}{% include "repo_card.html" %}{% endfor %}</ul>
+    {% endif %}
+    <div class="pager">
+      {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
+      {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
+    </div>
     {% endif %}
   </div>
 </div>
-<nav class="tabs profile-tabs">
-  <a href="/{{ username }}"{% if !stars_tab %} class="active"{% endif %}>Repositories <span class="count">{{ repo_count }}</span></a>
-  <a href="/{{ username }}?tab=stars"{% if stars_tab %} class="active"{% endif %}>Stars <span class="count">{{ star_count }}</span></a>
-</nav>
-{% if stars_tab %}
-{% if starred.is_empty() %}
-<p class="empty">{% if is_self %}You haven't{% else %}{{ username }} hasn't{% endif %} starred any repositories yet.{% if is_self %} Star repositories to keep track of them; <a href="/explore">explore</a> to find some.{% endif %}</p>
-{% else %}
-<ul class="card-list">{% for r in starred %}{% include "repo_card.html" %}{% endfor %}</ul>
-{% endif %}
-<div class="pager">
-  {% if let Some(u) = newer_url %}<a class="btn" href="{{ u }}">← Newer</a>{% endif %}
-  {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
-</div>
-{% else %}
-{% if !pinned.is_empty() %}
-<h2 class="pinned-title">Pinned</h2>
-<ul class="pinned">{% for r in pinned %}<li class="box pinned-card">{% include "pinned_card.html" %}</li>{% endfor %}</ul>
-{% endif %}
-{% if is_self %}<div class="section-head profile-actions"><span></span><a class="btn btn-small" href="/new">New</a></div>{% endif %}
-{% if repos.is_empty() %}
-<p class="empty">No repositories yet.</p>
-{% else %}
-<ul class="card-list">{% for r in repos %}{% include "repo_card.html" %}{% endfor %}</ul>
-{% endif %}
-{% if !activity.is_empty() %}
-<h2>Recent activity</h2>
-{% let events = activity %}{% include "feed.html" %}
-{% endif %}
-{% endif %}
 {% endblock %}

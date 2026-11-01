@@ -114,7 +114,10 @@ async fn warm(state: &AppState, repo_id: i64) -> AppResult<()> {
     if let Some(head) = head {
         let started = std::time::Instant::now();
         last_commits_for(state, &repo, head, "", BACKGROUND_WALK).await?;
-        tracing::debug!(repo = repo_id, "warmed last commits in {:?}", started.elapsed());
+        // The front page's sidebar: languages and contributors.
+        crate::repo_side::languages(state, &repo, head).await?;
+        state.core.repo_activity(&repo).await?;
+        tracing::debug!(repo = repo_id, "warmed the front page in {:?}", started.elapsed());
     }
     Ok(())
 }

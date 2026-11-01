@@ -176,7 +176,7 @@ impl Core {
         }
 
         let hash = hash_password(password.to_owned()).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE kind = 'user'")
             .fetch_one(&mut *tx)
             .await?;
@@ -289,7 +289,7 @@ impl Core {
             return invalid("Passwords must be at least 8 characters long.");
         }
         let hash = hash_password(new.to_owned()).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
             .bind(user_id)
             .bind(hash)

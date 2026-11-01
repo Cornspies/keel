@@ -242,7 +242,7 @@ fn check_gpg(sig: &DetachedSignature, ids: &[String], key: &SignedPublicKey, pay
 impl Core {
     pub async fn add_gpg_key(&self, user_id: i64, armored: &str) -> Result<GpgKey> {
         let parsed = parse_gpg_key(armored)?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let key = sqlx::query_as::<_, GpgKey>(
             "INSERT INTO gpg_keys (user_id, fingerprint, emails, public_key, expires_at, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING *",

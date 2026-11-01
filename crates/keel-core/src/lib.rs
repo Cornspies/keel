@@ -20,6 +20,7 @@ mod backup;
 mod cache;
 mod config;
 mod deploy_keys;
+#[macro_use]
 mod events;
 mod file_edits;
 mod identities;
@@ -36,6 +37,7 @@ mod notifications;
 mod milestones;
 mod mirrors;
 mod permissions;
+mod profiles;
 mod projects;
 mod protection;
 mod pulls;
@@ -49,6 +51,7 @@ mod signatures;
 mod signing;
 mod ssh_keys;
 mod statuses;
+mod system;
 mod tokens;
 mod totp;
 mod users;
@@ -82,6 +85,8 @@ pub use mirrors::{MIRROR_INTERVALS, Mirror, MirrorRemote, PushMirror};
 pub use permissions::{Access, OrgRole};
 pub use protection::{BranchRule, MergeCheck, check_update, pre_receive, rule_for};
 pub use events::Event;
+pub use system::StorageUsage;
+pub use profiles::{MAX_BIO, Profile, day_of};
 pub use releases::{Release, ReleaseAction, ReleaseAsset};
 pub use pulls::{PullRequest, pull_ref, related};
 pub use repos::{ExploreQuery, ExploreSort, IssueHit, IssueQuery, IssueSort, MAX_PINS, MAX_TOPICS, Repo, Stargazer, StateFilter, parse_topics};
@@ -304,6 +309,16 @@ impl Core {
         }
     }
 
+    /// Starts a transaction that writes. It takes the write lock up front
+    /// (`BEGIN IMMEDIATE`), waiting for other writers as long as the busy
+    /// timeout allows. A plain `BEGIN` reads first and upgrades when it
+    /// writes, which SQLite refuses at once (`database is locked`) if
+    /// another connection wrote in between, as the background workers often
+    /// do.
+    pub(crate) async fn write_tx(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        Ok(self.db.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
     /// The public key commits keel makes are signed with, in OpenSSH's
     /// format, for `allowed_signers` files.
     pub fn signing_public_key(&self) -> &str {
@@ -340,6 +355,40 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn write_transactions_wait_for_each_other() {
+        let (core, _dir) = Core::for_tests().await;
+        let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        const SET: &str = "UPDATE users SET bio = ?2 WHERE id = ?1";
+        const APPEND: &str = "UPDATE users SET bio = bio || ?2 WHERE id = ?1";
+        const READ: &str = "SELECT bio FROM users";
+
+        // The old way: a transaction that reads, then writes after another
+        // connection wrote, fails at once.
+        let mut stale = core.db.begin().await.unwrap();
+        sqlx::query(READ).fetch_all(&mut *stale).await.unwrap();
+        sqlx::query(SET).bind(ada.id).bind("other").execute(&core.db).await.unwrap();
+        let e = sqlx::query(SET).bind(ada.id).bind("stale").execute(&mut *stale).await.unwrap_err();
+        assert!(e.to_string().contains("locked"), "{e}");
+        drop(stale);
+
+        // Write transactions take the lock first, so the second waits.
+        let mut first = core.write_tx().await.unwrap();
+        sqlx::query(SET).bind(ada.id).bind("first").execute(&mut *first).await.unwrap();
+        let other = core.clone();
+        let second = tokio::spawn(async move {
+            let mut tx = other.write_tx().await.unwrap();
+            sqlx::query(READ).fetch_all(&mut *tx).await.unwrap();
+            sqlx::query(APPEND).bind(ada.id).bind(" then second").execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!second.is_finished(), "waits for the first");
+        first.commit().await.unwrap();
+        second.await.unwrap();
+        assert_eq!(core.profile(ada.id).await.unwrap().bio, "first then second");
+    }
 
     #[tokio::test]
     async fn relative_data_dir_becomes_absolute() {

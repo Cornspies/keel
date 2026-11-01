@@ -5,7 +5,7 @@ use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
-use keel_core::{OrgRole, Repo, User};
+use keel_core::{Repo, User};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
@@ -22,6 +22,9 @@ pub(crate) struct RepoCard {
     pub updated: String,
     pub topics: Vec<String>,
     pub stars: i64,
+    /// The main language and its colour, where it's been worked out
+    /// (cards of pinned repositories).
+    pub language: Option<(&'static str, &'static str)>,
 }
 
 impl From<&Repo> for RepoCard {
@@ -35,6 +38,7 @@ impl From<&Repo> for RepoCard {
             updated: relative_time(r.updated_at),
             topics: r.topics().map(str::to_owned).collect(),
             stars: r.stars,
+            language: None,
         }
     }
 }
@@ -370,43 +374,103 @@ pub async fn new_repo(
 struct UserPage {
     page: Page,
     username: String,
+    profile: keel_core::Profile,
+    /// The website without its scheme, to show.
+    website_label: String,
     joined: String,
     is_self: bool,
-    repos: Vec<RepoCard>,
     orgs: Vec<String>,
-    activity: Vec<crate::feed::EventView>,
-    /// Showing what they starred rather than their repositories.
-    stars_tab: bool,
+    avatar_version: i64,
+    /// `overview`, `repositories` or `stars`.
+    tab: &'static str,
     repo_count: usize,
     star_count: i64,
+    /// Overview: pinned repositories, or their most starred ones.
+    showcase: Vec<RepoCard>,
+    showcase_pinned: bool,
+    calendar: String,
+    contributions: i64,
+    activity: Vec<crate::feed::EventView>,
+    /// Repositories tab.
+    repos: Vec<RepoCard>,
+    filter: RepoFilter,
+    /// Stars tab.
     starred: Vec<RepoCard>,
     newer_url: Option<String>,
     older_url: Option<String>,
-    pinned: Vec<RepoCard>,
-    avatar_version: i64,
 }
+
+/// Shown when nothing is pinned.
+const POPULAR: usize = 6;
 
 const STARRED_PAGE: i64 = 30;
 
 #[derive(Deserialize)]
 pub struct ProfileQuery {
-    tab: Option<String>,
+    pub(crate) tab: Option<String>,
     page: Option<i64>,
+    /// The Repositories tab: find by name or description, …
+    q: Option<String>,
+    /// … only some (`sources`, `forks`, `archived`, `templates`), …
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    /// … in this order (`updated`, `name`, `stars`).
+    sort: Option<String>,
 }
 
-#[derive(Template)]
-#[template(path = "org.html")]
-struct OrgPage {
-    page: Page,
-    name: String,
-    created: String,
-    /// The viewer may create repositories here.
-    is_member: bool,
-    is_owner: bool,
-    repos: Vec<RepoCard>,
-    members: Vec<(String, &'static str)>,
-    pinned: Vec<RepoCard>,
-    avatar_version: i64,
+/// The search above a profile's repositories.
+pub(crate) struct RepoFilter {
+    pub q: String,
+    pub kind: &'static str,
+    pub sort: &'static str,
+    pub kinds: &'static [(&'static str, &'static str)],
+    pub sorts: &'static [(&'static str, &'static str)],
+}
+
+const REPO_KINDS: &[(&str, &str)] =
+    &[("all", "All"), ("sources", "Sources"), ("forks", "Forks"), ("archived", "Archived"), ("templates", "Templates")];
+const REPO_SORTS: &[(&str, &str)] = &[("updated", "Last updated"), ("name", "Name"), ("stars", "Stars")];
+
+impl RepoFilter {
+    pub(crate) fn from_query(q: &ProfileQuery) -> Self {
+        let pick = |options: &'static [(&'static str, &'static str)], value: Option<&str>| {
+            options.iter().find(|(v, _)| Some(*v) == value).unwrap_or(&options[0]).0
+        };
+        Self {
+            q: q.q.as_deref().unwrap_or_default().trim().to_owned(),
+            kind: pick(REPO_KINDS, q.kind.as_deref()),
+            sort: pick(REPO_SORTS, q.sort.as_deref()),
+            kinds: REPO_KINDS,
+            sorts: REPO_SORTS,
+        }
+    }
+
+    /// Something narrows the list.
+    pub(crate) fn narrowed(&self) -> bool {
+        !self.q.is_empty() || self.kind != "all"
+    }
+
+    pub(crate) fn apply(&self, repos: &mut Vec<Repo>) {
+        let q = self.q.to_lowercase();
+        repos.retain(|r| {
+            let kind = match self.kind {
+                "sources" => r.forked_from.is_none(),
+                "forks" => r.forked_from.is_some(),
+                "archived" => r.is_archived(),
+                "templates" => r.is_template,
+                _ => true,
+            };
+            kind && (q.is_empty()
+                || r.name.to_lowercase().contains(&q)
+                || r.description.to_lowercase().contains(&q)
+                || r.topics().any(|t| t == q))
+        });
+        match self.sort {
+            "name" => repos.sort_by_key(|r| r.name.to_lowercase()),
+            "stars" => repos.sort_by(|a, b| b.stars.cmp(&a.stars).then(b.updated_at.cmp(&a.updated_at))),
+            _ => repos.sort_by_key(|r| std::cmp::Reverse(r.updated_at)),
+        }
+    }
 }
 
 pub async fn user(
@@ -419,50 +483,119 @@ pub async fn user(
     if user.username != owner {
         return Ok(Redirect::permanent(&format!("/{}", user.username)).into_response());
     }
-    let repos = cards(&state.core.repos_of(user.id, viewer.as_ref()).await?);
     if user.is_org() {
-        let members = state.core.org_members(user.id).await?;
-        let role = viewer.as_ref().and_then(|v| members.iter().find(|(m, _)| m.id == v.id).map(|(_, r)| *r));
-        return html(OrgPage {
-            pinned: crate::profile::pinned_cards(&state, &user, viewer.as_ref()).await?,
-            avatar_version: user.avatar_version,
-            is_member: role.is_some(),
-            is_owner: role == Some(OrgRole::Owner) || viewer.as_ref().is_some_and(|v| v.is_admin),
-            page: Page::new(&state, viewer, user.username.clone()),
-            created: date(user.created_at),
-            name: user.username,
-            repos,
-            members: members.into_iter().map(|(u, r)| (u.username, r.as_str())).collect(),
-        });
+        return crate::orgs::profile(&state, viewer, user, &q).await;
     }
+    let mut repos = state.core.repos_of(user.id, viewer.as_ref()).await?;
     let orgs = state.core.orgs_of(user.id).await?.into_iter().map(|(o, _)| o.username).collect();
-    let stars_tab = q.tab.as_deref() == Some("stars");
-    let page_no = q.page.unwrap_or(1).max(1);
-    let (activity, starred, more) = if stars_tab {
-        let mut starred = state.core.starred_repos(user.id, viewer.as_ref(), (page_no - 1) * STARRED_PAGE, STARRED_PAGE + 1).await?;
-        let more = starred.len() as i64 > STARRED_PAGE;
-        starred.truncate(STARRED_PAGE as usize);
-        (Vec::new(), cards(&starred), more)
-    } else {
-        let activity = state.core.user_events(user.id, viewer.as_ref(), None, 20).await?.iter().map(crate::feed::view).collect();
-        (activity, Vec::new(), false)
+    let tab = match q.tab.as_deref() {
+        Some("repositories") => "repositories",
+        Some("stars") => "stars",
+        _ => "overview",
     };
-    let tab_url = format!("/{}?tab=stars", user.username);
-    html(UserPage {
-        pinned: if stars_tab { Vec::new() } else { crate::profile::pinned_cards(&state, &user, viewer.as_ref()).await? },
+    let page_no = q.page.unwrap_or(1).max(1);
+    let profile = state.core.profile(user.id).await?;
+    let mut page = UserPage {
+        website_label: crate::orgs::website_label(&profile.website),
+        profile,
         avatar_version: user.avatar_version,
         star_count: state.core.starred_count(user.id, viewer.as_ref()).await?,
         repo_count: repos.len(),
-        newer_url: (stars_tab && page_no > 1).then(|| format!("{tab_url}&page={}", page_no - 1)),
-        older_url: more.then(|| format!("{tab_url}&page={}", page_no + 1)),
-        stars_tab,
-        starred,
-        activity,
         is_self: viewer.as_ref().is_some_and(|v| v.id == user.id),
-        page: Page::new(&state, viewer, user.username.clone()),
         joined: date(user.created_at),
-        username: user.username,
-        repos,
+        username: user.username.clone(),
         orgs,
-    })
+        tab,
+        showcase: Vec::new(),
+        showcase_pinned: false,
+        calendar: String::new(),
+        contributions: 0,
+        activity: Vec::new(),
+        repos: Vec::new(),
+        starred: Vec::new(),
+        newer_url: None,
+        older_url: None,
+        filter: RepoFilter::from_query(&q),
+        page: Page::new(&state, viewer.clone(), user.username.clone()),
+    };
+    match tab {
+        "repositories" => {
+            page.filter.apply(&mut repos);
+            page.repos = crate::profile::cards_with_languages(&state, &repos, crate::orgs::LANGUAGE_SAMPLE).await?;
+        }
+        "stars" => {
+            let mut starred = state.core.starred_repos(user.id, viewer.as_ref(), (page_no - 1) * STARRED_PAGE, STARRED_PAGE + 1).await?;
+            let more = starred.len() as i64 > STARRED_PAGE;
+            starred.truncate(STARRED_PAGE as usize);
+            page.starred = cards(&starred);
+            let tab_url = format!("/{}?tab=stars", user.username);
+            page.newer_url = (page_no > 1).then(|| format!("{tab_url}&page={}", page_no - 1));
+            page.older_url = more.then(|| format!("{tab_url}&page={}", page_no + 1));
+        }
+        _ => {
+            page.showcase = crate::profile::pinned_cards(&state, &user, viewer.as_ref()).await?;
+            page.showcase_pinned = !page.showcase.is_empty();
+            if page.showcase.is_empty() {
+                let mut popular = repos;
+                popular.retain(|r| !r.is_archived() && r.forked_from.is_none());
+                popular.sort_by(|a, b| b.stars.cmp(&a.stars).then(b.updated_at.cmp(&a.updated_at)));
+                popular.truncate(POPULAR);
+                page.showcase = crate::profile::showcase(&state, &popular).await?;
+            }
+            let counts = state.core.contributions(user.id, viewer.as_ref()).await?;
+            (page.calendar, page.contributions) = crate::calendar::calendar(&counts, keel_core::day_of(crate::now()));
+            page.activity = state.core.user_events(user.id, viewer.as_ref(), None, 20).await?.iter().map(crate::feed::view).collect();
+        }
+    }
+    html(page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str, stars: i64, updated_at: i64) -> Repo {
+        Repo {
+            id: 0,
+            owner_id: 0,
+            owner: "acme".into(),
+            name: name.into(),
+            description: String::new(),
+            is_private: false,
+            created_at: 0,
+            updated_at,
+            forked_from: None,
+            topic_names: String::new(),
+            stars,
+            is_template: false,
+            template_id: None,
+            archived_at: None,
+        }
+    }
+
+    fn query(q: &str, kind: &str, sort: &str) -> ProfileQuery {
+        let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        ProfileQuery { tab: None, page: None, q: some(q), kind: some(kind), sort: some(sort) }
+    }
+
+    #[test]
+    fn repository_filter() {
+        let mut fork = repo("Engine-fork", 9, 1);
+        fork.forked_from = Some(1);
+        let mut docs = repo("docs", 2, 3);
+        docs.topic_names = "engine web".into();
+        let all = vec![repo("engine", 5, 2), fork, docs, repo("web", 0, 4)];
+        let names = |q: ProfileQuery| {
+            let filter = RepoFilter::from_query(&q);
+            let mut repos = all.clone();
+            filter.apply(&mut repos);
+            repos.into_iter().map(|r| r.name).collect::<Vec<_>>()
+        };
+        assert_eq!(names(query("", "", "")), ["web", "docs", "engine", "Engine-fork"], "recently updated first");
+        assert_eq!(names(query("ENGINE", "", "name")), ["docs", "engine", "Engine-fork"], "names, and topics exactly");
+        assert_eq!(names(query("", "sources", "stars")), ["engine", "docs", "web"]);
+        assert_eq!(names(query("", "forks", "")), ["Engine-fork"]);
+        let odd = RepoFilter::from_query(&query(" ", "nonsense", "nonsense"));
+        assert!(!odd.narrowed() && odd.kind == "all" && odd.sort == "updated");
+    }
 }

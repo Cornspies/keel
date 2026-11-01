@@ -106,7 +106,7 @@ macro_rules! explore_page {
 impl Core {
     /// Replaces a repository's topics.
     pub async fn set_topics(&self, repo_id: i64, topics: &[String]) -> Result<()> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("DELETE FROM repo_topics WHERE repo_id = ?1").bind(repo_id).execute(&mut *tx).await?;
         for t in topics {
             sqlx::query("INSERT OR IGNORE INTO repo_topics (repo_id, topic) VALUES (?1, ?2)")

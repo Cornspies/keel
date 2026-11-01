@@ -6,6 +6,7 @@
     <a href="/admin"{% if nav == "overview" %} class="active"{% endif %}>Overview</a>
     <a href="/admin/users"{% if nav == "users" %} class="active"{% endif %}>Accounts</a>
     <a href="/admin/repos"{% if nav == "repos" %} class="active"{% endif %}>Repositories</a>
+    <a href="/admin/system"{% if nav == "system" %} class="active"{% endif %}>System</a>
   </nav>
   <div class="settings-main">
   {% block admin %}{% endblock %}

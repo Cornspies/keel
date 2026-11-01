@@ -26,7 +26,7 @@ impl Core {
         if repo_ids.len() > MAX_PINS {
             return invalid(format!("At most {MAX_PINS} repositories can be pinned."));
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("DELETE FROM pinned_repos WHERE owner_id = ?1").bind(owner.id).execute(&mut *tx).await?;
         for (position, id) in repo_ids.iter().enumerate() {
             // Silently skips repositories that aren't the owner's.

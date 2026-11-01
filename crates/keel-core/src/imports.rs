@@ -424,7 +424,7 @@ impl Core {
     /// Adds an issue or pull request with its number. `false` if the
     /// number is taken.
     pub async fn import_issue(&self, repo_id: i64, i: &ImportedIssue) -> Result<bool> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let state = match i.state.as_str() {
             "merged" if i.pull.is_some() => "merged",
             "closed" | "merged" => "closed",

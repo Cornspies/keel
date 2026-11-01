@@ -7,10 +7,11 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use keel_core::{MAX_PINS, Repo, User};
+use serde::Deserialize;
 
 use crate::error::{AppResult, html};
 use crate::orgs::owned_org;
-use crate::pages::{RepoCard, cards};
+use crate::pages::RepoCard;
 use crate::session::SignedIn;
 use crate::{AppError, AppState, Page};
 
@@ -72,6 +73,9 @@ struct ProfilePage {
     max_pins: usize,
     error: Option<String>,
     notice: Option<&'static str>,
+    /// Name, bio (description), location and website.
+    about: keel_core::Profile,
+    max_bio: usize,
 }
 
 /// Whose profile `who` may change from `base`: their own, or an
@@ -91,6 +95,19 @@ fn base_url(org: Option<&str>) -> String {
 }
 
 async fn profile_page(state: &AppState, user: User, who: &User, org: Option<&str>, error: Option<String>, notice: Option<&'static str>) -> AppResult {
+    let about = state.core.profile(who.id).await?;
+    profile_page_with(state, user, who, org, error, notice, about).await
+}
+
+async fn profile_page_with(
+    state: &AppState,
+    user: User,
+    who: &User,
+    org: Option<&str>,
+    error: Option<String>,
+    notice: Option<&'static str>,
+    about: keel_core::Profile,
+) -> AppResult {
     let pinned: Vec<i64> = state.core.pinned_repos(who.id, Some(who)).await?.iter().map(|r| r.id).collect();
     let mut repos: Vec<Repo> = state.core.repos_of(who.id, Some(&user)).await?;
     repos.sort_by_key(|r| r.name.to_lowercase());
@@ -109,17 +126,68 @@ async fn profile_page(state: &AppState, user: User, who: &User, org: Option<&str
         max_pins: MAX_PINS,
         error,
         notice,
+        about,
+        max_bio: keel_core::MAX_BIO,
     })
 }
 
-pub async fn edit(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
-    let who = user.clone();
-    profile_page(&state, user, &who, None, None, None).await
+#[derive(Deserialize)]
+pub struct AboutForm {
+    #[serde(default)]
+    full_name: String,
+    #[serde(default)]
+    bio: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    website: String,
 }
 
-pub async fn edit_org(State(state): State<AppState>, SignedIn(user): SignedIn, Path(org): Path<String>) -> AppResult {
+/// `POST /settings/profile/about`: name, bio, location and website.
+pub async fn save_about(State(state): State<AppState>, SignedIn(user): SignedIn, Form(f): Form<AboutForm>) -> AppResult {
+    about(&state, user, None, f).await
+}
+
+/// `POST /org/{org}/settings/profile/about`: the same for an organization.
+pub async fn save_org_about(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path(org): Path<String>,
+    Form(f): Form<AboutForm>,
+) -> AppResult {
+    about(&state, user, Some(&org), f).await
+}
+
+async fn about(state: &AppState, user: User, org: Option<&str>, f: AboutForm) -> AppResult {
+    let who = subject(state, &user, org).await?;
+    let about = keel_core::Profile { full_name: f.full_name, bio: f.bio, location: f.location, website: f.website };
+    match state.core.save_profile(&who, &about).await {
+        Ok(_) => Ok(Redirect::to(&format!("{}?saved=about", base_url(org))).into_response()),
+        Err(keel_core::Error::Invalid(msg)) => profile_page_with(state, user, &who, org, Some(msg), None, about).await,
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SavedQuery {
+    saved: Option<String>,
+}
+
+pub async fn edit(State(state): State<AppState>, SignedIn(user): SignedIn, axum::extract::Query(q): axum::extract::Query<SavedQuery>) -> AppResult {
+    let who = user.clone();
+    let notice = (q.saved.as_deref() == Some("about")).then_some("Saved.");
+    profile_page(&state, user, &who, None, None, notice).await
+}
+
+pub async fn edit_org(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path(org): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SavedQuery>,
+) -> AppResult {
     let who = subject(&state, &user, Some(&org)).await?;
-    profile_page(&state, user, &who, Some(&org), None, None).await
+    let notice = (q.saved.as_deref() == Some("about")).then_some("Saved.");
+    profile_page(&state, user, &who, Some(&org), None, notice).await
 }
 
 async fn upload(state: &AppState, user: User, org: Option<&str>, mut form: Multipart) -> AppResult {
@@ -189,5 +257,35 @@ pub async fn org_pins(
 
 /// The pinned repositories of a profile, as cards.
 pub(crate) async fn pinned_cards(state: &AppState, owner: &User, viewer: Option<&User>) -> AppResult<Vec<RepoCard>> {
-    Ok(cards(&state.core.pinned_repos(owner.id, viewer).await?))
+    showcase(state, &state.core.pinned_repos(owner.id, viewer).await?).await
+}
+
+/// Cards for a few repositories, with each one's main language (from the
+/// cache the front pages fill; worked out if missing).
+pub(crate) async fn showcase(state: &AppState, repos: &[keel_core::Repo]) -> AppResult<Vec<RepoCard>> {
+    cards_with_languages(state, repos, usize::MAX).await
+}
+
+/// Cards with each repository's main language, working out at most
+/// `budget` that aren't cached yet: each takes a walk of the files, so
+/// long lists fill in over a few visits instead of all at once.
+pub(crate) async fn cards_with_languages(state: &AppState, repos: &[keel_core::Repo], mut budget: usize) -> AppResult<Vec<RepoCard>> {
+    let mut out = Vec::with_capacity(repos.len());
+    for r in repos {
+        let mut card = RepoCard::from(r);
+        let head = crate::repo::with_git(state, r, |g| Ok(g.default_branch()?.and_then(|b| g.resolve_rev(&b)))).await?;
+        if let Some(head) = head {
+            let langs = match state.languages.get(&head) {
+                Some(hit) => Some(hit),
+                None if budget > 0 => {
+                    budget -= 1;
+                    Some(crate::repo_side::languages(state, r, head).await?)
+                }
+                None => None,
+            };
+            card.language = langs.and_then(|l| l.first().map(|l| (l.name, l.color)));
+        }
+        out.push(card);
+    }
+    Ok(out)
 }

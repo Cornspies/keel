@@ -32,7 +32,7 @@
       <p class="hint">keel copies its branches and tags and keeps them in sync. Nobody can push to a mirror.</p>
       <label>Clone URL <input name="mirror_url" value="{{ mirror_url }}" placeholder="https://github.com/team/project.git"></label>
       <div class="form-row">
-        <label>Username <span class="hint">(if needed)</span> <input name="mirror_username" autocomplete="off"></label>
+        <label><span>Username <span class="hint">(if needed)</span></span> <input name="mirror_username" autocomplete="off"></label>
         <label>Password or token <input name="mirror_password" type="password" autocomplete="new-password"></label>
       </div>
       <label>Sync <select name="mirror_interval">{% for (secs, label) in intervals %}<option value="{{ secs }}"{% if *secs == 28800 %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>

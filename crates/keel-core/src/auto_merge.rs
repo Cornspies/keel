@@ -33,7 +33,7 @@ impl Core {
         if !issue.is_open() {
             return invalid("This pull request is not open.");
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let changed = sqlx::query("UPDATE pull_requests SET is_draft = ?2 WHERE issue_id = ?1 AND is_draft != ?2")
             .bind(issue.id)
             .bind(draft)
@@ -75,7 +75,7 @@ impl Core {
         if pull.is_draft {
             return invalid("Drafts can't be merged automatically; mark it ready for review first.");
         }
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let was_on = pull.auto_merge_by.is_some();
         sqlx::query(
             "UPDATE pull_requests SET auto_merge_by = ?2, auto_merge_style = ?3, auto_merge_delete = ?4 WHERE issue_id = ?1",
@@ -109,7 +109,7 @@ impl Core {
     }
 
     async fn stop_auto_merge(&self, issue: &Issue, actor: Option<i64>) -> Result<()> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         if clear_auto_merge(&mut tx, issue.id).await? {
             insert_comment(&mut tx, issue.id, actor, "auto_merge_disabled", "").await?;
             tx.commit().await?;

@@ -1,0 +1,37 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<h1>System</h1>
+{% if in_memory %}<p class="flash flash-warn">The data directory is in memory ({{ disk }}): everything in it is lost when the machine restarts. Use <span class="mono">--data-dir</span> on a disk.</p>{% endif %}
+<div class="stat-grid">
+  <div class="stat"><strong>{{ memory }}</strong> memory</div>
+  <div class="stat"><strong>{{ threads }}</strong> threads<span class="muted small">{{ tasks }} async tasks</span></div>
+  <div class="stat"><strong>{{ storage_total }}</strong> stored</div>
+  <div class="stat"><strong class="stat-text">{{ uptime }}</strong> running</div>
+</div>
+
+<h2>Process</h2>
+<dl class="facts system-facts">
+  {% for r in process %}<dt>{{ r.label }}</dt><dd class="num">{{ r.value }}</dd>{% endfor %}
+</dl>
+
+<h2>Storage</h2>
+<div class="table-scroll">
+<table class="usage-table">
+  <tbody>
+  {% for s in storage %}{% if s.bytes > 0 %}
+    <tr><th scope="row">{{ s.label }}</th><td class="num">{{ s.size }}</td><td class="num muted">{{ s.percent }}</td><td class="usage-meter"><meter min="0" max="{{ storage_bytes }}" value="{{ s.bytes }}" aria-label="{{ s.label }}: {{ s.percent }}"></meter></td></tr>
+  {% endif %}{% endfor %}
+  </tbody>
+  <tfoot><tr><th scope="row">Total</th><td class="num">{{ storage_total }}</td><td></td><td class="muted small">{{ disk }}</td></tr></tfoot>
+</table>
+</div>
+
+<h2>Caches</h2>
+<div class="table-scroll">
+<table class="usage-table">
+  <tbody>
+  {% for c in caches %}<tr><th scope="row">{{ c.label }}</th><td class="num">{{ c.entries }}</td><td class="num muted">{{ c.size }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

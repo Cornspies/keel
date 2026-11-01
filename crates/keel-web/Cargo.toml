@@ -35,6 +35,10 @@ time.workspace = true
 sha2.workspace = true
 hex.workspace = true
 form_urlencoded.workspace = true
+flate2.workspace = true
+brotli.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
-flate2.workspace = true

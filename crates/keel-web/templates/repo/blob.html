@@ -1,44 +1,40 @@
 {% extends "base.html" %}
+{% block body_class %}page-wide{% endblock %}
 {% block content %}
 {% include "repo/header.html" %}
-<div class="toolbar">
-  {% include "repo/refswitch.html" %}
-  {% include "repo/crumbs.html" %}
-</div>
-<div class="box">
-  {% include "repo/latest.html" %}
-  <div class="box-head file-head">
-    <span class="muted small">{% if line_count > 0 %}{{ line_count }} lines · {% endif %}{{ size }}{% if let Some(who) = locked_by %} · <span class="badge" title="Locked with git lfs lock">locked by {{ who }}</span>{% endif %}</span>
-    <span class="spacer"></span>
-    {% if is_markdown %}
-      {% if plain %}<a class="btn btn-small" href="?">Preview</a>{% else %}<a class="btn btn-small" href="?plain=1">Source</a>{% endif %}
-    {% endif %}
-    {% if let Some(u) = blame_url %}<a class="btn btn-small" href="{{ u }}" rel="nofollow">Blame</a>{% endif %}
-    <a class="btn btn-small" href="{{ raw_url }}">Raw</a>
-    {% if let Some(u) = edit_url %}<a class="btn btn-small" href="{{ u }}" title="Edit this file">Edit</a>{% endif %}
-    {% if let Some(u) = delete_url %}<a class="btn btn-small btn-danger" href="{{ u }}" title="Delete this file">Delete</a>{% endif %}
+<div class="code-view">
+  {% include "repo/file_tree.html" %}
+  <div class="code-main">
+    <div class="toolbar">
+      {% include "repo/refswitch.html" %}
+      {% include "repo/crumbs.html" %}
+    </div>
+    <div class="box">
+      {% include "repo/latest.html" %}
+      {% include "repo/file_bar.html" %}
+      {% match content %}
+        {% when BlobContent::Lines(lines) %}
+        <div class="code-scroll">
+          <table class="code">
+            <tbody>
+            {% for line in lines.iter() %}
+              <tr id="L{{ loop.index }}"><td class="ln"><a href="#L{{ loop.index }}">{{ loop.index }}</a></td><td class="lc">{{ line|safe }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% when BlobContent::Rendered(html) %}
+        <article class="markdown">{{ html|safe }}</article>
+        {% when BlobContent::Image %}
+        <div class="blob-image"><img src="{{ raw_url }}" alt="{{ path }}"></div>
+        {% when BlobContent::Binary %}
+        <p class="blob-note">Binary file not shown. <a href="{{ raw_url }}">Download</a></p>
+        {% when BlobContent::Lfs { size, stored } %}
+        <p class="blob-note">Stored with Git LFS ({{ size }}).{% if *stored %} <a href="{{ raw_url }}">Download</a>{% else %} The file hasn't been uploaded to this server.{% endif %}</p>
+        {% when BlobContent::TooLarge %}
+        <p class="blob-note">This file is too large to display. <a href="{{ raw_url }}">View raw</a></p>
+        {% endmatch %}
+    </div>
   </div>
-  {% match content %}
-  {% when BlobContent::Lines(lines) %}
-  <div class="code-scroll">
-    <table class="code">
-      <tbody>
-      {% for line in lines.iter() %}
-        <tr id="L{{ loop.index }}"><td class="ln"><a href="#L{{ loop.index }}">{{ loop.index }}</a></td><td class="lc">{{ line|safe }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% when BlobContent::Rendered(html) %}
-  <article class="markdown">{{ html|safe }}</article>
-  {% when BlobContent::Image %}
-  <div class="blob-image"><img src="{{ raw_url }}" alt="{{ path }}"></div>
-  {% when BlobContent::Binary %}
-  <p class="blob-note">Binary file not shown. <a href="{{ raw_url }}">Download</a></p>
-  {% when BlobContent::Lfs { size, stored } %}
-  <p class="blob-note">Stored with Git LFS ({{ size }}).{% if *stored %} <a href="{{ raw_url }}">Download</a>{% else %} The file hasn't been uploaded to this server.{% endif %}</p>
-  {% when BlobContent::TooLarge %}
-  <p class="blob-note">This file is too large to display. <a href="{{ raw_url }}">View raw</a></p>
-  {% endmatch %}
 </div>
 {% endblock %}

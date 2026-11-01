@@ -5,11 +5,13 @@ mod admin;
 mod api;
 mod archive;
 mod assets;
+mod calendar;
 mod deploy_keys;
 mod blame;
 mod edit;
 mod error;
 mod explore;
+mod file_view;
 mod feed;
 mod forks;
 mod githttp;
@@ -35,9 +37,11 @@ mod pulls;
 mod releases;
 mod render;
 mod repo;
+mod repo_side;
 mod search;
 mod session;
 mod stars;
+mod system;
 mod settings;
 mod signatures;
 mod statuses;
@@ -58,6 +62,7 @@ use axum::routing::{get, post};
 use keel_core::{Core, User};
 use keel_git::{CommitSummary, Oid};
 use moka::sync::Cache;
+use tower_http::CompressionLevel;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
@@ -85,6 +90,8 @@ pub struct Inner {
     last_commits: Cache<(Oid, String), Arc<HashMap<String, CommitSummary>>>,
     highlighted: Cache<(Oid, String), Arc<Vec<String>>>,
     markdown: Cache<(Oid, String), Arc<String>>,
+    /// Languages per commit, for repositories' front pages.
+    languages: Cache<Oid, Arc<Vec<repo_side::Language>>>,
     /// Blame per (commit, path).
     blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
     /// Limits how many blames run at once.
@@ -100,6 +107,9 @@ pub struct Inner {
     /// request so that page headers can show it.
     unread: Cache<i64, i64>,
     started: std::time::Instant,
+    /// The data directory's size, for the System page, and when it was
+    /// measured.
+    storage: tokio::sync::Mutex<Option<(keel_core::StorageUsage, std::time::Instant)>>,
     /// Limits how many archives are built at once.
     archives: Arc<tokio::sync::Semaphore>,
 }
@@ -146,6 +156,7 @@ impl AppState {
                 .max_capacity(mib(32))
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
+            languages: Cache::new(10_000),
             blames: Cache::builder()
                 .max_capacity(mib(64))
                 .weigher(|_, v: &Arc<keel_git::Blame>| {
@@ -157,6 +168,7 @@ impl AppState {
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
             started: std::time::Instant::now(),
+            storage: tokio::sync::Mutex::new(None),
             archives: Arc::new(tokio::sync::Semaphore::new(archive::CONCURRENT_ARCHIVES)),
         }))
     }
@@ -177,6 +189,7 @@ pub(crate) struct Page {
     pub registration_open: bool,
     pub css_url: &'static str,
     pub js_url: &'static str,
+    pub icon_url: &'static str,
     /// The viewer's unread notifications.
     pub unread: i64,
     /// Whether the server sends email (password resets).
@@ -207,6 +220,7 @@ impl Page {
             registration_open: state.core.registration_open(),
             css_url: state.assets.css_url,
             js_url: state.assets.js_url,
+            icon_url: state.assets.icon_url,
         }
     }
 }
@@ -238,6 +252,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin", get(admin::overview))
         .route("/admin/settings", post(admin::save_settings))
         .route("/admin/users", get(admin::users).post(admin::create_user))
+        .route("/admin/users/invite", post(admin::invite_user))
+        .route("/admin/system", get(system::system))
         .route("/admin/users/{id}/admin", post(admin::set_admin))
         .route("/admin/users/{id}/disable", post(admin::set_disabled))
         .route("/admin/users/{id}/delete", post(admin::delete_user))
@@ -256,10 +272,12 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/profile/avatar", post(profile::upload_avatar))
         .route("/settings/profile/avatar/delete", post(profile::remove_avatar))
         .route("/settings/profile/pins", post(profile::pins))
+        .route("/settings/profile/about", post(profile::save_about))
         .route("/org/{org}/settings/profile", get(profile::edit_org))
         .route("/org/{org}/settings/profile/avatar", post(profile::upload_org_avatar))
         .route("/org/{org}/settings/profile/avatar/delete", post(profile::remove_org_avatar))
         .route("/org/{org}/settings/profile/pins", post(profile::org_pins))
+        .route("/org/{org}/settings/profile/about", post(profile::save_org_about))
         .route("/avatars/{name}", get(profile::avatar))
         .route("/settings/account", get(settings::account))
         .route("/settings/account/email", post(settings::change_email))
@@ -280,12 +298,14 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/tokens", get(settings::tokens).post(settings::create_token))
         .route("/settings/tokens/{id}/delete", post(settings::delete_token))
         .route("/static/{file}", get(assets::serve))
+        .route("/favicon.ico", get(assets::favicon))
         .route("/{owner}", get(pages::user))
         .route("/{owner}/{repo}", get(repo::home))
         .route("/{owner}/{repo}/tree/{*rest}", get(repo::tree))
         .route("/{owner}/{repo}/blob/{*rest}", get(repo::blob))
         .route("/{owner}/{repo}/raw/{*rest}", get(repo::raw))
         .route("/{owner}/{repo}/blame/{*rest}", get(blame::blame))
+        .route("/{owner}/{repo}/tree-list/{*rest}", get(file_view::tree_list))
         .route("/{owner}/{repo}/archive/{*rest}", get(archive::download))
         .route("/{owner}/{repo}/last-commits/{*rest}", get(repo::last_commits_json))
         .route("/{owner}/{repo}/commits", get(repo::commits_default))
@@ -420,7 +440,7 @@ pub fn router(state: AppState) -> Router {
         .route("/{owner}/{repo}/collaborators/{user}/remove", post(repo::remove_collaborator))
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn_with_state(state.clone(), web_guard))
-        .layer(CompressionLayer::new());
+        .layer(compression());
 
     // Git traffic is already compressed and must not get browser headers.
     let git = Router::new()
@@ -438,13 +458,21 @@ pub fn router(state: AppState) -> Router {
         .route("/signing-key.pub", get(signing_key));
 
     // The API authenticates with tokens only, so needs no CSRF check.
-    let api = api::routes().layer(CompressionLayer::new());
+    let api = api::routes().layer(compression());
 
     web.merge(git)
         .merge(api)
         .layer(middleware::from_fn_with_state(state.clone(), track))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Compresses pages and API responses as they're sent. Brotli's default
+/// (quality 11) is meant for compressing files ahead of time and costs more
+/// than rendering most pages; quality 4 is several times faster and still
+/// smaller than gzip. Static files come compressed already (`assets`).
+fn compression() -> CompressionLayer {
+    CompressionLayer::new().quality(CompressionLevel::Precise(4))
 }
 
 /// Counts requests and their durations, by route pattern.
@@ -547,6 +575,11 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     ];
     for (name, value) in defaults {
         headers.entry(name).or_insert(HeaderValue::from_static(value));
+    }
+    // Pages say which links may be loaded ahead of a click (`assets`).
+    let is_html = headers.get(header::CONTENT_TYPE).is_some_and(|v| v.as_bytes().starts_with(b"text/html"));
+    if is_html && let Ok(rules) = HeaderValue::from_str(&format!("\"{}\"", state.assets.rules_url)) {
+        headers.insert("speculation-rules", rules);
     }
     res
 }

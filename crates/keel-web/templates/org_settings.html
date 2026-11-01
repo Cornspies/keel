@@ -2,7 +2,7 @@
 {% block content %}
 <div class="narrow-left">
   <h1><a href="/{{ name }}">{{ name }}</a> settings</h1>
-  <p><a href="/org/{{ name }}/settings/profile">Picture and pinned repositories</a></p>
+  <p><a href="/org/{{ name }}/settings/profile">Name, description, picture and pinned repositories</a></p>
 
   <h2>Members</h2>
   {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}

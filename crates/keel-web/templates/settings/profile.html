@@ -4,6 +4,23 @@
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
 {% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
 
+{% if org.is_none() %}
+<h2>About you</h2>
+<p class="hint">Shown on <a href="/{{ name }}">your profile</a>, to everyone.</p>
+{% else %}
+<h2>About the organization</h2>
+<p class="hint">Shown at the top of <a href="/{{ name }}">its pages</a>, to everyone.</p>
+{% endif %}
+<form method="post" action="{{ base }}/about" class="form narrow-left">
+  <label>Name <span class="hint">(optional) {% if org.is_none() %}The name people know you by.{% else %}Its full name, if not just {{ name }}.{% endif %}</span> <input name="full_name" value="{{ about.full_name }}" maxlength="100"{% if org.is_none() %} autocomplete="name"{% else %} autocomplete="organization"{% endif %}></label>
+  <label>{% if org.is_none() %}Bio{% else %}Description{% endif %} <span class="hint">(optional) Up to {{ max_bio }} characters.</span> <textarea name="bio" rows="3" maxlength="{{ max_bio }}">{{ about.bio }}</textarea></label>
+  <div class="form-row">
+    <label>Location <span class="hint">(optional)</span> <input name="location" value="{{ about.location }}" maxlength="100"></label>
+    <label>Website <span class="hint">(optional)</span> <input name="website" type="url" value="{{ about.website }}" placeholder="https://" maxlength="255"></label>
+  </div>
+  <button class="btn btn-primary">Save</button>
+</form>
+
 <h2>Picture</h2>
 <div class="avatar-edit">
   <img class="avatar avatar-large" src="/avatars/{{ name }}?v={{ avatar_version }}" width="96" height="96" alt="">
@@ -17,7 +34,7 @@
   </div>
 </div>
 
-<h2>Pinned repositories</h2>
+<h2 id="pins">Pinned repositories</h2>
 <p class="hint">Shown at the top of <a href="/{{ name }}">the profile</a>, up to {{ max_pins }}; private ones only to those who can see them.</p>
 {% if choices.is_empty() %}
 <p class="empty">No repositories to pin yet.</p>

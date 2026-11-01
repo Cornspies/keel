@@ -82,7 +82,7 @@ impl Core {
             return Err(Error::NotFound);
         }
         validate_comment(body)?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (id,): (i64,) = sqlx::query_as(
             "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at,
                 path, side, line, commit_id, blob_id, hunk)
@@ -114,7 +114,7 @@ impl Core {
         }
         validate_comment(body)?;
         let root = to.reply_to.unwrap_or(to.id);
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (id,): (i64,) = sqlx::query_as(
             "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at,
                 path, side, line, commit_id, blob_id, hunk, reply_to)
@@ -158,7 +158,7 @@ impl Core {
             },
             None => None,
         };
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let id = insert_comment(&mut tx, issue.id, Some(author.id), verdict.as_str(), body).await?;
         sqlx::query("UPDATE comments SET commit_id = ?2 WHERE id = ?1")
             .bind(id)
@@ -228,7 +228,7 @@ impl Core {
         }
         let candidates = self.reviewer_candidates(repo, issue).await?;
         let current: Vec<i64> = self.review_requests(issue.id).await?.into_iter().map(|(id, _)| id).collect();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let mut changed = Vec::new();
         for user in candidates {
             let (was, is) = (current.contains(&user.id), user_ids.contains(&user.id));

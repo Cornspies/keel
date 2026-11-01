@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "repo/header.html" %}
-<h2>Forks</h2>
+<div class="toolbar"><h2 class="toolbar-title">Forks</h2></div>
 {% if forks.is_empty() %}
 <p class="empty">No forks yet.</p>
 {% else %}

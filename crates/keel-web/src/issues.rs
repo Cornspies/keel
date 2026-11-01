@@ -197,6 +197,8 @@ pub(crate) struct Conversation {
     /// An open pull request that is still a draft.
     pub draft: bool,
     pub author: String,
+    /// Their profile (or, if imported, where they are elsewhere).
+    pub author_url: String,
     pub opened: String,
     pub comment_count: i64,
     pub timeline: Vec<TimelineItem>,
@@ -517,6 +519,7 @@ pub(crate) async fn conversation(
         state: issue.state.clone(),
         draft: issue.is_draft && issue.is_open(),
         author: author_name(&issue.author, &issue.original_author),
+        author_url: person(&issue.author, &issue.original_author).url,
         opened: relative_time(issue.created_at),
         comment_count: issue.comment_count,
         timeline,

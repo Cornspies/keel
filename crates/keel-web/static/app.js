@@ -30,6 +30,123 @@ for (const input of document.querySelectorAll("input[data-fragment]")) {
   if (input.value) input.closest("[data-fragment-field]").hidden = true;
 }
 
+// "Copy raw file": the file's text to the clipboard. The button is hidden
+// without JavaScript. The text is handed over as a promise where browsers
+// allow it, so the click still counts as the reason for copying.
+for (const button of document.querySelectorAll("[data-copy-raw]")) button.hidden = false;
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy-raw]");
+  if (!button) return;
+  const text = fetch(button.dataset.copyRaw, { credentials: "same-origin" }).then((r) => {
+    if (!r.ok) throw new Error(r.status);
+    return r.text();
+  });
+  const icon = button.querySelector(".glyph");
+  const show = (copied) => {
+    button.title = copied ? "Copied" : "Couldn't copy the file";
+    button.classList.toggle("copied", copied);
+    icon.classList.toggle("glyph-check", copied);
+    setTimeout(() => {
+      button.title = "Copy raw file";
+      button.classList.remove("copied");
+      icon.classList.remove("glyph-check");
+    }, 2000);
+  };
+  try {
+    if (window.ClipboardItem && navigator.clipboard?.write) {
+      const blob = text.then((t) => new Blob([t], { type: "text/plain" }));
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+    } else {
+      await navigator.clipboard.writeText(await text);
+    }
+    show(true);
+  } catch {
+    show(false);
+  }
+});
+
+// The file tree beside a file: folders load their contents when opened.
+// Without JavaScript they hold a link to the folder's page instead.
+document.addEventListener("toggle", async (event) => {
+  const folder = event.target;
+  if (!(folder instanceof HTMLDetailsElement) || !folder.open || !folder.dataset.src || folder.dataset.loaded) return;
+  folder.dataset.loaded = "1";
+  const list = folder.querySelector(":scope > ul");
+  try {
+    const res = await fetch(folder.dataset.src, { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(res.status);
+    const { entries, more } = await res.json();
+    const items = entries.map((e) => {
+      const li = document.createElement("li");
+      if (e.dir) {
+        const details = Object.assign(document.createElement("details"), {});
+        details.dataset.src = e.src;
+        const summary = Object.assign(document.createElement("summary"), { className: "tree-dir", textContent: e.name });
+        const inner = Object.assign(document.createElement("ul"), { className: "tree-list" });
+        const fallback = Object.assign(document.createElement("a"), { className: "tree-more", href: e.url, textContent: "Open folder" });
+        inner.append(Object.assign(document.createElement("li"), {}));
+        inner.firstChild.append(fallback);
+        details.append(summary, inner);
+        li.append(details);
+      } else {
+        li.append(Object.assign(document.createElement("a"), { className: "tree-file", href: e.url, textContent: e.name }));
+      }
+      return li;
+    });
+    if (more > 0) {
+      const li = document.createElement("li");
+      li.append(Object.assign(document.createElement("a"), { className: "tree-more", href: folder.querySelector(".tree-more")?.href ?? "#", textContent: `${more} more…` }));
+      items.push(li);
+    }
+    list.replaceChildren(...items);
+  } catch {
+    delete folder.dataset.loaded;
+  }
+}, true);
+
+// Watch and star buttons: send the form in the background and update the
+// button and its count, instead of reloading the page. Without JavaScript
+// (or if the request fails) the form posts and the page reloads as usual.
+document.addEventListener("submit", async (event) => {
+  const form = event.target.closest("form[data-toggle]");
+  if (!form || form.dataset.busy) return;
+  event.preventDefault();
+  const button = form.querySelector("button");
+  form.dataset.busy = "1";
+  button.disabled = true;
+  try {
+    const res = await fetch(form.action, {
+      method: "POST",
+      body: new URLSearchParams(new FormData(form)),
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    });
+    if (!res.ok) throw new Error(res.status);
+    const { on, count } = await res.json();
+    form.querySelector('input[name="to"]').value = on ? "off" : "on";
+    for (const el of form.querySelectorAll("[data-on]")) el.textContent = on ? el.dataset.on : el.dataset.off;
+    const title = on ? button.dataset.onTitle : button.dataset.offTitle;
+    if (title) button.title = title;
+    button.setAttribute("aria-pressed", String(on));
+    if (button.dataset.onClass) button.classList.toggle(button.dataset.onClass, on);
+    const counter = form.parentElement.querySelector("[data-count]");
+    if (counter) {
+      counter.textContent = count;
+      counter.setAttribute("aria-label", `${counter.dataset.count}: ${count}`);
+    }
+  } catch {
+    delete form.dataset.busy;
+    form.submit();
+    return;
+  }
+  button.disabled = false;
+  delete form.dataset.busy;
+});
+
+// The contribution calendar starts at the latest weeks where it's too wide
+// for the screen.
+for (const box of document.querySelectorAll(".calendar-scroll")) box.scrollLeft = box.scrollWidth;
+
 document.addEventListener("focusin", (event) => {
   if (event.target.matches(".copy-field input")) event.target.select();
 });

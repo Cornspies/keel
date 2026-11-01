@@ -138,16 +138,11 @@ impl Core {
     }
 }
 
-/// The total size of the files under `path` (0 if it doesn't exist).
-/// Symbolic links aren't followed.
+/// The space the files under `path` take (0 if it doesn't exist), as the
+/// System page counts it. A fork's objects shared with its original count
+/// for both: each account pays for what it stores.
 fn dir_size(path: &Path) -> u64 {
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    std::fs::read_dir(path)
-        .map(|entries| entries.flatten().map(|e| dir_size(&e.path())).sum())
-        .unwrap_or(0)
+    crate::system::disk_usage(path, &mut std::collections::HashSet::new())
 }
 
 #[cfg(test)]

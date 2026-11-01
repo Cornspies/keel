@@ -2,6 +2,7 @@
 {% block admin %}
 <h1>Accounts</h1>
 {% if let Some(e) = error %}<p class="flash flash-error">{{ e }}</p>{% endif %}
+{% if let Some(n) = notice %}<p class="flash">{{ n }}</p>{% endif %}
 <form method="get" action="/admin/users" class="form form-inline admin-search">
   <input name="q" value="{{ q }}" placeholder="Find by name or email" aria-label="Find accounts">
   <button class="btn">Search</button>
@@ -39,7 +40,18 @@
   {% if let Some(u) = older_url %}<a class="btn" href="{{ u }}">Older →</a>{% endif %}
 </div>
 
-<h2>Create an account</h2>
+<h2>Invite someone</h2>
+<p class="muted">Makes their account and emails them a link to choose their own password, so you never know it. The link works for a week. Works even when sign-ups are closed.</p>
+<form method="post" action="/admin/users/invite" class="form narrow-left{% if !page.mail_enabled %} unavailable{% endif %}">
+  <fieldset{% if !page.mail_enabled %} disabled{% endif %}>
+    {% if !page.mail_enabled %}<p class="hint">Invitations need email, which isn't set up on this server: start keel with <span class="mono">--smtp-url</span>. Until then, create accounts with a password below.</p>{% endif %}
+    <label>Username <input name="username" required autocomplete="off"></label>
+    <label>Email <input type="email" name="email" required autocomplete="off"></label>
+    <button class="btn btn-primary">Send invitation</button>
+  </fieldset>
+</form>
+
+<h2>Create an account with a password</h2>
 <p class="muted">Works even when sign-ups are closed. They get an email to verify their address{% if !page.mail_enabled %} (once email is set up){% endif %}.</p>
 <form method="post" action="/admin/users" class="form narrow-left">
   <label>Username <input name="username" value="{{ new_username }}" required autocomplete="off"></label>

@@ -125,10 +125,15 @@ pub async fn watch(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     Path((owner, name)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     Form(f): Form<ToggleForm>,
 ) -> AppResult {
     let (repo, _) = load(&state, Some(&user), &owner, &name).await?;
-    state.core.set_watching(user.id, repo.id, f.to == "on").await?;
+    let on = f.to == "on";
+    state.core.set_watching(user.id, repo.id, on).await?;
+    if crate::stars::wants_json(&headers) {
+        return Ok(crate::stars::toggled(on, state.core.watcher_count(repo.id).await?));
+    }
     Ok(Redirect::to(&format!("/{}/{}", repo.owner, repo.name)).into_response())
 }
 
@@ -136,10 +141,15 @@ pub async fn subscribe(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     Path((owner, name, number)): Path<(String, String, i64)>,
+    headers: axum::http::HeaderMap,
     Form(f): Form<ToggleForm>,
 ) -> AppResult {
     let (repo, _) = load(&state, Some(&user), &owner, &name).await?;
     let issue = load_issue(&state, &repo, number).await?;
-    state.core.set_subscription(user.id, issue.id, f.to == "on").await?;
+    let on = f.to == "on";
+    state.core.set_subscription(user.id, issue.id, on).await?;
+    if crate::stars::wants_json(&headers) {
+        return Ok(crate::stars::toggled(on, 0));
+    }
     Ok(Redirect::to(&issue_url(&repo, &issue)).into_response())
 }

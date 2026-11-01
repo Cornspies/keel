@@ -1,0 +1,7 @@
+<form method="get" class="form form-inline repo-filter" role="search" data-autosubmit>
+  <input type="hidden" name="tab" value="repositories">
+  <input type="search" name="q" value="{{ filter.q }}" placeholder="Find a repository…" aria-label="Find a repository">
+  <select name="type" aria-label="Type">{% for (value, label) in filter.kinds %}<option value="{{ value }}"{% if *value == filter.kind %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  <select name="sort" aria-label="Sort">{% for (value, label) in filter.sorts %}<option value="{{ value }}"{% if *value == filter.sort %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+  <button class="btn">Find</button>
+</form>

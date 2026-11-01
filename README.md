@@ -8,9 +8,17 @@ One binary, one data directory, no external services.
 - **Git hosting:** clone, fetch and push over HTTP (password or access token)
   and over a built-in SSH server. Deploy keys give servers and CI SSH access
   to one repository, read-only or with pushing.
+- **Repository front page:** the files and README, beside a sidebar with
+  the description, topics and license, the latest release, the languages
+  used (by file size, as on GitHub: dependencies, minified files,
+  documentation and data files don't count) and the top contributors.
+  Watching and starring update in place, without reloading the page.
 - **Code browsing:** trees, files with syntax highlighting, history, commits
   with diffs, branches and tags, and downloading any of them as `.zip` or
-  `.tar.gz`. Blame shows the commit that last changed each line, links to the
+  `.tar.gz`. Files use the whole width, with the file tree beside them and a
+  bar to switch between preview, code and blame, and to get the raw file,
+  copy it, download it, edit or delete it. Authors in the history show their
+  commits; those with an account link to their profile. Blame shows the commit that last changed each line, links to the
   blame before it, and skips the commits listed in `.git-blame-ignore-revs`
   (as on GitHub).
 - **Verified commits:** commits signed with SSH or GPG keys people added show
@@ -74,13 +82,22 @@ One binary, one data directory, no external services.
 - **Importing** from GitHub, Gitea or Forgejo: the code with Git LFS files,
   issues and pull requests (numbers kept), comments and reviews, labels,
   milestones, releases with their files, and the wiki.
-- **Profiles** with avatars (uploaded, or generated patterns) and pinned
-  repositories, for people and organizations.
+- **Profiles** in the style of GitHub's and Forgejo's: an avatar (uploaded,
+  or a generated pattern), name, bio, location and website; pinned (or
+  most-starred) repositories with their main language; a calendar of the
+  year's contributions; and recent activity. Organizations have a name,
+  description, location and website, with tabs for an overview (pinned or
+  popular and recently changed repositories, people, top languages and
+  topics), repositories, projects (for members) and people. Repository
+  lists on profiles can be searched, narrowed (sources, forks, archived,
+  templates) and sorted.
 - **Renaming and transferring** repositories (to you or your organizations);
   old links, clones and remotes keep working.
 - **Administration:** a page for site administrators with statistics,
-  accounts (create, disable, delete, grant admin), all repositories, closing
-  sign-ups and a notice on every page.
+  accounts (create, invite by email, disable, delete, grant admin), all
+  repositories, closing sign-ups and a notice on every page, and a System
+  page with what keel uses: memory, threads and async tasks, running git
+  processes, caches, database connections and storage by kind.
 - **Light and dark themes** that follow the system, or that people pick with
   the switch at the bottom of every page.
 - **JSON API** in the style of GitHub's, with personal access tokens.
@@ -346,7 +363,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | Endpoint | |
 | --- | --- |
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
-| `GET /users/{name}`, `GET /users/{name}/repos`, `POST /orgs/{org}/repos` | |
+| `GET /users/{name}`, `GET /users/{name}/repos`, `GET /orgs/{org}`, `POST /orgs/{org}/repos` | an organization has a `description` where people have a `bio` |
 | `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`) |
 | `GET`, `POST /repos/{owner}/{repo}/keys`, `GET`, `DELETE …/keys/{id}` | deploy keys, for repository admins: `title`, `key`, `read_only` (unlike GitHub's, `true` unless set to `false`) |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template`, `archived` |
@@ -831,6 +848,16 @@ a time (others wait their turn), stop after 20 seconds (the page then says so
 and links to the file's history), and links to blame pages are `nofollow`
 for crawlers. Binary files, Git LFS files and files over 2 MiB aren't blamed.
 
+**Loading pages:** pages are compressed with brotli at quality 4 (the
+default, 11, is for compressing ahead of time and cost more than rendering
+the page); the stylesheet, script and icon are compressed once at startup,
+at the best quality, and cached by browsers for good. Pages tell
+Chromium-based browsers (Speculation Rules) to load a link while the pointer
+rests on it, so the page is often there by the time of the click; only pages
+that change nothing when loaded qualify (not signing in or out, downloads,
+raw files, git or `nofollow` links). Debug builds run with optimized
+dependencies (`[profile.dev.package."*"]`).
+
 **Rendering work is bounded:** syntax highlighting stops at 256 KiB, file
 display at 2 MiB, and diffs at 300 files / 10,000 lines.
 
@@ -869,7 +896,11 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   minute per account. Their token is after the `#`, which browsers don't
   send, so it stays out of the proxy's and keel's request logs; the page
   moves it into its form. Verifying an address takes a click, so mail
-  scanners that open links don't use the link up. Asking for a reset says the same thing whether or not an
+  scanners that open links don't use the link up.
+- Invitations (Admin → Accounts, needs email) make the account with a long
+  random password nobody sees, and email a link to choose one, which works
+  once, for a week. The email never holds a password, so none sits in
+  mailboxes or in keel's outbox. Asking for a reset says the same thing whether or not an
   account has that address. A reset signs out all sessions.
 - Webhook deliveries are signed with HMAC-SHA256 when a secret is set
   (`X-Hub-Signature-256: sha256=…`), and can't target internal addresses by

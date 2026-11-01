@@ -168,7 +168,7 @@ impl Core {
         let name = name.trim();
         validate_username(name)?;
         self.check_org_limit(creator).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let inserted = sqlx::query_as::<_, (i64,)>(
             "INSERT INTO users (username, kind, created_at) VALUES (?1, 'org', ?2) RETURNING id",
         )

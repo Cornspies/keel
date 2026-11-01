@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page.title }}{% if page.title != page.site_name %} · {{ page.site_name }}{% endif %}</title>
 <link rel="stylesheet" href="{{ page.css_url }}">
+<link rel="icon" href="{{ page.icon_url }}" type="image/svg+xml">
 <script src="{{ page.js_url }}" defer></script>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 <header class="topbar">
   <div class="wrap topbar-inner">
     <a class="brand" href="/">{{ page.site_name }}</a>
@@ -20,17 +21,24 @@
         <a href="/issues" class="nav-wide">Issues</a>
         <a href="/pulls" class="nav-wide">Pull requests</a>
         <details class="dropdown dropdown-right">
-          <summary class="btn btn-small">New</summary>
+          <summary class="btn btn-small new-menu" title="Create new…" aria-label="Create new…"><span class="plus-icon" aria-hidden="true"></span></summary>
           <div class="dropdown-menu">
             <a href="/new">New repository</a>
             <a href="/org/new">New organization</a>
           </div>
         </details>
         <a class="inbox-link{% if page.unread > 0 %} has-unread{% endif %}" href="/notifications" title="Notifications" aria-label="Notifications{% if page.unread > 0 %} ({{ page.unread }} unread){% endif %}"><span class="bell" aria-hidden="true"></span>{% if page.unread > 0 %}<span class="unread-count">{{ page.unread }}</span>{% endif %}</a>
-        <a href="/{{ user.username }}"><img class="avatar" src="/avatars/{{ user.username }}?v={{ user.avatar_version }}" width="20" height="20" alt="">{{ user.username }}</a>
         {% if user.is_admin %}<a href="/admin">Admin</a>{% endif %}
-        <a href="/settings">Settings</a>
-        <form method="post" action="/logout" class="inline"><button class="linkish">Sign out</button></form>
+        <details class="dropdown dropdown-right user-menu">
+          <summary title="{{ user.username }}" aria-label="Account menu for {{ user.username }}"><img class="avatar" src="/avatars/{{ user.username }}?v={{ user.avatar_version }}" width="24" height="24" alt=""></summary>
+          <div class="dropdown-menu">
+            <div class="menu-title">Signed in as <strong>{{ user.username }}</strong></div>
+            <a href="/{{ user.username }}">Your profile</a>
+            <a href="/{{ user.username }}?tab=stars">Your stars</a>
+            <a href="/settings">Settings</a>
+            <form method="post" action="/logout" class="menu-form"><button class="menu-item">Sign out</button></form>
+          </div>
+        </details>
       {% else %}
         <a href="/login">Sign in</a>
         {% if page.registration_open %}<a class="btn btn-small" href="/register">Sign up</a>{% endif %}

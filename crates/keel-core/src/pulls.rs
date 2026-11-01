@@ -146,7 +146,7 @@ impl Core {
             return invalid(format!("{base_ref} already contains all commits of {head_ref}."));
         }
         let merge_base = self.git(repo.id, move |g| g.merge_base(base, head)).await?;
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let (issue_id, number) = insert_issue(&mut tx, repo.id, author, title, body, true).await?;
         sqlx::query(
             "INSERT INTO pull_requests (issue_id, base_ref, head_ref, head_repo_id, base_commit, is_draft)
@@ -289,7 +289,7 @@ impl Core {
         merge_commit: Option<Oid>,
     ) -> Result<()> {
         let now = now();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         let done = sqlx::query("UPDATE issues SET state = 'merged', closed_at = ?2 WHERE id = ?1 AND state = 'open'")
             .bind(issue.id)
             .bind(now)

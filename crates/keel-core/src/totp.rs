@@ -150,7 +150,7 @@ impl Core {
 
     /// Turns two-factor authentication off (callers check the password).
     pub async fn disable_totp(&self, user_id: i64) -> Result<()> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0 WHERE id = ?1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -164,7 +164,7 @@ impl Core {
     /// Replaces the recovery codes, returning the new ones (shown once).
     pub async fn new_recovery_codes(&self, user_id: i64) -> Result<Vec<String>> {
         let mut codes = Vec::new();
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.write_tx().await?;
         sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?1").bind(user_id).execute(&mut *tx).await?;
         for _ in 0..RECOVERY_CODES {
             let mut bytes = [0u8; 7];
