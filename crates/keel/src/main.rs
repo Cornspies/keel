@@ -143,6 +143,14 @@ struct ServeArgs {
     #[arg(long, env = "KEEL_OIDC_ALLOW_SIGNUP")]
     oidc_allow_signup: bool,
 
+    /// Sign in to an existing account with the same address when both the
+    /// provider and keel verified it, connecting the two. Only for a
+    /// provider whose email_verified you trust: it vouches for every
+    /// account's address. Never for site administrators. Without it, people
+    /// connect existing accounts in Settings → Security.
+    #[arg(long, env = "KEEL_OIDC_LINK_BY_EMAIL", requires = "oidc_issuer")]
+    oidc_link_by_email: bool,
+
     /// Serve Prometheus metrics at /metrics to requests with this bearer
     /// token (off without one).
     #[arg(long, env = "KEEL_METRICS_TOKEN", hide_env_values = true)]
@@ -282,6 +290,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     client_secret,
                     name: args.oidc_name,
                     allow_signup: args.oidc_allow_signup,
+                    link_by_email: args.oidc_link_by_email,
                 })
             }
             _ => None,

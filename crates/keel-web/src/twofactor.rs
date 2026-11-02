@@ -208,7 +208,7 @@ pub struct PasswordForm {
 
 /// Confirms a sensitive change (see `session::confirm`); `Some` is the
 /// page saying why not.
-async fn confirmed(state: &AppState, user: &User, headers: &HeaderMap, password: &str) -> AppResult<Option<axum::response::Response>> {
+pub(crate) async fn confirmed(state: &AppState, user: &User, headers: &HeaderMap, password: &str) -> AppResult<Option<axum::response::Response>> {
     match crate::session::confirm(state, user, headers, password).await {
         Ok(()) => Ok(None),
         Err(keel_core::Error::Invalid(msg)) => Ok(Some(security_page(state, user.clone(), Vec::new(), Some(msg)).await?)),

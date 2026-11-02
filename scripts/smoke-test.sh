@@ -136,7 +136,7 @@ OIDC_PID=$!
     --ssh-addr "127.0.0.1:$SSH_PORT" --base-url "$B" --webhook-allow-private \
     --smtp-url "smtp://127.0.0.1:$SMTP_PORT" --mail-from "keel <git@example.com>" \
     --metrics-token smoke-metrics --max-push-size 2 \
-    --oidc-issuer "http://127.0.0.1:$OIDC_PORT" --oidc-client-id keel --oidc-client-secret s3cret --oidc-name "Example ID" \
+    --oidc-issuer "http://127.0.0.1:$OIDC_PORT" --oidc-client-id keel --oidc-client-secret s3cret --oidc-name "Example ID" --oidc-link-by-email \
     >"$T/server.log" 2>&1) &
 PID=$!
 for _ in $(seq 1 100); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
@@ -590,17 +590,25 @@ check "just signed in, it confirms changes without a password" contains "$(curl 
 check "and sets a first password" is "$(post "$T/sam" /settings/account/password new=password-sam confirm=password-sam)" 303
 check "which then works" is "$(curl -s -o /dev/null -w '%{http_code}' -H "$O" -d "login=sam&password=password-sam" "$B/login")" 303
 check "the address may come from userinfo" is "$(sso "$T/uma" '{"sub":"u3","email":"uma@example.com","email_verified":true,"userinfo_only":true}')" "$B/explore"
-check "verified addresses connect existing accounts" is "$(sso "$T/ada-sso" '{"sub":"u2","email":"ada@example.com","email_verified":true}')" "$B/explore"
-check "as their owner" contains "$(curl -s -b "$T/ada-sso" "$B/settings/account")" 'value="ada@example.com"'
+check "verified addresses connect existing accounts" is "$(sso "$T/eve-sso" '{"sub":"u5","email":"eve@example.com","email_verified":true}')" "$B/explore"
+check "as their owner" contains "$(curl -s -b "$T/eve-sso" "$B/settings/account")" 'value="eve@example.com"'
+check "who are told by email" mail_to eve@example.com "Example ID was connected to your account"
+check "but never administrators'" contains "$(sso "$T/ada-sso" '{"sub":"u2","email":"ada@example.com","email_verified":true}'; cat "$T/sso.html")" "An account with the address ada@example.com exists"
 check "unverified ones don't" contains "$(sso "$T/bob-sso" '{"sub":"u4","email":"bob@example.com","email_verified":false}'; cat "$T/sso.html")" "An account with the address bob@example.com exists"
-check "settings show the connection" contains "$(curl -s -b "$T/ada" "$B/settings/security")" "connected to Example ID as <strong>ada@example.com</strong>"
-check "which can be undone" is "$(post "$T/ada" /settings/security/sso/delete x=1)" 303
 echo '{"sub":"u2","email":"ada@example.com","email_verified":true}' >"$T/idp_user.json"
-check "and made again from settings" contains "$(curl -s -b "$T/ada" -c "$T/ada" -L -H "$O" -d x=1 "$B/settings/security/sso")" "connected to Example ID"
+check "connecting in settings asks for the password" contains "$(curl -s -b "$T/ada" -H "$O" -d password=wrong "$B/settings/security/sso")" "Your password is incorrect"
+check "and then works" contains "$(curl -s -b "$T/ada" -c "$T/ada" -L -H "$O" -d password=password-ada "$B/settings/security/sso")" "connected to Example ID"
+check "settings show the connection" contains "$(curl -s -b "$T/ada" "$B/settings/security")" "connected to Example ID as <strong>ada@example.com</strong>"
+check "the owner is told" mail_to ada@example.com "Example ID was connected to your account"
+check "which can be undone" is "$(post "$T/ada" /settings/security/sso/delete x=1)" 303
 curl -s -c "$T/half" -o /dev/null "$B/login/oidc"
 check "a forged state is refused" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?code=x&state=forged")" "match the one started here"
 check "so is a callback without a sign-in" contains "$(curl -s "$B/login/oidc/callback?code=x&state=y")" "took too long"
-check "the provider's refusals are shown" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?error=access_denied&error_description=Not+allowed")" "Example ID said: Not allowed"
+check "refusals without the state aren't shown" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?error=access_denied&error_description=Call+us")" "match the one started here"
+STATE=$(python3 -I -c 'import base64,json,sys
+v=[l.split("\t")[-1].strip() for l in open(sys.argv[1]) if "\tkeel_oidc\t" in l][0].rsplit(".",1)[0]
+print(json.loads(base64.urlsafe_b64decode(v+"="*(-len(v)%4)))["state"])' "$T/half")
+check "the provider's refusals are shown" contains "$(curl -s -b "$T/half" "$B/login/oidc/callback?state=$STATE&error=access_denied&error_description=Not+allowed")" "Example ID said: Not allowed"
 sqlite3 "$T/data/keel.db" "UPDATE users SET disabled_at = 1 WHERE username = 'uma'"
 check "disabled accounts stay out" contains "$(sso "$T/uma2" '{"sub":"u3","email":"uma@example.com","email_verified":true}'; cat "$T/sso.html")" "disabled"
 

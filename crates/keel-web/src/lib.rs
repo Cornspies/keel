@@ -135,6 +135,7 @@ impl AppState {
     fn build(core: Core) -> Self {
         let mib = |n: u64| n * 1024 * 1024;
         images::set_key(core.image_proxy_key());
+        images::set_base_url(&core.config.base_url);
         Self(Arc::new(Inner {
             image_client: images::client(&core.config.outbound()),
             oidc: core.config.oidc.clone().map(oidc::Provider::new),

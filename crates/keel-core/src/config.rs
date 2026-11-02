@@ -60,6 +60,11 @@ pub struct OidcConfig {
     /// Create accounts for whoever the provider signs in, even when sign-ups
     /// are closed: for a provider that only has your own people.
     pub allow_signup: bool,
+    /// Sign in to an existing account with the same address when both the
+    /// provider and keel verified it, connecting it. Off by default: it
+    /// trusts the provider's `email_verified` with every account. Never for
+    /// site administrators, who connect from Settings → Security.
+    pub link_by_email: bool,
 }
 
 /// An IP network, like `203.0.113.7/32` or `2001:db8::/48`.

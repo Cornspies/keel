@@ -46,12 +46,12 @@ impl SsoOutcome {
 
 impl Core {
     /// The account `claims` sign in to: the one the identity is linked to;
-    /// else the account with the same address, if both the provider and
-    /// keel verified it (so it's the same person), now linked; else a new
-    /// account, if sign-ups are open or `allow_signup`. The first account
-    /// (the administrator) can't be made this way: it needs the setup
-    /// code.
-    pub async fn sso_sign_in(&self, claims: &Claims, allow_signup: bool) -> Result<SsoOutcome> {
+    /// else, with `link_by_email`, the account with the same address, if
+    /// both the provider and keel verified it (so it's the same person) and
+    /// it isn't a site administrator's, now linked; else a new account, if
+    /// sign-ups are open or `allow_signup`. The first account (the
+    /// administrator) can't be made this way: it needs the setup code.
+    pub async fn sso_sign_in(&self, claims: &Claims, allow_signup: bool, link_by_email: bool) -> Result<SsoOutcome> {
         if claims.subject.is_empty() {
             return invalid("The provider didn't say who signed in.");
         }
@@ -63,7 +63,10 @@ impl Core {
         }
         let email = claims.email.trim();
         if let Some(user) = self.user_by_email(email).await? {
-            if !(claims.email_verified && user.email_verified) {
+            // Taking the provider's word for the address would make every
+            // account only as safe as its `email_verified`: opt-in, and
+            // never for administrators.
+            if !(link_by_email && claims.email_verified && user.email_verified && !user.is_admin) {
                 return invalid(format!(
                     "An account with the address {email} exists. Sign in to it with its password, \
                      then connect it in Settings → Security."
@@ -72,7 +75,7 @@ impl Core {
             if user.disabled {
                 return invalid("This account is disabled.");
             }
-            self.link_identity(user.id, claims).await?;
+            self.link_identity(&user, claims).await?;
             return Ok(SsoOutcome::LinkedByEmail(user));
         }
         if !self.has_users().await? {
@@ -85,7 +88,7 @@ impl Core {
             return invalid("The provider didn't give an email address, which accounts need.");
         }
         let user = self.create_sso_user(&claims.username, email, claims.email_verified).await?;
-        self.link_identity(user.id, claims).await?;
+        self.insert_identity(user.id, claims).await?;
         Ok(SsoOutcome::Created(user))
     }
 
@@ -115,8 +118,30 @@ impl Core {
         }
     }
 
-    /// Links the provider's account to `user_id` (one per provider).
-    pub async fn link_identity(&self, user_id: i64, claims: &Claims) -> Result<()> {
+    /// Links the provider's account to `user` (one per provider), and emails
+    /// them about it: it's a new way into their account, so they should hear
+    /// of it if it wasn't them.
+    pub async fn link_identity(&self, user: &User, claims: &Claims) -> Result<()> {
+        self.insert_identity(user.id, claims).await?;
+        self.notify_identity_linked(user, claims).await
+    }
+
+    async fn notify_identity_linked(&self, user: &User, claims: &Claims) -> Result<()> {
+        let site = &self.config.site_name;
+        let provider = self.config.oidc.as_ref().map_or("single sign-on", |o| o.name.as_str());
+        let who = if claims.email.trim().is_empty() { String::new() } else { format!(" ({})", claims.email.trim()) };
+        let body = format!(
+            "Hi {name},\n\nYour account on {site} was just connected to an account at {provider}{who}. \
+             Signing in with {provider} now signs in to your account.\n\n\
+             If this wasn't you, sign in, disconnect it under Settings → Security, change your password \
+             and turn on two-factor authentication:\n\n{base}/settings/security\n",
+            name = user.username,
+            base = self.config.base_url,
+        );
+        self.queue_mail(&user.email, &format!("[{site}] {provider} was connected to your account"), &body, None).await
+    }
+
+    async fn insert_identity(&self, user_id: i64, claims: &Claims) -> Result<()> {
         let done = sqlx::query(
             "INSERT INTO external_identities (user_id, issuer, subject, email, created_at, last_used_at)
              SELECT ?1, ?2, ?3, ?4, ?5, ?5
@@ -245,39 +270,51 @@ mod tests {
     async fn signing_in_with_a_provider() {
         let (core, _dir) = Core::for_tests().await;
         // Not for the first account: that needs the setup code.
-        assert!(core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), true).await.is_err());
+        assert!(core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), true, true).await.is_err());
         let ada = core.register("ada", "ada@example.com", "password1").await.unwrap();
+        let bob = core.register("bob", "bob@example.com", "password1").await.unwrap();
+        assert!(ada.is_admin && !bob.is_admin);
 
-        let made = core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), false).await.unwrap();
+        let made = core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), false, false).await.unwrap();
         let SsoOutcome::Created(sam) = &made else { panic!("{made:?}") };
         assert_eq!(sam.username, "sam");
         assert!(sam.email_verified && !sam.has_password() && !sam.is_admin);
         // Without a password, password sign-in can't work.
         assert!(core.authenticate("sam", "").await.unwrap().is_none());
-        let again = core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), false).await.unwrap();
+        let again = core.sso_sign_in(&claims("1", "sam@example.com", true, "sam"), false, false).await.unwrap();
         assert!(matches!(&again, SsoOutcome::Linked(u) if u.id == sam.id));
 
-        // Same address: linked only if both sides verified it.
-        assert!(core.sso_sign_in(&claims("2", "ada@example.com", true, "ada"), false).await.is_err(), "ada's isn't verified");
-        sqlx::query("UPDATE users SET email_verified_at = 1 WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
-        assert!(core.sso_sign_in(&claims("2", "ada@example.com", false, "ada"), false).await.is_err(), "the provider's isn't");
-        let linked = core.sso_sign_in(&claims("2", "ada@example.com", true, "ada"), false).await.unwrap();
-        assert!(matches!(&linked, SsoOutcome::LinkedByEmail(u) if u.id == ada.id));
-        let ada = core.user_by_id(ada.id).await.unwrap().unwrap();
-        assert!(core.link_identity(ada.id, &claims("3", "", true, "")).await.is_err(), "one per provider");
+        // Same address: linked only if allowed, both sides verified it, and
+        // it isn't an administrator's.
+        let by_email = |id: &str, email: &str, verified: bool, allowed: bool| {
+            let c = claims(id, email, verified, "");
+            let core = &core;
+            async move { core.sso_sign_in(&c, false, allowed).await }
+        };
+        assert!(by_email("2", "bob@example.com", true, true).await.is_err(), "bob's isn't verified");
+        sqlx::query("UPDATE users SET email_verified_at = 1").execute(&core.db).await.unwrap();
+        assert!(by_email("2", "bob@example.com", false, true).await.is_err(), "the provider's isn't");
+        assert!(by_email("2", "bob@example.com", true, false).await.is_err(), "not without --oidc-link-by-email");
+        assert!(by_email("3", "ada@example.com", true, true).await.is_err(), "never an administrator's");
+        let linked = by_email("2", "bob@example.com", true, true).await.unwrap();
+        assert!(matches!(&linked, SsoOutcome::LinkedByEmail(u) if u.id == bob.id));
+        let bob = core.user_by_id(bob.id).await.unwrap().unwrap();
+        assert!(core.link_identity(&bob, &claims("4", "", true, "")).await.is_err(), "one per provider");
+        // Administrators connect explicitly instead.
+        core.link_identity(&ada, &claims("3", "ada@example.com", true, "")).await.unwrap();
 
         // Taken names get a number.
-        let other = core.sso_sign_in(&claims("4", "sam2@example.com", true, "sam"), false).await.unwrap();
+        let other = core.sso_sign_in(&claims("5", "sam2@example.com", true, "sam"), false, false).await.unwrap();
         assert_eq!(other.user().username, "sam-2");
 
         // Closed sign-ups stop new accounts, unless allowed for the provider.
         core.save_site_settings(&crate::SiteSettings { registration_closed: true, banner: String::new() }).await.unwrap();
-        assert!(core.sso_sign_in(&claims("5", "new@example.com", true, "new"), false).await.is_err());
-        assert!(core.sso_sign_in(&claims("5", "new@example.com", true, "new"), true).await.is_ok());
+        assert!(core.sso_sign_in(&claims("6", "new@example.com", true, "new"), false, false).await.is_err());
+        assert!(core.sso_sign_in(&claims("6", "new@example.com", true, "new"), true, false).await.is_ok());
 
         // Disconnecting needs a password to fall back on.
         assert!(core.unlink_identity(sam, "https://id.example.com").await.is_err());
-        core.unlink_identity(&ada, "https://id.example.com").await.unwrap();
-        assert!(core.identities(ada.id).await.unwrap().is_empty());
+        core.unlink_identity(&bob, "https://id.example.com").await.unwrap();
+        assert!(core.identities(bob.id).await.unwrap().is_empty());
     }
 }

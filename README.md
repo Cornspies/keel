@@ -203,6 +203,7 @@ Every flag can also be set as an environment variable.
 | `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret` | `KEEL_OIDC_ISSUER`, `KEEL_OIDC_CLIENT_ID`, `KEEL_OIDC_CLIENT_SECRET` | no single sign-on; see below |
 | `--oidc-name` | `KEEL_OIDC_NAME` | `single sign-on`: the button says "Sign in with <name>" |
 | `--oidc-allow-signup` | `KEEL_OIDC_ALLOW_SIGNUP` | off: the provider creates accounts only while sign-ups are open |
+| `--oidc-link-by-email` | `KEEL_OIDC_LINK_BY_EMAIL` | off: existing accounts are connected in Settings → Security, not by matching addresses |
 | `--secret-key-file` | `KEEL_SECRET_KEY_FILE` | `<data dir>/secret.key`; created if missing |
 | `--block-outbound` | `KEEL_BLOCK_OUTBOUND` | none; more networks webhooks, mirrors and imports can't reach, e.g. `203.0.113.0/24,2001:db8::/32` |
 | `--metrics-token` | `KEEL_METRICS_TOKEN` | no metrics |
@@ -247,10 +248,15 @@ The sign-in page then offers "Sign in with Example ID". Which account that
 signs in to:
 
 1. the account it's connected to, if it is (Settings → Security →
-   Connect, or the first time it was used);
-2. otherwise, the account with the same email address, if the provider says
-   it verified the address and keel verified it too, so it's the same
-   person; the two are then connected;
+   Connect, which asks for the password, or the first time it was used);
+2. otherwise, with `--oidc-link-by-email`, the account with the same email
+   address, if the provider says it verified the address and keel verified
+   it too, so it's the same person; the two are then connected. Never a
+   site administrator's account: they connect in Settings. Only turn it on
+   for a provider whose `email_verified` you trust, since it then vouches
+   for every account's address (some providers mark every address
+   verified, or let people change theirs). Without it, signing in with the
+   provider tells people with an account to sign in and connect it;
 3. otherwise a new account, named after the provider's username, while
    sign-ups are open, or always with `--oidc-allow-signup` (for a provider
    that only has your own people; don't use it with a public provider like
@@ -262,7 +268,8 @@ Accounts made this way have no password. Where keel asks for the password
 signed in in the last ten minutes, in that browser; they can set a password
 in Settings → Account. Two-factor authentication still applies after signing
 in with the provider, if it's on. Disconnecting needs a password, so the
-account can still be signed in to.
+account can still be signed in to. Whenever an account gets connected to the
+provider, keel emails its owner, so a connection they didn't make shows up.
 
 keel uses the authorization code flow with PKCE, its state in a signed
 cookie for ten minutes. It checks the ID token's issuer, audience, expiry and
@@ -919,7 +926,9 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   camo, so whoever posts one can't see who viewed it; pages may only load
   keel's own images. Proxy URLs are signed (keel fetches only what its pages
   show), fetched like webhooks (no private or blocked addresses), limited to
-  images up to 10 MiB, and served sandboxed.
+  images up to 10 MiB, and served sandboxed. Links to keel's own images
+  (on `--base-url`) aren't proxied: the viewer loads them directly, with
+  their access to private repositories, and keel never fetches itself.
 - Secrets that must be read back are encrypted in the database (see
   `secret.key` above). At startup, a data directory or database file that
   others can read is made private (`0700` and `0600`); SQLite gives its

@@ -38,11 +38,27 @@ const IMAGE_TYPES: &[&str] = &[
 const IMAGE_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
 
 static KEY: OnceLock<String> = OnceLock::new();
+/// keel's own address (`--base-url`), whose images aren't proxied.
+static OWN: OnceLock<reqwest::Url> = OnceLock::new();
 
 /// Sets the key proxy URLs are signed with; the first call wins. Without
 /// one (in tests), a random key is used.
 pub(crate) fn set_key(key: String) {
     let _ = KEY.set(key);
+}
+
+/// Sets keel's own address; the first call wins.
+pub(crate) fn set_base_url(base_url: &str) {
+    if let Ok(url) = reqwest::Url::parse(base_url) {
+        let _ = OWN.set(url);
+    }
+}
+
+/// Whether `url` is on keel's own origin: its images are served to the
+/// viewer directly (the CSP allows them), with the viewer's access to
+/// private repositories, rather than fetched by keel from itself.
+fn is_own(url: &reqwest::Url, own: Option<&reqwest::Url>) -> bool {
+    own.is_some_and(|o| o.origin() == url.origin())
 }
 
 fn key() -> &'static str {
@@ -69,10 +85,14 @@ pub(crate) fn client(outbound: &keel_core::Outbound) -> reqwest::Client {
 }
 
 /// What an `<img src>` becomes: images on other servers go through the
-/// proxy; keel's own (relative) ones stay. Browsers ignore tabs and line
-/// breaks in URLs and read `\` as `/`, so `/\host/x.png` would be another
-/// server too.
+/// proxy; keel's own (relative, or absolute on its origin) ones stay.
+/// Browsers ignore tabs and line breaks in URLs and read `\` as `/`, so
+/// `/\host/x.png` would be another server too.
 pub(crate) fn img_src(src: &str) -> String {
+    rewrite_src(src, OWN.get())
+}
+
+fn rewrite_src(src: &str, own: Option<&reqwest::Url>) -> String {
     let normalized: String = src
         .trim_start_matches(|c: char| c <= ' ')
         .chars()
@@ -87,6 +107,11 @@ pub(crate) fn img_src(src: &str) -> String {
     } else {
         return src.to_owned();
     };
+    if let Ok(url) = reqwest::Url::parse(&absolute)
+        && is_own(&url, own)
+    {
+        return url.into();
+    }
     let encoded: String = form_urlencoded::byte_serialize(absolute.as_bytes()).collect();
     format!("/_image?url={encoded}&sig={}", mac(&absolute))
 }
@@ -111,7 +136,8 @@ pub async fn image(State(state): State<AppState>, Query(q): Query<ImageQuery>) -
         return not_found();
     }
     let Ok(url) = reqwest::Url::parse(&q.url) else { return not_found() };
-    if keel_hooks::check_url(&url, &state.core.config.outbound()).is_err() {
+    // Never keel fetching itself (e.g. its own `/_image`, over and over).
+    if is_own(&url, OWN.get()) || keel_hooks::check_url(&url, &state.core.config.outbound()).is_err() {
         return not_found();
     }
     let Ok(permit) = Arc::clone(&state.image_slots).try_acquire_owned() else {
@@ -183,5 +209,18 @@ mod tests {
         let sig = |s: &str| s.rsplit("sig=").next().unwrap().to_owned();
         assert_eq!(sig(&proxied), mac("https://img.shields.io/badge/x-y-green.svg"));
         assert_ne!(sig(&proxied), mac("https://img.shields.io/badge/x-y-red.svg"));
+    }
+
+    #[test]
+    fn leaves_keels_own_images() {
+        let own = reqwest::Url::parse("https://git.example.com").unwrap();
+        let own = Some(&own);
+        assert_eq!(rewrite_src("https://git.example.com/ada/engine/raw/main/x.png", own), "https://git.example.com/ada/engine/raw/main/x.png");
+        assert_eq!(rewrite_src("HTTPS://GIT.example.com:443/x.png", own), "https://git.example.com/x.png");
+        assert_eq!(rewrite_src("//git.example.com/x.png", own), "https://git.example.com/x.png");
+        // Another scheme, port or host is another origin.
+        for other in ["http://git.example.com/x.png", "https://git.example.com:8443/x.png", "https://git.example.com.evil.example/x.png"] {
+            assert!(rewrite_src(other, own).starts_with("/_image?url="), "{other}");
+        }
     }
 }

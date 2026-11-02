@@ -14,7 +14,7 @@
 use std::time::{Duration, Instant};
 
 use askama::Template;
-use axum::extract::{Query, State};
+use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use base64::Engine;
@@ -188,9 +188,21 @@ pub async fn start(State(state): State<AppState>, Viewer(viewer): Viewer, Query(
     Ok(begin(&state, viewer, safe_next(q.next.as_deref()), None).await)
 }
 
+#[derive(Deserialize)]
+pub struct LinkForm {
+    #[serde(default)]
+    password: String,
+}
+
 /// `POST /settings/security/sso`: connects the provider to this account.
-pub async fn link(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
+/// A new way to sign in, so confirmed like adding a key: otherwise a few
+/// minutes at someone's signed-in browser would be enough to keep signing
+/// in as them, past a password change.
+pub async fn link(State(state): State<AppState>, SignedIn(user): SignedIn, headers: HeaderMap, Form(f): Form<LinkForm>) -> AppResult {
     provider(&state)?;
+    if let Some(refused) = crate::twofactor::confirmed(&state, &user, &headers, &f.password).await? {
+        return Ok(refused);
+    }
     let id = user.id;
     Ok(begin(&state, Some(user), "/settings/security".into(), Some(id)).await)
 }
@@ -255,16 +267,19 @@ pub async fn callback(
     let Some(flow) = read_flow(&state, &headers) else {
         return Ok(fail(viewer, "This sign-in took too long or was started in another browser. Try again.".into()));
     };
+    // Before anything else, errors included (they carry `state` too, RFC
+    // 6749 4.1.2.1): otherwise any page could send a visitor here with an
+    // error message of its own, shown as the provider's.
+    if !q.state.as_deref().is_some_and(|s| same(s, &flow.state)) {
+        return Ok(fail(viewer, "This sign-in doesn't match the one started here. Try again.".into()));
+    }
     if let Some(e) = q.error {
         let why = q.error_description.unwrap_or(e);
         return Ok(fail(viewer, format!("{} said: {why}", provider.config.name)));
     }
-    let (Some(code), Some(returned)) = (q.code, q.state) else {
+    let Some(code) = q.code else {
         return Ok(fail(viewer, "The provider sent back no code.".into()));
     };
-    if !same(&returned, &flow.state) {
-        return Ok(fail(viewer, "This sign-in doesn't match the one started here. Try again.".into()));
-    }
     let claims = match exchange(&state, provider, &code, &flow).await {
         Ok(c) => c,
         Err(e) => {
@@ -274,16 +289,16 @@ pub async fn callback(
     };
     if let Some(user_id) = flow.link {
         // Only for the account that started it, still signed in.
-        if viewer.as_ref().map(|v| v.id) != Some(user_id) {
+        let Some(user) = viewer.as_ref().filter(|v| v.id == user_id) else {
             return Ok(fail(viewer, "Sign in to keel first, then connect your account.".into()));
-        }
-        return Ok(match state.core.link_identity(user_id, &claims).await {
+        };
+        return Ok(match state.core.link_identity(user, &claims).await {
             Ok(()) => ([clear], Redirect::to("/settings/security?saved=sso")).into_response(),
             Err(keel_core::Error::Invalid(msg)) => fail(viewer, msg),
             Err(e) => return Err(e.into()),
         });
     }
-    match state.core.sso_sign_in(&claims, provider.config.allow_signup).await {
+    match state.core.sso_sign_in(&claims, provider.config.allow_signup, provider.config.link_by_email).await {
         Ok(outcome) => {
             let user = outcome.user();
             match &outcome {

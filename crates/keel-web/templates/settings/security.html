@@ -57,7 +57,7 @@
 {% endif %}
 {% else %}
 <p class="muted">Connect your account to {{ sso.name }} to sign in with it.</p>
-<form method="post" action="/settings/security/sso" class="form"><input type="hidden" name="x" value="1"><button class="btn">Connect {{ sso.name }}</button></form>
+<form method="post" action="/settings/security/sso" class="form form-inline">{% if page.has_password %}<input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>{% else %}<input type="hidden" name="x" value="1">{% endif %}<button class="btn">Connect {{ sso.name }}</button></form>
 {% endif %}
 {% endif %}
 {% endblock %}
