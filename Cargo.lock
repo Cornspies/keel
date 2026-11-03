@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "keel"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "keel-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "keel-git"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "keel-hooks"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "keel-mail"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "keel-core",
@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "keel-mirror"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "keel-search"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "regex-syntax",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "keel-ssh"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "keel-web"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "ammonia",
  "anyhow",
