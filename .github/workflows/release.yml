@@ -1,0 +1,118 @@
+# Pushing a tag like v0.23.0 (or v0.23) for the version in Cargo.toml tests
+# keel, builds it for x86_64 and aarch64 Linux and publishes a GitHub release
+# with the tagged commit's message as its notes.
+#
+# Every release uses the newest versions of its dependencies that
+# Cargo.toml allows: `cargo update` picks them once, and that Cargo.lock is
+# what gets tested, built and attached to the release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "keel") | .version')
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$tag" != "$version" ] && [ "$tag.0" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+      - name: Update dependencies
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cargo update 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
+
+  test:
+    needs: resolve
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install smoke test tools
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 git-lfs gnupg
+      - name: Unit tests
+        run: cargo test --workspace --locked
+      - name: Smoke test
+        run: |
+          cargo build --locked
+          scripts/smoke-test.sh target/debug/keel
+
+  build:
+    needs: resolve
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-26.04
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          name=keel-${GITHUB_REF_NAME#v}-${{ matrix.arch }}-linux
+          mkdir "$name"
+          cp target/release/keel README.md "$name"/
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keel-${{ matrix.arch }}
+          path: keel-*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    needs: [test, build]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      # The binaries and the Cargo.lock they were built with.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+          rm dist/*.sha256
+          git log -1 --format=%b "$GITHUB_REF_NAME^{commit}" > notes.md
+          prerelease=
+          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag $prerelease
