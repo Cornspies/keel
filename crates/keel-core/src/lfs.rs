@@ -65,14 +65,44 @@ impl Core {
     }
 
     /// Moves a downloaded file, whose SHA-256 the caller checked is `oid`,
-    /// into the store and lets `repo_id` read it.
+    /// into the store and lets `repo_id` read it, if its owner has room.
     pub async fn lfs_store(&self, repo_id: i64, tmp: &std::path::Path, oid: &str, size: u64) -> Result<()> {
+        let _storing = self.lfs_gc.read().await;
         let path = self.lfs_path(oid);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(anyhow::Error::from)?;
         }
         tokio::fs::rename(tmp, &path).await.map_err(anyhow::Error::from)?;
-        self.lfs_link(repo_id, oid, size).await
+        self.lfs_link_new(repo_id, oid, size).await
+    }
+
+    /// [`lfs_link`](Self::lfs_link) for a new upload or download: refused
+    /// if it takes the repository's owner past their quota (unless they
+    /// store the object already), checked in the transaction that records
+    /// it, so that concurrent uploads can't each use the same free space.
+    /// An object refused here stays unlinked, for `prune_lfs` to remove.
+    pub async fn lfs_link_new(&self, repo_id: i64, oid: &str, size: u64) -> Result<()> {
+        let mut tx = self.write_tx().await?;
+        let (counted,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS (SELECT 1 FROM lfs_objects l JOIN repositories r ON r.id = l.repo_id
+                            WHERE r.owner_id = (SELECT owner_id FROM repositories WHERE id = ?1) AND l.oid = ?2)",
+        )
+        .bind(repo_id)
+        .bind(oid)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !counted {
+            self.check_repo_storage_in(&mut tx, repo_id, size).await?;
+        }
+        sqlx::query("INSERT OR IGNORE INTO lfs_objects (repo_id, oid, size, created_at) VALUES (?1, ?2, ?3, ?4)")
+            .bind(repo_id)
+            .bind(oid)
+            .bind(size as i64)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Records that `repo_id` has an object (after it was uploaded and its
@@ -183,6 +213,9 @@ impl Core {
         if !root.is_dir() {
             return Ok(0);
         }
+        // New files wait (see `lfs_store`) until the unrecorded ones are
+        // removed, so none is removed between being moved in and recorded.
+        let _pruning = self.lfs_gc.write().await;
         let used: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>("SELECT DISTINCT oid FROM lfs_objects")
             .fetch_all(&self.db)
             .await?
@@ -276,7 +309,9 @@ impl Core {
         sign(&self.token_secret, purpose.as_bytes())
     }
 
-    /// The secret that signs tokens, created on first start.
+    /// The database's part of the secret that signs tokens (the key in
+    /// `secret.key` is the other, see `SecretBox::bind`), created on first
+    /// start.
     pub(crate) async fn load_token_secret(db: &sqlx::SqlitePool) -> Result<String> {
         let row: Option<(String,)> = sqlx::query_as("SELECT value FROM site_settings WHERE key = 'token_secret'")
             .fetch_optional(db)

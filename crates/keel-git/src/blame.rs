@@ -15,6 +15,13 @@ use crate::{Error, GitRepo, Result};
 pub const IGNORE_REVS_FILE: &str = ".git-blame-ignore-revs";
 /// At most this many of them are used, to bound the command line.
 const MAX_IGNORED_REVS: usize = 100;
+/// Largest [`IGNORE_REVS_FILE`] that's read (a list of commits is far
+/// smaller).
+const MAX_IGNORE_REVS_FILE: usize = 1 << 20;
+/// Most output a blame may have. Plenty for any file small enough to be
+/// blamed, and a bound for crafted ones (a hunk for every line, each
+/// repeating a long path).
+const MAX_OUTPUT: u64 = 64 << 20;
 
 /// Lines of the file that one commit last changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,9 +83,17 @@ impl GitRepo {
             return Err(Error::Other("git blame: no output".into()));
         };
         // Read while waiting, so a full pipe doesn't stall git.
-        let out = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            stdout.read_to_end(&mut buf).map(|_| buf)
+        let too_much = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let out = std::thread::spawn({
+            let too_much = too_much.clone();
+            move || {
+                let mut buf = Vec::new();
+                (&mut stdout).take(MAX_OUTPUT + 1).read_to_end(&mut buf)?;
+                // Set before the pipe closes, so git exiting because of that
+                // isn't taken for a failure.
+                too_much.store(buf.len() as u64 > MAX_OUTPUT, std::sync::atomic::Ordering::Relaxed);
+                Ok::<_, std::io::Error>(buf)
+            }
         });
         let err = std::thread::spawn(move || {
             let mut buf = String::new();
@@ -86,8 +101,9 @@ impl GitRepo {
             buf
         });
         let deadline = Instant::now() + timeout;
+        let too_much = || too_much.load(std::sync::atomic::Ordering::Relaxed);
         let status = loop {
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline || too_much() {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(None);
@@ -98,6 +114,9 @@ impl GitRepo {
             std::thread::sleep(Duration::from_millis(5));
         };
         let out = out.join().map_err(|_| Error::Other("git blame: reading failed".into()))??;
+        if too_much() {
+            return Ok(None);
+        }
         if !status.success() {
             let err = err.join().unwrap_or_default();
             return Err(Error::Other(format!("git blame: {}", err.trim())));
@@ -108,8 +127,15 @@ impl GitRepo {
     /// The commits [`IGNORE_REVS_FILE`] lists at `commit`: full object ids
     /// of commits in this repository (git refuses unknown ones).
     fn ignored_revs(&self, commit: Oid) -> Result<Vec<Oid>> {
-        let Some(blob) = self.blob(commit, IGNORE_REVS_FILE)? else { return Ok(Vec::new()) };
-        let text = String::from_utf8_lossy(&blob.data);
+        let tree = self.repo.find_commit(commit)?.tree()?;
+        let Ok(entry) = tree.get_path(std::path::Path::new(IGNORE_REVS_FILE)) else { return Ok(Vec::new()) };
+        // It's read for every blame: one too large to be a list of commits
+        // is ignored.
+        if entry.kind() != Some(git2::ObjectType::Blob) || self.blob_size(entry.id())? > MAX_IGNORE_REVS_FILE {
+            return Ok(Vec::new());
+        }
+        let Some((data, _)) = self.blob_by_id(entry.id())? else { return Ok(Vec::new()) };
+        let text = String::from_utf8_lossy(&data);
         Ok(text
             .lines()
             .map(|l| l.split('#').next().unwrap_or_default().trim())

@@ -102,6 +102,10 @@ impl Core {
         if edit.files.is_empty() {
             return invalid("There's nothing to commit.");
         }
+        // Refused if the files written don't fit in what the owner may
+        // still store.
+        let written: u64 = edit.files.iter().filter_map(|f| f.content.as_ref()).map(|c| c.len() as u64).sum();
+        self.check_repo_storage(repo.id, written.max(1)).await?;
         for f in &mut edit.files {
             f.path = clean_path(&f.path)?;
             if let Some(from) = &f.from {

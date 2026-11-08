@@ -51,6 +51,9 @@ impl Purpose {
 
 pub(crate) struct SecretBox {
     cipher: Aes256Gcm,
+    /// The key [`bind`](Self::bind) signs with: derived from the secret
+    /// key, so the secret key itself is never used for it.
+    binding: String,
 }
 
 impl SecretBox {
@@ -70,7 +73,21 @@ impl SecretBox {
             }
             Err(e) => return Err(anyhow::anyhow!("reading the secret key {}: {e}", path.display())),
         };
-        Ok(Self { cipher: Aes256Gcm::new_from_slice(&key).expect("32-byte key") })
+        Ok(Self::new(&key))
+    }
+
+    fn new(key: &[u8]) -> Self {
+        Self {
+            cipher: Aes256Gcm::new_from_slice(key).expect("32-byte key"),
+            binding: crate::sign(&hex::encode(key), b"keel: binding signing secrets"),
+        }
+    }
+
+    /// `secret` (from the database) made to depend on this key as well, for
+    /// secrets that sign things rather than get read back: then a copy of
+    /// `keel.db` alone can't forge what they sign (Git LFS tokens, say).
+    pub(crate) fn bind(&self, secret: &str) -> String {
+        crate::sign(&self.binding, secret.as_bytes())
     }
 
     /// A random key that's never stored, for processes that don't touch
@@ -78,7 +95,7 @@ impl SecretBox {
     pub(crate) fn ephemeral() -> Self {
         let mut key = [0u8; 32];
         let _ = getrandom::fill(&mut key);
-        Self { cipher: Aes256Gcm::new_from_slice(&key).expect("32-byte key") }
+        Self::new(&key)
     }
 
     pub(crate) fn seal(&self, purpose: Purpose, plain: &str) -> Result<String> {
@@ -197,6 +214,12 @@ mod tests {
         assert_ne!(sealed, b.seal(Purpose::Webhook, "s3cret").unwrap(), "fresh nonce each time");
         assert_eq!(b.open(Purpose::Webhook, &sealed).unwrap(), "s3cret");
         assert!(b.open(Purpose::Mirror, &sealed).is_err(), "bound to its column");
+        // A bound secret is the same with the same key, and different with
+        // another.
+        let again = SecretBox::load(&path, false).unwrap();
+        assert_eq!(b.bind("from the database"), again.bind("from the database"));
+        assert_ne!(b.bind("from the database"), SecretBox::ephemeral().bind("from the database"));
+        assert_ne!(b.bind("from the database"), b.bind("other"));
         assert_eq!(b.open(Purpose::Mirror, "plain").unwrap(), "plain", "from before encryption");
         assert_eq!(b.seal(Purpose::Mirror, "").unwrap(), "", "empty stays empty");
         // The same key loads again; another key can't open it.

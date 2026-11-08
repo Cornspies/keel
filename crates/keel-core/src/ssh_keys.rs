@@ -46,12 +46,13 @@ pub fn parse_public_key(line: &str) -> Result<ParsedKey> {
     let Ok(blob) = STANDARD.decode(data) else {
         return invalid("The key data is not valid base64.");
     };
-    // The blob starts with the key type as a length-prefixed string.
-    let declared = blob
-        .get(..4)
-        .map(|n| u32::from_be_bytes(n.try_into().unwrap()) as usize)
-        .and_then(|n| blob.get(4..4 + n));
-    if declared != Some(kind.as_bytes()) {
+    // Only a complete key of that type, encoded the way SSH clients send
+    // it: with extra bytes the fingerprint would match no client's key, and
+    // the same key could be added again under another fingerprint.
+    let Ok(key) = ssh_key::PublicKey::from_bytes(&blob) else {
+        return invalid("The key data is not a valid SSH public key.");
+    };
+    if key.algorithm().as_str() != kind || key.to_bytes().ok().as_deref() != Some(blob.as_slice()) {
         return invalid("The key data does not match its type.");
     }
     Ok(ParsedKey {
@@ -120,6 +121,18 @@ impl Core {
         Ok(row.is_some())
     }
 
+    /// Whether a key can sign its owner in (so not a disabled account's),
+    /// for SSH clients asking which of their keys to sign with.
+    pub async fn ssh_key_signs_in(&self, fingerprint: &str) -> Result<bool> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT k.id FROM ssh_keys k JOIN users u ON u.id = k.user_id WHERE k.fingerprint = ?1 AND u.disabled_at IS NULL",
+        )
+        .bind(fingerprint)
+        .fetch_optional(&self.db)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Finds the owner of a key by fingerprint and records that it was used.
     pub async fn user_by_ssh_fingerprint(&self, fingerprint: &str) -> Result<Option<User>> {
         let row: Option<(i64,)> = sqlx::query_as(
@@ -154,6 +167,10 @@ mod tests {
         assert!(parse_public_key(&KEY.replace("ssh-ed25519", "ssh-rsa")).is_err());
         assert!(parse_public_key("ssh-dss AAAA").is_err());
         assert!(parse_public_key("garbage").is_err());
+        // The same key with more after it isn't another key.
+        let blob = STANDARD.decode(KEY.split(' ').nth(1).unwrap()).unwrap();
+        let padded = format!("ssh-ed25519 {}", STANDARD.encode([blob.as_slice(), b"\0\0\0\x01x"].concat()));
+        assert!(parse_public_key(&padded).is_err());
     }
 
     #[tokio::test]
@@ -167,6 +184,11 @@ mod tests {
 
         let found = core.user_by_ssh_fingerprint(FINGERPRINT).await.unwrap().unwrap();
         assert_eq!(found.id, ada.id);
+        assert!(core.ssh_key_signs_in(FINGERPRINT).await.unwrap());
+        sqlx::query("UPDATE users SET disabled_at = 1 WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
+        assert!(!core.ssh_key_signs_in(FINGERPRINT).await.unwrap(), "not for a disabled account");
+        assert!(core.ssh_key_exists(FINGERPRINT).await.unwrap(), "still taken, for deploy keys");
+        sqlx::query("UPDATE users SET disabled_at = NULL WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
         assert!(core.ssh_keys(ada.id).await.unwrap()[0].last_used_at.is_some());
 
         assert!(core.delete_ssh_key(bob.id, key.id).await.is_err());

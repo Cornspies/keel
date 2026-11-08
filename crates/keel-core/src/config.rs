@@ -63,7 +63,8 @@ pub struct OidcConfig {
     /// Sign in to an existing account with the same address when both the
     /// provider and keel verified it, connecting it. Off by default: it
     /// trusts the provider's `email_verified` with every account. Never for
-    /// site administrators, who connect from Settings → Security.
+    /// site administrators or accounts with two-factor authentication, which
+    /// connect from Settings → Security.
     pub link_by_email: bool,
 }
 

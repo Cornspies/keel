@@ -302,12 +302,9 @@ impl Core {
         let Some(user) = self.token_user(token, "reset").await? else {
             return invalid("This link is invalid or has expired. Request a new one.");
         };
+        // This also deletes the account's other reset links.
         self.set_password(user.id, new).await?;
         self.mark_verified(user.id, token).await?;
-        sqlx::query("DELETE FROM email_tokens WHERE user_id = ?1 AND purpose = 'reset'")
-            .bind(user.id)
-            .execute(&self.db)
-            .await?;
         self.user_by_id(user.id).await?.ok_or(Error::NotFound)
     }
 
@@ -430,6 +427,13 @@ mod tests {
         assert!(core.next_mail_due().await.unwrap().unwrap() > now());
         core.finish_mail(&m, Err("550 no such user".into()), true).await.unwrap();
         assert_eq!(core.next_mail_due().await.unwrap(), None);
+
+        // Changing the password ends reset links sent before it.
+        core.request_password_reset("lovelace@example.com").await.unwrap();
+        let earlier = token_in(&core.claim_mail(10).await.unwrap()[0].body);
+        assert!(core.reset_token_valid(&earlier).await.unwrap());
+        core.change_password(&user, "a new password", "another password").await.unwrap();
+        assert!(!core.reset_token_valid(&earlier).await.unwrap());
     }
 
     #[tokio::test]

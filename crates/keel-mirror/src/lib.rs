@@ -27,6 +27,23 @@ pub fn client(outbound: &keel_core::Outbound) -> reqwest::Client {
         .expect("valid HTTP client configuration")
 }
 
+/// A response's body, if it's at most `max` bytes, so a server someone
+/// points keel at can't make it hold more.
+pub(crate) async fn read_capped(mut res: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    let too_large = || format!("it's larger than {} MiB", max >> 20);
+    if res.content_length().is_some_and(|n| n > max as u64) {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 fn message(e: keel_core::Error) -> String {
     match e {
         keel_core::Error::Invalid(m) => m,

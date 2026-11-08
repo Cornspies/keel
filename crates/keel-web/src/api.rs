@@ -1399,7 +1399,7 @@ async fn add_card(
                 (Some(r), _, _) => r.clone(),
                 (_, Some(org), Some(name)) => {
                     let name = name.strip_prefix(&format!("{}/", org.username)).unwrap_or(name);
-                    state.core.repo(&org.username, name).await?.ok_or_else(not_found_error)?
+                    find_repo(&state, &caller, &org.username, name).await?.0
                 }
                 _ => return Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Give the issue's repository")),
             };
@@ -2211,7 +2211,8 @@ async fn upload_asset(
     let rel = find_release(&state, &r, access, id).await?;
     let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
     let stream = futures_util::StreamExt::map(body.into_data_stream(), |c| c.map_err(|e| e.to_string()));
-    let (tmp, size) = crate::releases::receive_upload(&state, Box::pin(stream))
+    let room = state.core.storage_room(r.owner_id).await?;
+    let (tmp, size) = crate::releases::receive_upload(&state, room, Box::pin(stream))
         .await?
         .map_err(|msg| error(StatusCode::PAYLOAD_TOO_LARGE, msg))?;
     match state.core.add_release_asset(&rel, user, &q.name, content_type, &tmp, size).await {

@@ -247,6 +247,10 @@ impl GitRepo {
     /// Sets (`new` = `Some`) or deletes a ref. With `old`, only if the ref
     /// currently points there.
     pub fn update_ref(&self, name: &str, new: Option<Oid>, old: Option<Oid>) -> Result<()> {
+        // Full ref names only, so the name can't be taken for an option.
+        if !name.starts_with("refs/") || !crate::valid_ref_name(name) {
+            return Err(Error::Other(format!("{name} isn't a ref name")));
+        }
         let mut cmd = git(self.repo.path());
         cmd.arg("update-ref");
         match new {
@@ -262,6 +266,11 @@ impl GitRepo {
     /// Fetches `branch` from the repository at `from` (a fork) into ref
     /// `into` of this one, replacing what was there. Returns the new tip.
     pub fn fetch_branch(&self, from: &Path, branch: &str, into: &str) -> Result<Oid> {
+        // Both must be valid ref names, so the refspec can't be read another
+        // way (with a `:` in the branch, say).
+        if !crate::valid_ref_name(&format!("refs/heads/{branch}")) || !into.starts_with("refs/") || !crate::valid_ref_name(into) {
+            return Err(Error::Other(format!("can't fetch {branch} into {into}")));
+        }
         run(git(self.repo.path())
             .args(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--"])
             .arg(from)

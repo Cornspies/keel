@@ -308,7 +308,9 @@ impl Core {
         let parts: Vec<&str> = spec.split('/').collect();
         let found = match parts[..] {
             [owner, name, number] => match (self.repo_or_redirect(owner, name).await?, number.parse()) {
-                (Some(repo), Ok(n)) => self.project(crate::ProjectOwner::Repo(repo.id), n).await?,
+                (Some(repo), Ok(n)) if self.access(&repo, viewer).await? >= crate::Access::Read => {
+                    self.project(crate::ProjectOwner::Repo(repo.id), n).await?
+                }
                 _ => None,
             },
             [org, number] => match (self.user_by_name(org).await?.filter(User::is_org), number.parse()) {

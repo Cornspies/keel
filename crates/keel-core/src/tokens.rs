@@ -67,7 +67,8 @@ impl Core {
         .bind(can_write)
         .bind(site_admin)
         .bind(now)
-        .bind(expires_in_days.map(|d| now + d * 86400))
+        // Saturating: an expiry too far off to compute is never reached.
+        .bind(expires_in_days.map(|d| now.saturating_add(d.saturating_mul(86400))))
         .fetch_one(&self.db)
         .await?;
         Ok((token, secret))
@@ -144,6 +145,10 @@ mod tests {
         assert!(core.tokens(ada.id).await.unwrap()[0].last_used_at.is_some());
         assert!(core.authenticate_token("keel_wrong").await.unwrap().is_none());
         assert!(core.authenticate_token("not-a-token").await.unwrap().is_none());
+
+        // Any number of days is fine, however far off.
+        let (far, _) = core.create_token(ada.id, "far", false, false, Some(i64::MAX)).await.unwrap();
+        assert_eq!(far.expires_at, Some(i64::MAX));
 
         // Expired tokens stop working.
         let (_, old) = core.create_token(ada.id, "old", false, false, Some(-1)).await.unwrap();

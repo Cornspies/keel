@@ -15,6 +15,9 @@ use crate::{AppError, AppState};
 
 /// Archives built at the same time; more wait their turn.
 pub(crate) const CONCURRENT_ARCHIVES: usize = 4;
+/// How long a download may make no progress before git is stopped: a
+/// client that stops reading would otherwise keep its turn for good.
+const STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A name usable in a file name: `feature/x` becomes `feature-x`.
 fn file_label(rev: &str) -> String {
@@ -51,17 +54,39 @@ pub async fn download(
         return Err(AppError::Internal(anyhow::anyhow!("git archive: no output")));
     };
     let repo_id = repo.id;
+    // When (seconds after the start) the client last read some of it.
+    let started = std::time::Instant::now();
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let watched = progress.clone();
     tokio::spawn(async move {
         let _permit = permit; // held until git is done
         let mut err = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err).await;
+        let stalled = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let idle = started.elapsed().as_secs().saturating_sub(watched.load(std::sync::atomic::Ordering::Relaxed));
+                if idle > STALL_LIMIT.as_secs() {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err) => {}
+            () = stalled => {
+                let _ = child.start_kill();
+                tracing::info!(repo = repo_id, "git archive stopped: the download stalled");
+            }
+        }
         match child.wait().await {
             Ok(s) if !s.success() => tracing::warn!(repo = repo_id, "git archive: {}", err.trim()),
             Err(e) => tracing::warn!(repo = repo_id, "git archive: {e}"),
             _ => {}
         }
     });
-    let mut res = Body::from_stream(ReaderStream::new(stdout)).into_response();
+    let stream = futures_util::StreamExt::inspect(ReaderStream::new(stdout), move |_| {
+        progress.store(started.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
+    });
+    let mut res = Body::from_stream(stream).into_response();
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(format.content_type()));
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{base}.{}\"", format.extension())) {

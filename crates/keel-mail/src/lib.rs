@@ -12,6 +12,24 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 const BATCH: i64 = 10;
 
+/// The server's host if mail to it would go unencrypted over the network:
+/// `smtp://` without `?tls=required` (STARTTLS), to another machine.
+fn plain_over_network(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("smtp://")?;
+    let (before, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if query.split('&').any(|p| p == "tls=required") {
+        return None;
+    }
+    let authority = before.split('/').next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host_port.rsplit_once(':').map_or(host_port, |(h, _)| h),
+    };
+    let local = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (!local).then_some(host)
+}
+
 /// `Auto-Submitted: auto-generated` (RFC 3834), so vacation responders
 /// don't answer.
 #[derive(Clone)]
@@ -40,6 +58,13 @@ pub struct Mailer {
 impl Mailer {
     /// Checks the configuration (without connecting).
     pub fn new(config: &MailConfig) -> anyhow::Result<Self> {
+        if let Some(host) = plain_over_network(&config.smtp_url) {
+            // Mail has password reset links, and the URL may have a password.
+            tracing::warn!(
+                "mail to {host} isn't encrypted (smtp:// without ?tls=required): anyone on the way can read \
+                 password reset links and the SMTP password. Use smtps://, or add ?tls=required for STARTTLS."
+            );
+        }
         let transport = AsyncSmtpTransport::<Tokio1Executor>::from_url(&config.smtp_url)
             .context("invalid SMTP URL (expected e.g. smtps://user:password@smtp.example.com)")?
             .timeout(Some(Duration::from_secs(30)))
@@ -126,4 +151,20 @@ pub fn start(core: Core) -> anyhow::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::plain_over_network;
+
+    #[test]
+    fn unencrypted_mail_over_the_network() {
+        assert_eq!(plain_over_network("smtp://user:pw@smtp.example.com:587"), Some("smtp.example.com"));
+        assert_eq!(plain_over_network("smtp://relay.lan?tls=opportunistic"), Some("relay.lan"));
+        assert_eq!(plain_over_network("smtp://smtp.example.com:587?tls=required"), None);
+        assert_eq!(plain_over_network("smtps://user:pw@smtp.example.com"), None);
+        assert_eq!(plain_over_network("smtp://localhost:25"), None);
+        assert_eq!(plain_over_network("smtp://127.0.0.1:25"), None);
+        assert_eq!(plain_over_network("smtp://[::1]:25"), None);
+    }
 }

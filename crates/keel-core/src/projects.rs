@@ -223,6 +223,16 @@ async fn touch(conn: &mut SqliteConnection, project_id: i64) -> Result<()> {
 }
 
 impl Core {
+    /// A repository's boards are read-only once it's archived, like the
+    /// rest of it (organizations' boards stay open: their cards only point
+    /// to archived repositories' issues).
+    async fn ensure_board_writable(&self, project: &Project) -> Result<()> {
+        match project.owner() {
+            ProjectOwner::Repo(repo) => crate::issues::ensure_unarchived(&self.db, repo).await,
+            ProjectOwner::Org(_) => Ok(()),
+        }
+    }
+
     /// What `viewer` may do with an organization's boards: they're for its
     /// members (and site admins), who can read all its repositories.
     pub async fn org_board_access(&self, org: &User, viewer: Option<&User>) -> Result<crate::Access> {
@@ -312,6 +322,7 @@ impl Core {
     }
 
     pub async fn edit_project(&self, project: &Project, title: &str, description: &str, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         validate_project(title, description)?;
         sqlx::query("UPDATE projects SET title = ?2, description = ?3, updated_at = ?4 WHERE id = ?1")
             .bind(project.id)
@@ -326,6 +337,7 @@ impl Core {
     }
 
     pub async fn set_project_open(&self, project: &Project, open: bool, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         sqlx::query("UPDATE projects SET closed_at = CASE WHEN ?2 THEN NULL ELSE COALESCE(closed_at, ?3) END, updated_at = ?3 WHERE id = ?1")
             .bind(project.id)
             .bind(open)
@@ -341,6 +353,7 @@ impl Core {
     }
 
     pub async fn delete_project(&self, project: &Project, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         sqlx::query("DELETE FROM projects WHERE id = ?1").bind(project.id).execute(&self.db).await?;
         self.changed(project, Change::Project("deleted"), Some(user.id)).await;
         Ok(())
@@ -379,6 +392,7 @@ impl Core {
     }
 
     pub async fn add_project_column(&self, project: &Project, name: &str, user: &User) -> Result<i64> {
+        self.ensure_board_writable(project).await?;
         validate_column(name)?;
         let mut tx = self.write_tx().await?;
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM project_columns WHERE project_id = ?1")
@@ -405,6 +419,7 @@ impl Core {
     /// Renames a column, and makes it the done column (or not). A board
     /// has at most one.
     pub async fn edit_project_column(&self, project: &Project, column_id: i64, name: &str, done: bool, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         validate_column(name)?;
         self.column_of(project, column_id).await?;
         let mut tx = self.write_tx().await?;
@@ -426,6 +441,7 @@ impl Core {
 
     /// Moves a column to `position` (clamped) among the board's columns.
     pub async fn move_project_column(&self, project: &Project, column_id: i64, position: i64, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         let column = self.column_of(project, column_id).await?;
         let mut tx = self.write_tx().await?;
         let mut ids: Vec<(i64,)> = sqlx::query_as("SELECT id FROM project_columns WHERE project_id = ?1 AND id != ?2 ORDER BY position, id")
@@ -447,6 +463,7 @@ impl Core {
 
     /// Deletes a column with its cards.
     pub async fn delete_project_column(&self, project: &Project, column_id: i64, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         let column = self.column_of(project, column_id).await?;
         let cards = self.card_rows(project.id, Some(column.id), None).await?;
         let mut tx = self.write_tx().await?;
@@ -466,6 +483,7 @@ impl Core {
     }
 
     async fn insert_card(&self, project: &Project, column_id: i64, issue_id: Option<i64>, note: Option<&str>, user: &User) -> Result<i64> {
+        self.ensure_board_writable(project).await?;
         self.column_of(project, column_id).await?;
         let mut tx = self.write_tx().await?;
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM project_cards WHERE project_id = ?1")
@@ -548,6 +566,7 @@ impl Core {
 
     /// Moves a card to `position` (clamped) of a column.
     pub async fn move_card(&self, project: &Project, card_id: i64, column_id: i64, position: i64, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         let before = self.card_row(project, card_id).await?;
         let from = self.column_of(project, before.column_id).await?;
         self.column_of(project, column_id).await?;
@@ -561,6 +580,7 @@ impl Core {
     }
 
     pub async fn edit_note_card(&self, project: &Project, card_id: i64, note: &str, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         let before = self.card_row(project, card_id).await?;
         let note = note.trim();
         if note.is_empty() || note.len() > MAX_NOTE {
@@ -580,6 +600,7 @@ impl Core {
     }
 
     pub async fn delete_card(&self, project: &Project, card_id: i64, user: &User) -> Result<()> {
+        self.ensure_board_writable(project).await?;
         let card = self.card_row(project, card_id).await?;
         let (column, position): (i64, i64) = sqlx::query_as("SELECT column_id, position FROM project_cards WHERE id = ?1")
             .bind(card_id)

@@ -76,6 +76,9 @@ impl Core {
         if !template.is_template || self.access(template, Some(actor)).await? == Access::None {
             return Err(Error::NotFound);
         }
+        // As for forks: the copy (at most the template's size) must fit in
+        // the owner's storage.
+        self.check_storage(owner.id, self.repo_storage(template.id).await?).await?;
         let repo = self.create_repo(owner, name, description, is_private).await?;
         if let Err(e) = self.fill_from_template(template, &repo, actor, all_branches).await {
             self.delete_repo(&repo).await?;

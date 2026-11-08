@@ -153,7 +153,7 @@ pub struct GitTarget {
 /// How to run git for a [`GitTarget`].
 pub struct GitSession {
     pub path: PathBuf,
-    /// Environment for `receive-pack` (branch protection).
+    /// Environment for `receive-pack`: push limits and branch protection.
     pub env: Vec<(String, String)>,
     /// Refs before a push, to tell what it changed.
     pub before: Option<Refs>,
@@ -262,8 +262,11 @@ impl Core {
 
     /// Creates or changes a page as `user`. Returns its name.
     pub async fn save_wiki_page(&self, repo: &Repo, user: &User, edit: WikiEdit<'_>) -> Result<String> {
+        crate::issues::ensure_unarchived(&self.db, repo.id).await?;
         let name = page_name(edit.title)?;
         let text = edit.text.replace("\r\n", "\n");
+        // Wikis count towards the owner's storage.
+        self.check_repo_storage(repo.id, text.len() as u64 + 1).await?;
         self.ensure_wiki(repo.id).await?;
         let old = edit.page.map(str::to_owned);
         let (message, base) = (edit.message.trim().to_owned(), edit.base);
@@ -343,6 +346,7 @@ impl Core {
         if !self.has_wiki(repo.id) {
             return Err(Error::NotFound);
         }
+        crate::issues::ensure_unarchived(&self.db, repo.id).await?;
         let name = name.to_owned();
         let (who_name, who_email, signer) = (user.username.clone(), user.email.clone(), self.signer());
         let deleted = self

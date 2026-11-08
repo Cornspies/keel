@@ -20,12 +20,14 @@
 <p class="muted">You have {{ codes_left }} unused recovery code{% if codes_left != 1 %}s{% endif %}. Making new ones replaces them all.</p>
 <form method="post" action="/settings/security/recovery" class="form form-inline">
   {% if page.has_password %}<input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>{% endif %}
+  <input name="code" autocomplete="one-time-code" placeholder="Code from your app" aria-label="A code from your authenticator app, or a recovery code" required class="code-input">
   <button class="btn">Make new recovery codes</button>
 </form>
 
 <h2>Turn off</h2>
 <form method="post" action="/settings/security/disable" class="form form-inline">
   {% if page.has_password %}<input type="password" name="password" placeholder="Your password" aria-label="Your password" autocomplete="current-password" required>{% endif %}
+  <input name="code" autocomplete="one-time-code" placeholder="Code from your app" aria-label="A code from your authenticator app, or a recovery code" required class="code-input">
   <button class="btn btn-danger">Turn off two-factor authentication</button>
 </form>
 {% else if let Some((secret, qr)) = setup %}

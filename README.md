@@ -144,7 +144,9 @@ the key out of the data directory, and so out of its backups, move it
 elsewhere and point `--secret-key-file` at it. Keep a copy: without it,
 keel won't start on a database with encrypted secrets, rather than make a
 new key that can't read them. Secrets stored by older versions are encrypted
-at the first start.
+at the first start. The secret that signs Git LFS tokens, image proxy URLs
+and single sign-on attempts is derived with `secret.key` too, so a copy of
+the database can't forge those either.
 
 ### Backups and monitoring
 
@@ -252,7 +254,9 @@ signs in to:
 2. otherwise, with `--oidc-link-by-email`, the account with the same email
    address, if the provider says it verified the address and keel verified
    it too, so it's the same person; the two are then connected. Never a
-   site administrator's account: they connect in Settings. Only turn it on
+   site administrator's account, nor one with two-factor authentication on
+   (the connection would be made before the second step): they connect in
+   Settings. Only turn it on
    for a provider whose `email_verified` you trust, since it then vouches
    for every account's address (some providers mark every address
    verified, or let people change theirs). Without it, signing in with the
@@ -275,8 +279,9 @@ keel uses the authorization code flow with PKCE, its state in a signed
 cookie for ten minutes. It checks the ID token's issuer, audience, expiry and
 nonce; it doesn't check its signature, which OpenID Connect allows because
 keel gets it directly from the provider's token endpoint over HTTPS (Core
-1.0, 3.1.3.7). So the issuer and its endpoints must be `https://` (or
-`http://` to localhost, for trying it out).
+1.0, 3.1.3.7). So the issuer and its endpoints must be `https://` (or, for
+trying it out, an issuer on `http://` to localhost, whose endpoints may be
+too).
 
 ### Behind nginx
 
@@ -457,7 +462,7 @@ scripts/
 ## Design notes
 
 **Pages are rendered on the server** with compile-time-checked askama
-templates. There is no frontend build. The ~200 lines of JavaScript
+templates. There is no frontend build. The few hundred lines of JavaScript
 only add conveniences (copy buttons, late-loaded commit info, opening the
 line-comment form in place, starting a suggested change, reactions and the
 theme switch without a reload, dragging cards on project boards), so every
@@ -504,7 +509,8 @@ for a typical branch) are scanned directly. So results are exact for any
 branch, and for the default branch right after a push. Regular expressions
 (`fn \w+\(`, or a query written `/like this/`) use the trigrams of the
 literal text every match must contain; one without any (like `\d+`) can only
-search within a repository, by scanning it. The `regex` crate guarantees
+search within a repository, by scanning it (a few such scans run at a time,
+like blames). The `regex` crate guarantees
 linear-time matching, so no pattern can stall the server. Queries are at most
 256 characters.
 
@@ -577,7 +583,8 @@ locked them, and "Raw" serves their content.
 **Downloads** (`/<owner>/<repo>/archive/<branch, tag or commit>.zip` or
 `.tar.gz`) are streamed straight from `git archive`, with every file under
 `<repo>-<name>/`. At most four are built at once, so a burst of downloads
-can't take over the CPU. LFS files are included as pointers.
+can't take over the CPU, and git stops when a download makes no progress
+for a minute, so clients that stop reading don't keep a turn. LFS files are included as pointers.
 
 **Releases** belong to a tag. A draft is only visible to people with write
 access; publishing it creates its tag (at the chosen branch) if the tag
@@ -647,7 +654,8 @@ repositories.
 network access as mirrors (no private addresses unless allowed; git is
 pinned to the checked address). git brings branches, tags and pull requests'
 heads (`refs/pull/<n>/head`, where keel keeps them too), then Git LFS files;
-the API brings the rest. Imported issues, comments and releases keep their
+the API brings the rest (at most 32 MiB per response and 512 MiB in all,
+so a source can't make keel hold more). Imported issues, comments and releases keep their
 dates and are shown with their author's name, linked to their profile on the
 source, never to a local account with the same name; nothing notifies
 anyone. Line comments on pull requests become comments quoting the line.
@@ -669,7 +677,8 @@ the commit they were given on. Pushes are checked by a `pre-receive` hook:
 keel points `git receive-pack` at its own hook directory (`data/hooks`) and
 passes the repository's rules in the environment; the hook (`keel hook
 pre-receive`) refuses updates to protected branches that aren't allowed, with
-a message for the person pushing. Repositories without rules don't run it.
+a message for the person pushing; without rules it does nothing. git never
+runs a repository's own hooks.
 A rule can require verified commits: the hook checks the commits a push
 brings to the branch (from its old tip, or for a new branch those not on
 another branch requiring them yet), reading keys from the database
@@ -886,15 +895,20 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 ## Security
 
 - Passwords: Argon2id. Session tokens are 256-bit random values, stored only
-  as SHA-256 hashes, sent in `HttpOnly; SameSite=Lax` cookies.
+  as SHA-256 hashes, sent in `HttpOnly; SameSite=Lax` cookies. Behind
+  `https://`, these and the cookies used while signing in are `__Host-`
+  cookies, which other sites under the same domain can't set, so they can't
+  plant a session of their own.
 - After ten wrong passwords for an account (by name or email) within 15
   minutes, signing in with its password (on the web and over git HTTP) is
   refused for the rest of those 15 minutes. The count is kept in memory.
 - Changing the email address, adding SSH or GPG keys and creating access
   tokens ask for the password, so a stolen session can't be turned into
   lasting access.
-- State-changing requests must come from the same origin (CSRF); behind
-  `https://`, an origin on plain HTTP doesn't count.
+- State-changing requests must come from the same origin (CSRF), going by
+  the `Sec-Fetch-Site`, `Origin` or `Referer` header the browser sends.
+  Behind `https://`, an origin on plain HTTP doesn't count, and requests
+  without any of these headers are refused (scripts use the API).
 - Redirects after signing in only go to local paths, and never to anything
   with control characters, spaces or backslashes, which browsers could turn
   into another host.
@@ -943,17 +957,22 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   keel's branch protection hook), and `GIT_PROTOCOL` values are validated
   before being passed to git.
 - Gzip-compressed git requests are decompressed as they stream into git, and
-  refused (`413`) past 64 MiB. Pushes are limited to `--max-push-size`
-  (`receive.maxInputSize`), and git checks every pushed and fetched object
-  (`receive.fsckObjects`, `fetch.fsckObjects`), so malformed objects and
-  trees with `.git` entries are refused.
+  refused (`413`) past 64 MiB, as are uncompressed fetch requests (which
+  only list what the client has and wants). Pushes are limited to
+  `--max-push-size` (`receive.maxInputSize`), and git checks every pushed
+  and fetched object (`receive.fsckObjects`, `fetch.fsckObjects`), so
+  malformed objects and trees with `.git` entries are refused.
 - Quotas (`--quota`, `--max-repos`; off by default, and site administrators'
   accounts are exempt): repositories, forks, mirrors, imports and transfers
   past the repository limit are refused; pushes (over HTTP and SSH), LFS
-  uploads, release files, forks, mirror syncs and imports are refused once
-  an account is out of storage. Git data is measured after each push, so a
-  push can go over by at most `--max-push-size`. LFS files count once per
-  account, however many of its repositories have them.
+  uploads, release files, forks, repositories from templates, changes in
+  the browser (files, suggestions, wiki pages), mirror syncs and imports
+  are refused once an account is out of storage. Uploads are checked as
+  they're recorded, so several at once can't share the same room, and a
+  mirror sync or import stops once git has fetched more than the room left.
+  Git data is measured after each push, so a push can go over by at most
+  `--max-push-size`. LFS files count once per account, however many of its
+  repositories have them.
 - At most as many password hashes (Argon2id, 19 MiB each) are computed at
   once as there are CPUs; other sign-ins wait their turn, so a flood of
   sign-in attempts can't exhaust memory. Issue and Explore searches are
@@ -972,6 +991,9 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   for expired attempts). Changing the password ends pending second steps. Ten single-use recovery codes are
   stored hashed. With it on, git over HTTP no longer accepts the password
   (use a token or SSH key), and a password reset still asks for a code.
+  Turning it off or making new recovery codes takes the password and a code
+  (wrong ones count towards the same lockout), so a stolen password and a
+  signed-in browser aren't enough to take the second factor away.
   Administrators can turn it off for someone who lost their phone and codes.
 
 ## Development

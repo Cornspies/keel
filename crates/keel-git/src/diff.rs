@@ -2,6 +2,10 @@ use git2::{Delta, DiffFindOptions, DiffOptions, Oid, Patch};
 
 use crate::{GitRepo, Result};
 
+/// git's default `diff.renameLimit`: once added × deleted files are more
+/// than its square, renames are only found where the content is the same.
+const RENAME_LIMIT: usize = 1000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffStatus {
     Added,
@@ -113,7 +117,20 @@ impl GitRepo {
         let mut diff = self
             .repo
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), Some(&mut opts))?;
-        diff.find_similar(Some(DiffFindOptions::new().renames(true)))?;
+        // Finding renames compares every added file with every deleted
+        // one: past git's limit (`diff.renameLimit`), only exact renames,
+        // as git does.
+        let (mut added, mut deleted) = (0usize, 0usize);
+        for delta in diff.deltas() {
+            match delta.status() {
+                Delta::Added => added += 1,
+                Delta::Deleted => deleted += 1,
+                _ => {}
+            }
+        }
+        let mut find = DiffFindOptions::new();
+        find.renames(true).exact_match_only(added.saturating_mul(deleted) > RENAME_LIMIT * RENAME_LIMIT);
+        diff.find_similar(Some(&mut find))?;
 
         let mut out = CommitDiff::default();
         let mut budget = max_lines;

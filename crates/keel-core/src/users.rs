@@ -283,7 +283,8 @@ impl Core {
         Ok(self.authenticate(&user.username, password).await?.is_some_and(|u| u.id == user.id))
     }
 
-    /// Sets a password and signs out all sessions.
+    /// Sets a password, signs out all sessions, and ends pending second
+    /// sign-in steps and reset links.
     pub(crate) async fn set_password(&self, user_id: i64, new: &str) -> Result<()> {
         if new.chars().count() < 8 {
             return invalid("Passwords must be at least 8 characters long.");
@@ -301,6 +302,11 @@ impl Core {
             .await?;
         // A second sign-in step started with the old password.
         sqlx::query("DELETE FROM login_challenges WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        // Reset links sent earlier stop working.
+        sqlx::query("DELETE FROM email_tokens WHERE user_id = ?1 AND purpose = 'reset'")
             .bind(user_id)
             .execute(&mut *tx)
             .await?;

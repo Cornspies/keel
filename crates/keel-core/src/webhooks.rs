@@ -193,6 +193,15 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether URL parsers take `host` for an IPv4 address (the URL standard's
+/// "ends in a number"). They accept more forms than `IpAddr` does: `127.1`,
+/// `0x7f.0.0.1`, `2130706433`.
+fn ends_in_number(host: &str) -> bool {
+    let last = host.strip_suffix('.').unwrap_or(host).rsplit('.').next().unwrap_or_default();
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit())) || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Checks a hook URL as far as possible without resolving it (delivery
 /// checks resolved addresses again).
 fn validate_url(url: &str, outbound: &Outbound) -> Result<()> {
@@ -209,6 +218,11 @@ fn validate_url(url: &str, outbound: &Outbound) -> Result<()> {
         Some(v6) => v6.split(']').next().unwrap_or_default(),
         None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
     };
+    // The checks below parse the host as written, which only recognizes
+    // IPv4 addresses as four decimal numbers: other forms are refused.
+    if ends_in_number(host) && host.parse::<std::net::Ipv4Addr>().is_err() {
+        return invalid("Write IP addresses as four numbers, like 192.0.2.10.");
+    }
     if !allow_private {
         let local = host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost");
         if local || host.parse::<IpAddr>().is_ok_and(is_private_ip) {
@@ -568,6 +582,11 @@ mod tests {
         assert!(validate_url("http://localhost:8080/x", &strict).is_err());
         assert!(validate_url("http://127.0.0.1/x", &strict).is_err());
         assert!(validate_url("http://[::1]:80/x", &strict).is_err());
+        for other_forms in ["http://127.1/x", "http://0x7f.0.0.1/x", "http://2130706433/x", "http://0177.0.0.1/x", "http://127.0.0.1./x"] {
+            assert!(validate_url(other_forms, &strict).is_err(), "{other_forms}");
+            assert!(validate_url(other_forms, &open).is_err(), "{other_forms}");
+        }
+        assert!(validate_url("https://1password.example/hook", &strict).is_ok(), "names may start with digits");
         assert!(validate_url("http://127.0.0.1/x", &open).is_ok());
         assert!(validate_url("ftp://example.com", &open).is_err());
         assert!(validate_url("https://user:pw@example.com", &open).is_err());

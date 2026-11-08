@@ -65,12 +65,17 @@ pub fn check_url(url: &reqwest::Url, outbound: &Outbound) -> Result<(), String> 
 }
 
 /// Follows up to `max` redirects, each checked with [`check_url`], for
-/// services that redirect (storage services, image hosts).
+/// services that redirect (storage services, image hosts). Never from
+/// https to plain http: what the request carries (credentials, for a
+/// redirect on the same host and port) would go unencrypted.
 pub fn checked_redirects(outbound: &Outbound, max: usize) -> reqwest::redirect::Policy {
     let checks = outbound.clone();
     reqwest::redirect::Policy::custom(move |attempt| {
+        let downgrade = attempt.url().scheme() == "http" && attempt.previous().iter().any(|u| u.scheme() == "https");
         if attempt.previous().len() >= max {
             attempt.error("too many redirects")
+        } else if downgrade {
+            attempt.error("redirected from https to plain http")
         } else if let Err(e) = check_url(attempt.url(), &checks) {
             attempt.error(e)
         } else {

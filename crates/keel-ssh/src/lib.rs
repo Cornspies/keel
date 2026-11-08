@@ -271,6 +271,11 @@ impl Connection {
         request: GitRequest,
         handle: Handle,
     ) -> anyhow::Result<()> {
+        // russh only opens sessions after signing in; this checks anyway.
+        if self.user.is_none() && self.deploy_key.is_none() {
+            Self::fail(&handle, channel, "keel: authentication required").await;
+            return Ok(());
+        }
         let target = self.core.git_target(&request.owner, &request.repo).await?;
         let needed = if request.service.is_write() { Access::Write } else { Access::Read };
         let access = match &target {
@@ -400,7 +405,7 @@ impl russh::server::Handler for Connection {
     async fn auth_publickey_offered(&mut self, _user: &str, offer: PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
         // Skip the signature round-trip for keys we don't know.
         let fingerprint = offer.public_key.fingerprint(HashAlg::Sha256).to_string();
-        Ok(if self.core.ssh_key_exists(&fingerprint).await? || self.core.deploy_key_exists(&fingerprint).await? {
+        Ok(if self.core.ssh_key_signs_in(&fingerprint).await? || self.core.deploy_key_exists(&fingerprint).await? {
             Auth::Accept
         } else {
             Auth::reject()

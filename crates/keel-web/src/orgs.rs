@@ -236,8 +236,8 @@ struct OrgPage {
 const POPULAR: usize = 6;
 const RECENT: usize = 5;
 const PEOPLE_SHOWN: usize = 24;
-/// Repositories whose main language is looked at for "Top languages";
-/// also the most languages worked out for one page of a list.
+/// How many repositories' main languages "Top languages" counts, and how
+/// many main languages are worked out at most for one page of a list.
 pub(crate) const LANGUAGE_SAMPLE: usize = 12;
 const TALLIES: usize = 8;
 

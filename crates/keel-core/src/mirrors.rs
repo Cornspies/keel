@@ -291,9 +291,11 @@ impl Core {
     pub async fn fetch_mirror(&self, repo_id: i64) -> Result<Option<(MirrorRemote, Vec<(String, u64)>)>> {
         let Some(remote) = self.mirror_remote(repo_id).await? else { return Ok(None) };
         self.check_repo_storage(repo_id, 1).await?;
+        // Stopped once it brings more than the owner may still store.
+        let room = self.repo_storage_room(repo_id).await?;
         let before = self.ref_snapshot(repo_id).await?;
         let path = self.config.repo_path(repo_id);
-        self.with_remote(&remote, move |r| keel_git::mirror_fetch(&path, r, FETCH_LIMIT)).await?;
+        self.with_remote(&remote, move |r| keel_git::mirror_fetch(&path, r, FETCH_LIMIT, room)).await?;
         let after = self.ref_snapshot(repo_id).await?;
         let changes: Vec<_> = keel_git::ref_changes(&before, &after)
             .into_iter()

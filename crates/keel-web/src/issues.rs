@@ -206,9 +206,8 @@ pub(crate) struct Conversation {
     pub can_comment: bool,
     /// Open boards it's on: title, column and URL.
     pub projects: Vec<(String, String, String)>,
-    /// Open boards it could be added to: number and title.
-    /// Boards to add it to: the form value (`12`, or `org:12` for the
-    /// organization's), and the name.
+    /// Boards it could be added to: the form value (`12`, or `org:12` for
+    /// the organization's), and the name.
     pub project_choices: Vec<(String, String)>,
     /// The repository is archived, so nobody can comment.
     pub archived: bool,

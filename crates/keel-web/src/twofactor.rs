@@ -11,24 +11,17 @@ use keel_core::{SecondStep, User, totp_uri};
 use serde::Deserialize;
 
 use crate::error::{AppResult, html};
-use crate::session::{SignedIn, safe_next, set_cookie};
+use crate::session::{SignedIn, cookie, cookie_name, safe_next, set_cookie, site_cookie};
 use crate::{AppState, Page};
 
 const COOKIE: &str = "keel_2fa";
 
 fn challenge_cookie(state: &AppState, token: &str, max_age: i64) -> HeaderValue {
-    let secure = if state.core.config.base_url.starts_with("https://") { "; Secure" } else { "" };
-    HeaderValue::from_str(&format!("{COOKIE}={token}; Path=/login; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"))
-        .expect("token is base64url")
+    site_cookie(state, COOKIE, token, max_age)
 }
 
-fn challenge_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(COOKIE)?.strip_prefix('='))
+fn challenge_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    cookie(headers, &cookie_name(state, COOKIE))
 }
 
 /// After the password was right: signs in, or asks for the second factor.
@@ -60,7 +53,7 @@ pub struct NextQuery {
 }
 
 pub async fn second_form(State(state): State<AppState>, headers: HeaderMap, Query(q): Query<NextQuery>) -> AppResult {
-    let valid = match challenge_token(&headers) {
+    let valid = match challenge_token(&state, &headers) {
         Some(t) => state.core.login_challenge_valid(t).await?,
         None => false,
     };
@@ -82,7 +75,7 @@ pub struct CodeForm {
 
 pub async fn second(State(state): State<AppState>, headers: HeaderMap, Form(f): Form<CodeForm>) -> AppResult {
     let next = safe_next(f.next.as_deref());
-    let Some(token) = challenge_token(&headers) else {
+    let Some(token) = challenge_token(&state, &headers) else {
         return Ok(Redirect::to("/login").into_response());
     };
     let error = match state.core.complete_login_challenge(token, &f.code).await? {
@@ -182,7 +175,11 @@ pub async fn security(State(state): State<AppState>, SignedIn(user): SignedIn) -
 
 pub async fn setup(State(state): State<AppState>, SignedIn(user): SignedIn) -> AppResult {
     if !user.totp_enabled {
-        state.core.begin_totp_setup(&user).await?;
+        match state.core.begin_totp_setup(&user).await {
+            // Invalid: it was turned on in the meantime.
+            Ok(_) | Err(keel_core::Error::Invalid(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(Redirect::to("/settings/security").into_response())
 }
@@ -200,10 +197,25 @@ pub async fn enable(State(state): State<AppState>, SignedIn(user): SignedIn, For
     }
 }
 
+/// Turning two-factor authentication off, or making new recovery codes:
+/// the password and a second factor.
 #[derive(Deserialize)]
-pub struct PasswordForm {
+pub struct SecondFactorForm {
     #[serde(default)]
     password: String,
+    #[serde(default)]
+    code: String,
+}
+
+/// [`confirmed`], and a code from the authenticator app or a recovery code.
+async fn confirmed_both(state: &AppState, user: &User, headers: &HeaderMap, f: &SecondFactorForm) -> AppResult<Option<axum::response::Response>> {
+    if let Some(refused) = confirmed(state, user, headers, &f.password).await? {
+        return Ok(Some(refused));
+    }
+    match state.core.confirm_second_factor(user.id, &f.code).await? {
+        None => Ok(None),
+        Some(why) => Ok(Some(security_page(state, user.clone(), Vec::new(), Some(why.into())).await?)),
+    }
 }
 
 /// Confirms a sensitive change (see `session::confirm`); `Some` is the
@@ -220,9 +232,12 @@ pub async fn disable(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     headers: HeaderMap,
-    Form(f): Form<PasswordForm>,
+    Form(f): Form<SecondFactorForm>,
 ) -> AppResult {
-    if let Some(refused) = confirmed(&state, &user, &headers, &f.password).await? {
+    if !user.totp_enabled {
+        return Ok(Redirect::to("/settings/security").into_response());
+    }
+    if let Some(refused) = confirmed_both(&state, &user, &headers, &f).await? {
         return Ok(refused);
     }
     state.core.disable_totp(user.id).await?;
@@ -233,12 +248,12 @@ pub async fn recovery(
     State(state): State<AppState>,
     SignedIn(user): SignedIn,
     headers: HeaderMap,
-    Form(f): Form<PasswordForm>,
+    Form(f): Form<SecondFactorForm>,
 ) -> AppResult {
     if !user.totp_enabled {
         return Ok(Redirect::to("/settings/security").into_response());
     }
-    if let Some(refused) = confirmed(&state, &user, &headers, &f.password).await? {
+    if let Some(refused) = confirmed_both(&state, &user, &headers, &f).await? {
         return Ok(refused);
     }
     let codes = state.core.new_recovery_codes(user.id).await?;

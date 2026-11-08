@@ -20,6 +20,9 @@ pub struct Release {
     pub draft: bool,
     pub prerelease: bool,
     pub author: Option<String>,
+    /// For a release imported from elsewhere (with no account here): the
+    /// author's profile there, which `author` is the last part of.
+    pub imported_author: Option<String>,
     pub created_at: i64,
     pub published_at: Option<i64>,
 }
@@ -56,6 +59,7 @@ macro_rules! release_select {
             -- Imported releases: the last part of the author's profile URL.
             COALESCE(u.username, replace(r.original_author, rtrim(r.original_author, replace(r.original_author, '/', '')), ''))
               AS author,
+            CASE WHEN u.username IS NULL THEN r.original_author END AS imported_author,
             r.created_at, r.published_at
          FROM releases r LEFT JOIN users u ON u.id = r.author_id "
     };
@@ -294,19 +298,22 @@ impl Core {
     ) -> Result<ReleaseAsset> {
         let name = name.trim();
         validate_asset_name(name)?;
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM release_assets WHERE release_id = ?1")
-            .bind(release.id)
-            .fetch_one(&self.db)
-            .await?;
-        if count >= MAX_ASSETS {
-            return invalid(format!("A release can have at most {MAX_ASSETS} files."));
-        }
-        self.check_repo_storage(release.repo_id, size).await?;
         let content_type = if content_type.is_empty() || content_type.len() > 100 || content_type.contains(['\r', '\n']) {
             "application/octet-stream"
         } else {
             content_type
         };
+        // Counted and checked in the transaction that adds it, so that
+        // concurrent uploads can't go past the limits together.
+        let mut tx = self.write_tx().await?;
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM release_assets WHERE release_id = ?1")
+            .bind(release.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if count >= MAX_ASSETS {
+            return invalid(format!("A release can have at most {MAX_ASSETS} files."));
+        }
+        self.check_repo_storage_in(&mut tx, release.repo_id, size).await?;
         let inserted = sqlx::query_as::<_, (i64,)>(
             "INSERT INTO release_assets (release_id, name, size, content_type, uploader_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
@@ -317,7 +324,7 @@ impl Core {
         .bind(content_type)
         .bind(uploader.id)
         .bind(now())
-        .fetch_one(&self.db)
+        .fetch_one(&mut *tx)
         .await;
         let (id,) = match inserted {
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -325,6 +332,7 @@ impl Core {
             }
             r => r?,
         };
+        tx.commit().await?;
         let path = self.release_asset_path(id);
         let moved = async {
             tokio::fs::create_dir_all(path.parent().expect("has a parent")).await?;

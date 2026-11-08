@@ -25,7 +25,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::error::{AppResult, html};
-use crate::session::{SignedIn, Viewer, safe_next};
+use crate::session::{SignedIn, Viewer, cookie, cookie_name, safe_next, site_cookie};
 use crate::{AppState, Page};
 
 const COOKIE: &str = "keel_oidc";
@@ -83,7 +83,7 @@ impl Provider {
             return Err(format!("the provider calls itself {}, not {}", d.issuer, self.config.issuer));
         }
         for endpoint in [&d.authorization_endpoint, &d.token_endpoint].into_iter().chain(d.userinfo_endpoint.as_ref()) {
-            if !secure_url(endpoint) {
+            if !endpoint_ok(&self.config.issuer, endpoint) {
                 return Err(format!("{endpoint} isn't https://"));
             }
         }
@@ -101,6 +101,14 @@ pub fn secure_url(url: &str) -> bool {
         "http" => host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()),
         _ => false,
     }
+}
+
+/// Whether a provider's `endpoint` may be used: https, like its issuer, or
+/// plain http to this machine only if the issuer is too (trying it out).
+/// The token endpoint gets the client secret and hands out the ID tokens
+/// keel trusts without checking their signature.
+fn endpoint_ok(issuer: &str, endpoint: &str) -> bool {
+    secure_url(endpoint) && (endpoint.starts_with("https://") || !issuer.starts_with("https://"))
 }
 
 /// What the browser carries to the provider and back, signed.
@@ -131,18 +139,11 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 fn flow_cookie(state: &AppState, value: &str, max_age: i64) -> HeaderValue {
-    let secure = if state.core.config.base_url.starts_with("https://") { "; Secure" } else { "" };
-    HeaderValue::from_str(&format!("{COOKIE}={value}; Path=/login/oidc; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"))
-        .expect("cookie is ASCII")
+    site_cookie(state, COOKIE, value, max_age)
 }
 
 fn read_flow(state: &AppState, headers: &HeaderMap) -> Option<Flow> {
-    let value = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(COOKIE)?.strip_prefix('='))?;
+    let value = cookie(headers, &cookie_name(state, COOKIE))?;
     let (payload, sig) = value.rsplit_once('.')?;
     if !same(&mac(state, payload), sig) {
         return None;
@@ -465,5 +466,9 @@ mod tests {
         assert!(secure_url("http://localhost:8080"));
         assert!(!secure_url("http://id.example.com"));
         assert!(!secure_url("ftp://id.example.com"));
+        assert!(endpoint_ok("https://id.example.com", "https://id.example.com/token"));
+        assert!(!endpoint_ok("https://id.example.com", "http://localhost:8080/token"), "not below an https issuer");
+        assert!(endpoint_ok("http://localhost:8080", "http://localhost:8080/token"));
+        assert!(!endpoint_ok("http://localhost:8080", "http://id.example.com/token"));
     }
 }

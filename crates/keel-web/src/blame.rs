@@ -48,7 +48,8 @@ pub(crate) struct BlameRow {
 
 pub(crate) enum BlameContent {
     Rows(Vec<BlameRow>),
-    /// Binary, a Git LFS pointer, or larger than files are displayed.
+    /// The file isn't blamed (it's binary, a Git LFS pointer, or too large
+    /// to show); the message says why.
     Unavailable(&'static str),
     TooSlow,
 }

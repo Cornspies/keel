@@ -416,12 +416,27 @@ async fn load_pull(state: &AppState, repo: &Repo, number: i64) -> AppResult<Load
     Ok(Loaded { issue, pull, base, head, base_tip, head_tip })
 }
 
-async fn header(state: &AppState, repo: &Repo, l: &Loaded, tab: &'static str) -> AppResult<(PullHeader, Option<Changes>)> {
+async fn header(
+    state: &AppState,
+    repo: &Repo,
+    viewer: Option<&User>,
+    l: &Loaded,
+    tab: &'static str,
+) -> AppResult<(PullHeader, Option<Changes>)> {
     let changes = match (l.base, l.head) {
         (Some(base), Some(head)) => Some(changes(state, repo, repo, base, head).await?),
         _ => None,
     };
     let url = format!("/{}/{}", repo.owner, repo.name);
+    // A fork made private since stays unnamed to those who can't see it.
+    let head_visible = match l.pull.head_repo_id {
+        Some(id) if id == repo.id => true,
+        Some(id) => match state.core.repo_by_id(id).await? {
+            Some(head) => state.core.access(&head, viewer).await? > Access::None,
+            None => false,
+        },
+        None => false,
+    };
     Ok((
         PullHeader {
             base_ref: l.pull.base_ref.clone(),
@@ -430,6 +445,7 @@ async fn header(state: &AppState, repo: &Repo, l: &Loaded, tab: &'static str) ->
                 .pull
                 .head_repo
                 .as_ref()
+                .filter(|_| head_visible)
                 .map(|r| format!("/{r}/tree/{}", encode_path(&l.pull.head_ref))),
             commit_count: changes.as_ref().map_or(0, |c| c.commits.len()),
             file_count: changes.as_ref().map_or(0, |c| c.files.len()),
@@ -503,7 +519,7 @@ async fn show_page(
     if !l.issue.is_pull {
         return Ok(Redirect::to(&issue_url(repo, &l.issue)).into_response());
     }
-    let (pr, changes) = header(state, repo, &l, "conversation").await?;
+    let (pr, changes) = header(state, repo, viewer.as_ref(), &l, "conversation").await?;
     let merge = if l.issue.is_open() {
         Some(merge_status(state, repo, l.base_tip, l.head_tip).await?)
     } else {
@@ -701,7 +717,7 @@ pub async fn commits(
 ) -> AppResult {
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let l = load_pull(&state, &repo, number).await?;
-    let (pr, changes) = header(&state, &repo, &l, "commits").await?;
+    let (pr, changes) = header(&state, &repo, viewer.as_ref(), &l, "commits").await?;
     let conv = conversation(&state, &repo, access, &l.issue, viewer.as_ref(), None).await?;
     html(CommitsTab {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "pulls", "").await?,
@@ -960,7 +976,7 @@ pub async fn files(
 ) -> AppResult {
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let l = load_pull(&state, &repo, number).await?;
-    let (pr, changes) = header(&state, &repo, &l, "files").await?;
+    let (pr, changes) = header(&state, &repo, viewer.as_ref(), &l, "files").await?;
     let conv = conversation(&state, &repo, access, &l.issue, viewer.as_ref(), None).await?;
     let mut c = changes.unwrap_or(Changes {
         commits: Vec::new(),
@@ -991,13 +1007,13 @@ pub async fn files(
     let signed_in = viewer.is_some();
     html(FilesTab {
         repo: RepoView::new(&state, &repo, access, viewer.as_ref(), "pulls", "").await?,
-        can_review: viewer.as_ref().is_some_and(|v| !l.issue.is_author(v)) && l.issue.is_open(),
+        can_review: viewer.as_ref().is_some_and(|v| !l.issue.is_author(v)) && l.issue.is_open() && !repo.is_archived(),
         signed_in,
         page: Page::new(&state, viewer, format!("Files changed · Pull request #{number}")),
         inline: l.head.map(|head| InlineCtx {
             post_url: format!("{}/comments", pr.url),
             head: head.to_string(),
-            can_comment: signed_in,
+            can_comment: signed_in && !repo.is_archived(),
             form_at: q.comment.unwrap_or_default(),
         }),
         pr,

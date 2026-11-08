@@ -16,28 +16,34 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::AppState;
 use crate::session::basic_auth;
 
-/// Upper bound for gzip-compressed requests once decompressed. Clients only
-/// compress negotiation requests, which are small; packfiles (pushes) are
-/// never compressed this way.
-const MAX_GZIP_PLAIN: u64 = 64 * 1024 * 1024;
+/// Upper bound for negotiation requests (what fetches send, and what
+/// clients gzip), once decompressed: they're small. Pushes' packfiles are
+/// never compressed this way, and `receive.maxInputSize` limits them.
+const MAX_NEGOTIATION: u64 = 64 * 1024 * 1024;
 
 /// Streams a request body into git's stdin, decompressing it if `gzip`.
-/// Returns whether it decompressed to more than [`MAX_GZIP_PLAIN`] (then
-/// git only got the start). Without gzip, the body goes through as is.
-async fn write_body(body: Body, gzip: bool, mut stdin: impl AsyncWrite + Unpin) -> anyhow::Result<bool> {
+/// Returns whether it was (or decompressed to) more than
+/// [`MAX_NEGOTIATION`], in which case git only got the start. Uncompressed
+/// bodies go through as they are, also capped if `negotiation` (git
+/// upload-pack has no limit of its own).
+async fn write_body(body: Body, gzip: bool, negotiation: bool, mut stdin: impl AsyncWrite + Unpin) -> anyhow::Result<bool> {
     let mut stream = body.into_data_stream();
-    if !gzip {
+    if !gzip && !negotiation {
         while let Some(chunk) = stream.next().await {
             stdin.write_all(&chunk?).await?;
         }
         return Ok(false);
     }
-    let compressed = StreamReader::new(stream.map(|c| c.map_err(std::io::Error::other)));
-    copy_capped(async_compression::tokio::bufread::GzipDecoder::new(compressed), stdin).await
+    let body = StreamReader::new(stream.map(|c| c.map_err(std::io::Error::other)));
+    if gzip {
+        copy_capped(async_compression::tokio::bufread::GzipDecoder::new(body), stdin).await
+    } else {
+        copy_capped(body, stdin).await
+    }
 }
 
-/// Copies `plain` to `stdin`, up to [`MAX_GZIP_PLAIN`] bytes; whether there
-/// was more. Keeps counting if git stops reading (e.g. at garbage), so
+/// Copies `plain` to `stdin`, up to [`MAX_NEGOTIATION`] bytes; whether
+/// there was more. Keeps counting if git stops reading (e.g. at garbage), so
 /// oversized requests are always recognized.
 async fn copy_capped(mut plain: impl AsyncRead + Unpin, mut stdin: impl AsyncWrite + Unpin) -> anyhow::Result<bool> {
     let mut buf = vec![0; 64 * 1024];
@@ -48,7 +54,7 @@ async fn copy_capped(mut plain: impl AsyncRead + Unpin, mut stdin: impl AsyncWri
             return Ok(false);
         }
         total += n as u64;
-        if total > MAX_GZIP_PLAIN {
+        if total > MAX_NEGOTIATION {
             return Ok(true);
         }
         git_reads = git_reads && stdin.write_all(&buf[..n]).await.is_ok();
@@ -280,7 +286,7 @@ async fn rpc(
         .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
     let mut writer = tokio::spawn(async move {
         // Dropping stdin at the end signals EOF to git.
-        write_body(body, gzip, &mut stdin).await.unwrap_or_else(|e| {
+        write_body(body, gzip, service == Service::UploadPack, &mut stdin).await.unwrap_or_else(|e| {
             tracing::debug!("git http request body: {e}");
             false
         })
@@ -346,19 +352,27 @@ mod tests {
             Body::from(e.finish().unwrap())
         };
         let mut out = Vec::new();
-        assert!(!write_body(gzip(1000), true, &mut out).await.unwrap());
+        assert!(!write_body(gzip(1000), true, true, &mut out).await.unwrap());
         assert_eq!(out, vec![b'0'; 1000]);
         // Too large, whether git reads it all or gives up early.
         let mut out = Vec::new();
-        assert!(write_body(gzip(MAX_GZIP_PLAIN as usize + 1), true, &mut out).await.unwrap());
-        assert!(out.len() as u64 <= MAX_GZIP_PLAIN);
+        assert!(write_body(gzip(MAX_NEGOTIATION as usize + 1), true, false, &mut out).await.unwrap());
+        assert!(out.len() as u64 <= MAX_NEGOTIATION);
         let (stdin, stopped) = tokio::io::duplex(1024);
         drop(stopped);
-        assert!(write_body(gzip(MAX_GZIP_PLAIN as usize + 1), true, stdin).await.unwrap());
-        assert!(write_body(Body::from("not gzip"), true, Vec::new()).await.is_err());
+        assert!(write_body(gzip(MAX_NEGOTIATION as usize + 1), true, true, stdin).await.unwrap());
+        assert!(write_body(Body::from("not gzip"), true, true, Vec::new()).await.is_err());
         let mut out = Vec::new();
-        assert!(!write_body(Body::from("plain"), false, &mut out).await.unwrap());
+        assert!(!write_body(Body::from("plain"), false, true, &mut out).await.unwrap());
         assert_eq!(out, b"plain");
+        // Uncompressed fetch requests have the same limit; pushes don't.
+        let big = || Body::from(vec![b'0'; MAX_NEGOTIATION as usize + 1]);
+        let mut out = Vec::new();
+        assert!(write_body(big(), false, true, &mut out).await.unwrap());
+        assert!(out.len() as u64 <= MAX_NEGOTIATION);
+        let mut out = Vec::new();
+        assert!(!write_body(big(), false, false, &mut out).await.unwrap());
+        assert_eq!(out.len() as u64, MAX_NEGOTIATION + 1);
     }
 
     #[test]

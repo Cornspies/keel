@@ -367,12 +367,11 @@ async fn search_rev(state: &AppState, matcher: &Matcher, repo: &Repo, rev: Strin
         None => None,
     };
     let index = state.search.clone();
-    let m = matcher.clone();
-    let (owner, name, repo_id) = (repo.owner.clone(), repo.name.clone(), repo.id as u64);
-    with_git(state, repo, move |g: &GitRepo| {
+    let grams = matcher.grams();
+    let repo_id = repo.id as u64;
+    let target_rev = encode_path(&rev);
+    let planned = with_git(state, repo, move |g: &GitRepo| {
         let Some(tip) = g.resolve_rev(&rev) else { return Ok(None) };
-        let t = Target { repo: format!("{owner}/{name}"), base: format!("/{owner}/{name}"), rev: encode_path(&rev) };
-        let grams = m.grams();
         // Files to read, and whether the index covers the rest.
         let plan = match (&index, indexed) {
             (Some(index), Some(base)) if !grams.is_empty() => {
@@ -396,6 +395,19 @@ async fn search_rev(state: &AppState, matcher: &Matcher, repo: &Repo, rev: Strin
             }
             _ => None,
         };
+        Ok(Some((tip, plan)))
+    })
+    .await?;
+    let Some((tip, plan)) = planned else { return Ok(None) };
+    // Reading every file (up to MAX_SCAN_BYTES) is costly, and anyone can
+    // ask for it in a public repository: only a few run at a time.
+    let _turn = match plan {
+        Some(_) => None,
+        None => Some(state.scan_slots.acquire().await.map_err(|e| AppError::Internal(e.into()))?),
+    };
+    let m = matcher.clone();
+    let t = Target { repo: format!("{}/{}", repo.owner, repo.name), base: format!("/{}/{}", repo.owner, repo.name), rev: target_rev };
+    with_git(state, repo, move |g: &GitRepo| {
         let files = match plan {
             Some(files) => files,
             None => g.files(tip)?.into_iter().map(|f| (f.path, f.id)).collect(),

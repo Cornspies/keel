@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use keel_git::{Oid, SignedCommit};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey, SignedPublicSubKey};
-use pgp::packet::SignatureType;
+use pgp::packet::{Signature, SignatureType, SubpacketData};
 use pgp::types::KeyDetails;
 
 use crate::{Core, Error, Result, invalid, now};
@@ -77,6 +77,8 @@ pub fn parse_gpg_key(armored: &str) -> Result<ParsedGpgKey> {
         .details
         .users
         .iter()
+        // An address the key's owner revoked isn't theirs any more.
+        .filter(|u| !revoked(&u.signatures))
         .filter_map(|u| {
             let id = String::from_utf8_lossy(u.id.id()).into_owned();
             let email = match (id.rfind('<'), id.rfind('>')) {
@@ -89,16 +91,46 @@ pub fn parse_gpg_key(armored: &str) -> Result<ParsedGpgKey> {
         .collect();
     emails.sort_unstable();
     emails.dedup();
-    let created = i64::from(key.primary_key.created_at().as_secs());
-    let expires_at = key
-        .details
+    let expires_at = primary_expiry(&key);
+    Ok(ParsedGpgKey { fingerprint, ids, emails, expires_at })
+}
+
+fn created_at(s: &Signature) -> u64 {
+    s.created().map_or(0, |t| u64::from(t.as_secs()))
+}
+
+/// Whether the latest of a user ID's self-signatures revokes it.
+fn revoked(signatures: &[Signature]) -> bool {
+    signatures.iter().max_by_key(|s| created_at(s)).is_some_and(|s| s.typ() == Some(SignatureType::CertRevocation))
+}
+
+/// The primary key's latest self-signature (all of them are verified, see
+/// `verify_bindings`): it sets the key's current expiry and uses, which
+/// replace those of older ones.
+fn latest_self_signature(key: &SignedPublicKey) -> Option<&Signature> {
+    key.details
         .users
         .iter()
         .flat_map(|u| &u.signatures)
-        .filter_map(|s| s.key_expiration_time())
-        .map(|d| created + i64::from(d.as_secs()))
-        .max();
-    Ok(ParsedGpgKey { fingerprint, ids, emails, expires_at })
+        .filter(|s| s.typ() != Some(SignatureType::CertRevocation))
+        .chain(&key.details.direct_signatures)
+        .max_by_key(|s| created_at(s))
+}
+
+/// When the primary key expires, if it does (an expiry of 0 is never).
+fn primary_expiry(key: &SignedPublicKey) -> Option<i64> {
+    let created = i64::from(key.primary_key.created_at().as_secs());
+    let after = latest_self_signature(key)?.key_expiration_time()?.as_secs();
+    (after > 0).then(|| created + i64::from(after))
+}
+
+/// Whether the primary key may make signatures: yes, unless its latest
+/// self-signature has key flags without signing (a key only for
+/// certifying, whose subkeys sign).
+fn primary_signs(key: &SignedPublicKey) -> bool {
+    let Some(sig) = latest_self_signature(key) else { return true };
+    let says = sig.config().is_some_and(|c| c.hashed_subpackets().any(|p| matches!(p.data, SubpacketData::KeyFlags(_))));
+    !says || sig.key_flags().sign()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,22 +492,34 @@ fn check(
             let Some(key_id) = checked else {
                 return unverified("invalid", "GPG", shown, Some(owner));
             };
-            let signed_at = sig.signature.created().map(|t| i64::from(t.as_secs()));
-            if let (Some(expires), Some(at)) = (expires_at, signed_at)
-                && at > *expires
-            {
+            // A signature without a creation time (which it must have) is
+            // treated as made now.
+            let at = sig.signature.created().map_or_else(now, |t| i64::from(t.as_secs()));
+            // By the key as it is now (keys stored by older versions have
+            // an expiry taken from any self-signature, not the latest).
+            if key.map_or(*expires_at, primary_expiry).is_some_and(|expires| at > expires) {
                 return unverified("expired_key", "GPG", key_id, Some(owner));
             }
-            // Keys stored before keel checked subkeys, or subkeys that
-            // expired since.
-            let subkey = key
-                .into_iter()
-                .flat_map(|k| &k.public_subkeys)
-                .find(|sub| hex::encode_upper(sub.key.legacy_key_id()) == key_id);
-            match subkey.map(|sub| subkey_state(sub, signed_at.unwrap_or_else(now))) {
-                Some(SubkeyState::Unusable) => return unverified("invalid", "GPG", key_id, Some(owner)),
-                Some(SubkeyState::Expired) => return unverified("expired_key", "GPG", key_id, Some(owner)),
-                _ => {}
+            let Some(key) = key else { return unverified("invalid", "GPG", key_id, Some(owner)) };
+            let subkey = key.public_subkeys.iter().find(|sub| hex::encode_upper(sub.key.legacy_key_id()) == key_id);
+            let signer_created = match subkey {
+                // Subkeys stored before keel checked them, or that expired
+                // or were revoked since.
+                Some(sub) => match subkey_state(sub, at) {
+                    SubkeyState::Unusable => return unverified("invalid", "GPG", key_id, Some(owner)),
+                    SubkeyState::Expired => return unverified("expired_key", "GPG", key_id, Some(owner)),
+                    SubkeyState::Usable => i64::from(sub.key.created_at().as_secs()),
+                },
+                None if hex::encode_upper(key.primary_key.legacy_key_id()) == key_id && primary_signs(key) => {
+                    i64::from(key.primary_key.created_at().as_secs())
+                }
+                // A primary key only for certifying, or a key that's no
+                // longer part of this one.
+                None => return unverified("invalid", "GPG", key_id, Some(owner)),
+            };
+            // A signature dated before its key was created has a false date.
+            if at < signer_created {
+                return unverified("invalid", "GPG", key_id, Some(owner));
             }
             // As GitHub: the key must be for the committer's email.
             if !emails.lines().any(|e| e == s.committer_email.to_lowercase()) {
@@ -659,5 +703,44 @@ mod tests {
             core.delete_gpg_key(ada.id, k.id).await.unwrap();
         }
         assert!(parse_gpg_key("nonsense").is_err());
+    }
+
+    /// A key's expiry, addresses and uses come from its latest
+    /// self-signatures.
+    #[test]
+    fn gpg_keys_as_they_are_now() {
+        if Command::new("gpg").arg("--version").output().is_err() {
+            return;
+        }
+        let gnupg = tempfile::tempdir().unwrap();
+        let home = [("GNUPGHOME", gnupg.path())];
+        const T0: i64 = 1_700_000_000;
+        let gpg = |at: i64, args: &[&str]| {
+            let time = format!("{at}!");
+            let mut all = vec!["gpg", "--batch", "--quiet", "--passphrase", "", "--pinentry-mode", "loopback"];
+            all.extend(["--faked-system-time", &time]);
+            all.extend_from_slice(args);
+            run(gnupg.path(), &home, &all)
+        };
+        gpg(T0, &["--quick-gen-key", "Ada <ada@example.com>", "ed25519", "sign", "2y"]);
+        let colons = gpg(T0, &["--list-keys", "--with-colons", "ada@example.com"]);
+        let fpr = colons.lines().find(|l| l.starts_with("fpr")).unwrap().split(':').nth(9).unwrap().to_owned();
+        gpg(T0 + 10, &["--quick-add-uid", &fpr, "Ada <ada@old.example>"]);
+        // Later the expiry was brought forward, and the old address revoked.
+        gpg(T0 + 20, &["--quick-set-expire", &fpr, "1y"]);
+        gpg(T0 + 30, &["--quick-revoke-uid", &fpr, "Ada <ada@old.example>"]);
+        let armored = gpg(T0 + 40, &["--armor", "--export", &fpr]);
+        let parsed = parse_gpg_key(&armored).unwrap();
+        assert_eq!(parsed.emails, ["ada@example.com"]);
+        assert_eq!(parsed.expires_at, Some(T0 + 20 + 365 * 86400));
+        let (key, _) = SignedPublicKey::from_string(&armored).unwrap();
+        assert!(primary_signs(&key));
+
+        // A primary key only for certifying doesn't sign.
+        gpg(T0, &["--quick-gen-key", "Cert <cert@example.com>", "ed25519", "cert", "never"]);
+        let (key, _) = SignedPublicKey::from_string(&gpg(T0, &["--armor", "--export", "cert@example.com"])).unwrap();
+        assert!(!primary_signs(&key));
+        assert_eq!(primary_expiry(&key), None);
+        let _ = Command::new("gpgconf").args(["--kill", "gpg-agent"]).env("GNUPGHOME", gnupg.path()).status();
     }
 }

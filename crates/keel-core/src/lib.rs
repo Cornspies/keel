@@ -187,6 +187,10 @@ pub struct Core {
     setup_code: Arc<std::sync::Mutex<Option<String>>>,
     /// Encrypts secrets kept in the database.
     secrets: Arc<secrets::SecretBox>,
+    /// Held shared while a Git LFS file is moved into the store and
+    /// recorded, and exclusively while `prune_lfs` removes unrecorded files,
+    /// so pruning can't remove a file that's moved in but not recorded yet.
+    lfs_gc: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Makes a data directory from before 0.15 (or one someone loosened)
@@ -239,7 +243,6 @@ impl Core {
             .await?;
         sqlx::migrate!("./migrations").run(&db).await?;
         tighten_permissions(&config.data_dir);
-        let token_secret = Arc::new(Self::load_token_secret(&db).await?);
         let signing_key = signing::SigningKey::load(&config.data_dir.join(signing::KEY_FILE), true)?;
         // A missing key must not be replaced while secrets need the old one.
         let key_path = config.secret_key_path();
@@ -252,6 +255,9 @@ impl Core {
             );
         }
         let secret_box = secrets::SecretBox::load(&key_path, create)?;
+        // The secret that signs LFS tokens (and more) is derived with the
+        // key too, which isn't in the database.
+        let token_secret = Arc::new(secret_box.bind(&Self::load_token_secret(&db).await?));
         let core = Self::assemble(db, config, token_secret, signing_key, secret_box);
         let encrypted = core.encrypt_plain_secrets().await?;
         if encrypted > 0 {
@@ -306,6 +312,7 @@ impl Core {
             signing_key: Arc::new(signing_key),
             setup_code: Arc::default(),
             secrets: Arc::new(secret_box),
+            lfs_gc: Arc::default(),
         }
     }
 

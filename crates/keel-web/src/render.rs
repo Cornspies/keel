@@ -312,7 +312,7 @@ fn sanitize(html: &str) -> String {
     ammonia::Builder::default()
         .attribute_filter(|element, attribute, value| match (element, attribute) {
             ("img", "src") => Some(crate::images::img_src(value).into()),
-            // Would bypass `src`.
+            // Its images would load directly, not through the proxy `src` uses.
             ("img", "srcset") => None,
             _ => Some(value.into()),
         })

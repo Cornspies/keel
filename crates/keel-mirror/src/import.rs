@@ -1,8 +1,9 @@
 //! Imports repositories from GitHub and Gitea: the API client, and turning
 //! what it returns into what `keel_core::imports` stores.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
 use keel_core::{
@@ -17,6 +18,12 @@ use crate::lfs;
 const PER_PAGE: usize = 50;
 /// A runaway pagination stops here.
 const MAX_PAGES: usize = 4000;
+/// Most bytes one response of the source's API may have (a page of 50
+/// items is well under 1 MiB).
+const MAX_ANSWER: usize = 32 << 20;
+/// Most bytes of all API responses of one import together, so a source
+/// can't make keel hold more than this.
+const MAX_ANSWERS: u64 = 512 << 20;
 
 /// The source's API.
 struct Api<'a> {
@@ -26,6 +33,8 @@ struct Api<'a> {
     base: String,
     token: String,
     outbound: keel_core::Outbound,
+    /// Bytes of responses read so far.
+    read: AtomicU64,
 }
 
 impl Api<'_> {
@@ -37,7 +46,8 @@ impl Api<'_> {
             ImportService::GitHub => req.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28"),
             ImportService::Gitea => req.header("Accept", "application/json"),
         };
-        // Only to the source itself, not to URLs it sends (e.g. for files).
+        // The token only goes to the source itself, not to URLs it sends
+        // (e.g. for files).
         let ours = reqwest::Url::parse(&self.base).is_ok_and(|base| lfs::same_origin(&base, &parsed))
             || (self.service == ImportService::GitHub && parsed.scheme() == "https" && parsed.host_str() == Some("api.github.com"));
         if !self.token.is_empty() && ours {
@@ -61,8 +71,16 @@ impl Api<'_> {
         let rate_limited = res.headers().get("x-ratelimit-remaining").is_some_and(|v| v == "0");
         match status.as_u16() {
             200..=299 => {
-                let body = res.text().await.map_err(|e| format!("{} didn't answer: {e}", self.service.name()))?;
-                serde_json::from_str(&body).map_err(|e| format!("{} sent something unexpected: {e}", self.service.name()))
+                let name = self.service.name();
+                let body = crate::read_capped(res, MAX_ANSWER).await.map_err(|e| format!("{name}'s answer for {path} couldn't be read: {e}"))?;
+                let read = self.read.fetch_add(body.len() as u64, Ordering::Relaxed) + body.len() as u64;
+                if read > MAX_ANSWERS {
+                    return Err(format!(
+                        "{name} sent more than {} MiB of issues, pull requests, comments and releases, more than keel imports.",
+                        MAX_ANSWERS >> 20
+                    ));
+                }
+                serde_json::from_slice(&body).map_err(|e| format!("{name} sent something unexpected: {e}"))
             }
             401 => Err("The access token was refused.".into()),
             403 | 429 if rate_limited || status.as_u16() == 429 => Err(format!(
@@ -77,19 +95,20 @@ impl Api<'_> {
         }
     }
 
-    /// Every item of a paginated list.
-    async fn all(&self, path: &str) -> Result<Vec<Value>, String> {
+    /// Every item of a paginated list, converted by `keep` page by page, so
+    /// a whole list of the API's (large) items is never held at once.
+    async fn all<T>(&self, path: &str, keep: impl FnMut(Value) -> Option<T>) -> Result<Vec<T>, String> {
+        let mut keep = keep;
         let mut out = Vec::new();
         for page in 1..=MAX_PAGES {
             let items = match self.get(path, Some(page)).await? {
                 Value::Array(items) => items,
                 _ => return Err(format!("{} sent something unexpected for {path}.", self.service.name())),
             };
-            let n = items.len();
-            out.extend(items);
-            if n == 0 {
+            if items.is_empty() {
                 break;
             }
+            out.extend(items.into_iter().filter_map(&mut keep));
         }
         Ok(out)
     }
@@ -114,8 +133,14 @@ fn time(v: &Value) -> Option<i64> {
 
 /// A user's profile on the source.
 fn author(user: &Value, web: &str) -> String {
-    match user["html_url"].as_str().filter(|u| u.starts_with("http")) {
-        Some(url) => url.to_owned(),
+    // It's shown as a link: only an http(s) URL, normalized as browsers
+    // would read it.
+    let profile = user["html_url"]
+        .as_str()
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some());
+    match profile {
+        Some(url) => url.to_string(),
         None => format!("{web}/{}", user["login"].as_str().filter(|l| !l.is_empty()).unwrap_or("ghost")),
     }
 }
@@ -163,6 +188,22 @@ fn issue(v: &Value, pulls: &HashMap<i64, Value>, web: &str) -> Option<ImportedIs
         labels: v["labels"].as_array().map(|ls| ls.iter().map(|l| text(&l["name"])).collect()).unwrap_or_default(),
         milestone: v["milestone"]["title"].as_str().map(str::to_owned),
         pull,
+    })
+}
+
+/// The fields of a pull request (from the list) that [`issue`] reads: the
+/// list's entries are large, with both repositories in full.
+fn slim_pull(p: &Value) -> Value {
+    let labels: Vec<Value> = p["labels"].as_array().into_iter().flatten().map(|l| serde_json::json!({ "name": l["name"] })).collect();
+    serde_json::json!({
+        "number": p["number"], "title": p["title"], "body": p["body"], "state": p["state"],
+        "user": { "login": p["user"]["login"], "html_url": p["user"]["html_url"] },
+        "created_at": p["created_at"], "updated_at": p["updated_at"], "closed_at": p["closed_at"],
+        "merged_at": p["merged_at"], "merge_commit_sha": p["merge_commit_sha"], "draft": p["draft"],
+        "base": { "ref": p["base"]["ref"] },
+        "head": { "ref": p["head"]["ref"], "sha": p["head"]["sha"] },
+        "labels": labels,
+        "milestone": { "title": p["milestone"]["title"] },
     })
 }
 
@@ -298,43 +339,43 @@ async fn import(core: &Core, client: &reqwest::Client, repo_id: i64) -> Result<V
         base: source.api_url.clone(),
         token: core.import_token(repo_id).await.map_err(message)?,
         outbound: core.config.outbound(),
+        read: AtomicU64::new(0),
     };
     if import.with_issues {
         progress("Labels and milestones".into()).await;
-        let labels: Vec<ImportedLabel> = api.all("/labels").await?.iter().map(label).collect();
+        let labels: Vec<ImportedLabel> = api.all("/labels", |v| Some(label(&v))).await?;
         core.import_labels(repo_id, &labels).await.map_err(message)?;
-        for m in api.all("/milestones?state=all").await? {
-            core.import_milestone(repo_id, &milestone(&m)).await.map_err(message)?;
+        for m in api.all("/milestones?state=all", |v| Some(milestone(&v))).await? {
+            core.import_milestone(repo_id, &m).await.map_err(message)?;
         }
 
         progress("Pull requests".into()).await;
         let pulls: HashMap<i64, Value> =
-            api.all("/pulls?state=all").await?.into_iter().filter_map(|p| Some((p["number"].as_i64()?, p))).collect();
+            api.all("/pulls?state=all", |p| Some((p["number"].as_i64()?, slim_pull(&p)))).await?.into_iter().collect();
         progress("Issues".into()).await;
-        let mut issues = api.all("/issues?state=all&sort=created&direction=asc").await?;
+        let mut issues: Vec<ImportedIssue> =
+            api.all("/issues?state=all&sort=created&direction=asc", |v| issue(&v, &pulls, &web)).await?;
         // Pull requests that the issue list left out.
-        let listed: Vec<i64> = issues.iter().filter_map(|i| i["number"].as_i64()).collect();
-        issues.extend(pulls.iter().filter(|(n, _)| !listed.contains(n)).map(|(_, p)| p.clone()));
+        let listed: HashSet<i64> = issues.iter().map(|i| i.number).collect();
+        issues.extend(pulls.iter().filter(|(n, _)| !listed.contains(n)).filter_map(|(_, p)| issue(p, &pulls, &web)));
         let total = issues.len();
-        for (n, v) in issues.iter().enumerate() {
+        for (n, i) in issues.iter().enumerate() {
             if n % 50 == 0 {
                 progress(format!("Issues and pull requests: {n} of {total}")).await;
             }
-            if let Some(i) = issue(v, &pulls, &web) {
-                core.import_issue(repo_id, &i).await.map_err(message)?;
-            }
+            core.import_issue(repo_id, i).await.map_err(message)?;
         }
 
         progress("Comments".into()).await;
-        let mut comments: Vec<ImportedComment> = api.all("/issues/comments").await?.iter().filter_map(|c| comment(c, &web)).collect();
+        let mut comments: Vec<ImportedComment> = api.all("/issues/comments", |c| comment(&c, &web)).await?;
         let mut numbers: Vec<i64> = pulls.keys().copied().collect();
         numbers.sort_unstable();
         for (n, number) in numbers.iter().enumerate() {
             if n % 20 == 0 {
                 progress(format!("Reviews: {n} of {} pull requests", numbers.len())).await;
             }
-            match api.all(&format!("/pulls/{number}/reviews")).await {
-                Ok(reviews) => comments.extend(reviews.iter().filter_map(|r| review(r, *number, &web))),
+            match api.all(&format!("/pulls/{number}/reviews"), |r| review(&r, *number, &web)).await {
+                Ok(reviews) => comments.extend(reviews),
                 Err(e) => {
                     warnings.push(format!("Reviews of #{number} couldn't be read: {e}"));
                     break;
@@ -342,8 +383,8 @@ async fn import(core: &Core, client: &reqwest::Client, repo_id: i64) -> Result<V
             }
         }
         if source.service == ImportService::GitHub {
-            match api.all("/pulls/comments").await {
-                Ok(lines) => comments.extend(lines.iter().filter_map(|c| line_comment(c, &web))),
+            match api.all("/pulls/comments", |c| line_comment(&c, &web)).await {
+                Ok(lines) => comments.extend(lines),
                 Err(e) => warnings.push(format!("Comments on lines of pull requests couldn't be read: {e}")),
             }
         }
@@ -361,7 +402,7 @@ async fn import(core: &Core, client: &reqwest::Client, repo_id: i64) -> Result<V
             Some(id) => core.user_by_id(id).await.map_err(message)?,
             None => None,
         };
-        let mut releases = api.all("/releases").await?;
+        let mut releases = api.all("/releases", Some).await?;
         releases.reverse(); // oldest first
         for v in &releases {
             let Some(r) = core.import_release(repo_id, &release(v, &web)).await.map_err(message)? else { continue };
@@ -437,7 +478,14 @@ mod tests {
     #[test]
     fn token_only_to_the_source() {
         let client = reqwest::Client::new();
-        let api = |service, base: &str| Api { client: &client, service, base: base.into(), token: "t0ken".into(), outbound: Default::default() };
+        let api = |service, base: &str| Api {
+            client: &client,
+            service,
+            base: base.into(),
+            token: "t0ken".into(),
+            outbound: Default::default(),
+            read: AtomicU64::new(0),
+        };
         let auth = |api: &Api, url: &str| api.request(url).unwrap().build().unwrap().headers().contains_key("Authorization");
         let gitea = api(ImportService::Gitea, "https://gitea.example/api/v1/repos/octo/engine");
         assert!(auth(&gitea, "https://gitea.example/api/v1/repos/octo/engine/issues"));
@@ -464,8 +512,14 @@ mod tests {
             "user": pr["user"], "created_at": pr["created_at"], "updated_at": pr["updated_at"], "closed_at": pr["closed_at"],
             "labels": pr["labels"], "milestone": pr["milestone"],
         });
-        let pulls = HashMap::from([(5, pr)]);
+        // Keeping only those fields of the pull request gives the same result.
+        let full = issue(&as_issue, &HashMap::from([(5, pr.clone())]), WEB).unwrap();
+        let pulls = HashMap::from([(5, slim_pull(&pr))]);
         let i = issue(&as_issue, &pulls, WEB).unwrap();
+        assert_eq!(i, full);
+        let unlisted = issue(&pulls[&5], &pulls, WEB).unwrap();
+        assert_eq!((unlisted.labels.clone(), unlisted.milestone.clone()), (vec!["perf".to_owned()], Some("v1".into())));
+        assert!(unlisted.pull.is_some());
         assert_eq!((i.state.as_str(), i.created_at, i.body.as_str()), ("merged", 1704164645, ""));
         assert_eq!(i.author, "https://github.com/octocat");
         let p = i.pull.unwrap();

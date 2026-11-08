@@ -584,7 +584,10 @@ pub async fn add_card(
                 }
                 (_, Some(org), Some(name)) => {
                     let name = name.strip_prefix(&format!("{}/", org.username)).unwrap_or(name);
-                    state.core.repo(&org.username, name).await?
+                    match state.core.repo(&org.username, name).await? {
+                        Some(r) if state.core.access(&r, Some(&user)).await? > Access::None => Some(r),
+                        _ => None,
+                    }
                 }
                 _ => None,
             };

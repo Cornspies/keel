@@ -110,11 +110,16 @@ impl Core {
         let mut secret = [0u8; 20];
         getrandom::fill(&mut secret).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
         let secret = base32_encode(&secret);
-        sqlx::query("UPDATE users SET totp_pending = ?2 WHERE id = ?1")
+        // Never replaces a secret in use: that's turned off first, which
+        // needs a code.
+        let started = sqlx::query("UPDATE users SET totp_pending = ?2 WHERE id = ?1 AND totp_secret IS NULL")
             .bind(user.id)
             .bind(self.seal(Purpose::Totp, &secret)?)
             .execute(&self.db)
             .await?;
+        if started.rows_affected() == 0 {
+            return invalid("Two-factor authentication is on already.");
+        }
         Ok(secret)
     }
 
@@ -138,17 +143,63 @@ impl Core {
         let Some(matched) = (step - 1..=step + 1).find(|s| same(&totp_code(&key, *s), &code)) else {
             return invalid("That code isn't right. Check the time on your phone and try the current code.");
         };
-        sqlx::query(
-            "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ?2 WHERE id = ?1",
+        let enabled = sqlx::query(
+            "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ?2
+             WHERE id = ?1 AND totp_secret IS NULL AND totp_pending IS NOT NULL",
         )
         .bind(user.id)
         .bind(matched)
         .execute(&self.db)
         .await?;
+        if enabled.rows_affected() == 0 {
+            return invalid("Two-factor authentication is on already.");
+        }
         self.new_recovery_codes(user.id).await
     }
 
-    /// Turns two-factor authentication off (callers check the password).
+    /// Checks a code (from the authenticator, or a recovery code, used up
+    /// by this) to confirm turning two-factor authentication off or making
+    /// new recovery codes: with a password alone, someone who learned it
+    /// and got at a signed-in browser could take the second factor away.
+    /// Wrong codes count towards the same lockout as when signing in.
+    /// `Some` is the reason the change is refused.
+    pub async fn confirm_second_factor(&self, user_id: i64, code: &str) -> Result<Option<&'static str>> {
+        if code.trim().is_empty() {
+            return Ok(Some("Enter a code from your authenticator app, or a recovery code."));
+        }
+        let now = now();
+        // Counted before the code is checked, as when signing in, so tries
+        // at the same time get no more than allowed. Expired already, so it
+        // can't be used to sign in.
+        let attempt = hash_token(&new_token()?);
+        sqlx::query("INSERT INTO login_challenges (token_hash, user_id, attempts, created_at, expires_at) VALUES (?1, ?2, 1, ?3, ?3)")
+            .bind(&attempt)
+            .bind(user_id)
+            .bind(now)
+            .execute(&self.db)
+            .await?;
+        let (tries,): (i64,) =
+            sqlx::query_as("SELECT COALESCE(SUM(attempts), 0) FROM login_challenges WHERE user_id = ?1 AND created_at > ?2")
+                .bind(user_id)
+                .bind(now - LOCK_SECS)
+                .fetch_one(&self.db)
+                .await?;
+        let forget = || sqlx::query("DELETE FROM login_challenges WHERE token_hash = ?1").bind(&attempt).execute(&self.db);
+        if tries > MAX_FAILURES {
+            // Not a try: the code wasn't checked.
+            forget().await?;
+            return Ok(Some("Too many wrong codes. Wait 15 minutes and try again."));
+        }
+        if !self.verify_second_factor(user_id, code).await? {
+            return Ok(Some("That code isn't right. Try the current one from your app, or a recovery code."));
+        }
+        forget().await?;
+        Ok(None)
+    }
+
+    /// Turns two-factor authentication off. Callers check the password and
+    /// a code ([`confirm_second_factor`](Self::confirm_second_factor)), or
+    /// that an administrator does it.
     pub async fn disable_totp(&self, user_id: i64) -> Result<()> {
         let mut tx = self.write_tx().await?;
         sqlx::query("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0 WHERE id = ?1")
@@ -332,6 +383,9 @@ mod tests {
         assert_eq!(codes.len(), RECOVERY_CODES);
         assert!(core.user_by_id(ada.id).await.unwrap().unwrap().totp_enabled);
         assert_eq!(core.pending_totp(ada.id).await.unwrap(), None);
+        // Once it's on, a new setup can't replace it.
+        assert!(core.begin_totp_setup(&ada).await.is_err());
+        assert_eq!(core.pending_totp(ada.id).await.unwrap(), None);
 
         // The code used for setup can't be used again; the next one can.
         assert!(!core.verify_second_factor(ada.id, &code_now(&secret)).await.unwrap(), "replayed");
@@ -402,6 +456,20 @@ mod tests {
         let t = core.start_login_challenge(ada.id).await.unwrap();
         core.change_password(&ada, "password1", "password2").await.unwrap();
         assert!(!core.login_challenge_valid(&t).await.unwrap());
+
+        // Changes to two-factor authentication itself need a code, and wrong
+        // ones count towards the same lockout.
+        assert!(core.confirm_second_factor(ada.id, "").await.unwrap().is_some());
+        assert!(core.confirm_second_factor(ada.id, "000001").await.unwrap().unwrap().contains("isn't right"));
+        assert_eq!(core.confirm_second_factor(ada.id, &codes[3]).await.unwrap(), None);
+        assert!(core.confirm_second_factor(ada.id, &codes[3]).await.unwrap().is_some(), "used up");
+        for _ in 0..9 {
+            core.confirm_second_factor(ada.id, "000001").await.unwrap();
+        }
+        assert!(core.confirm_second_factor(ada.id, &codes[4]).await.unwrap().unwrap().contains("Too many"));
+        let t = core.start_login_challenge(ada.id).await.unwrap();
+        assert!(matches!(core.complete_login_challenge(&t, &codes[4]).await.unwrap(), SecondStep::Locked), "signing in is locked too");
+        sqlx::query("DELETE FROM login_challenges").execute(&core.db).await.unwrap();
 
         core.disable_totp(ada.id).await.unwrap();
         assert!(!core.user_by_id(ada.id).await.unwrap().unwrap().totp_enabled);

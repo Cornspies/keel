@@ -162,6 +162,8 @@ check "later sign-ups don't need it" is "$(status -b "$T/bob" "$B/settings/token
 check "signing in redirects to local paths only" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=bob&password=password-bob&next=/%09/evil.example" "$B/login")" "$B/"
 check "non-ASCII ones are encoded" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" --data-urlencode "login=bob" --data-urlencode "password=password-bob" --data-urlencode "next=/ada/é" "$B/login")" "$B/ada/%C3%A9"
 check "cross-origin POST is rejected" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: http://evil.example' -d x=1 "$B/new")" 403
+check "so is one saying nothing about where it's from" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -d x=1 "$B/new")" 403
+check "and one the browser says is cross-site" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$O" -H 'Sec-Fetch-Site: cross-site' -d x=1 "$B/new")" 403
 check "create public repo" is "$(post "$T/ada" /new name=engine)" 303
 check "create private repo" is "$(post "$T/ada" /new name=secret private=on)" 303
 check "private repo is hidden" is "$(status -b "$T/bob" "$B/ada/secret")" 404
@@ -829,6 +831,9 @@ check "so does a recovery code" is "$(curl -s -b "$T/tia3" -c "$T/tia3" -o /dev/
 check "once" bash -c "curl -s -o /dev/null -c '$T/tia4' -H '$O' -d 'login=tia&password=password-tia' '$B/login'; curl -s -b '$T/tia4' -H '$O' -d 'code=$RCODE' '$B/login/2fa' | grep -q 'isn'"
 check "create a private repository" is "$(post "$T/tia2" /new name=box private=on)" 303
 check "git refuses the password" bash -c "! git ls-remote -q 'http://tia:password-tia@127.0.0.1:$HTTP_PORT/tia/box.git' 2>/dev/null"
+check "turning it off needs a code too" contains "$(curl -s -b "$T/tia2" -H "$O" -d password=password-tia "$B/settings/security/disable")" "Enter a code"
+check "a wrong one doesn't do" contains "$(curl -s -b "$T/tia2" -H "$O" -d password=password-tia -d code=000000 "$B/settings/security/disable")" "isn"
+check "so it's still on" contains "$(curl -s -b "$T/tia2" "$B/settings/security")" "<strong>on</strong>"
 TIA=$(curl -s -b "$T/ada" "$B/admin/users?q=tia" | grep -o 'admin/users/[0-9]*/2fa' | head -1 | cut -d/ -f3)
 check "admins can turn it off" is "$(post "$T/ada" "/admin/users/$TIA/2fa" x=1)" 303
 check "then the password is enough" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=tia&password=password-tia" "$B/login")" "$B/"

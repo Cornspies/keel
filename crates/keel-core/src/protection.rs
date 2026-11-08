@@ -330,20 +330,19 @@ impl Core {
     }
 
     /// Settings for `git receive-pack` into `repo_id` so the hook enforces
-    /// its branch rules: environment variables to set. Empty without
-    /// rules.
+    /// its branch rules: environment variables to set. Without rules, only
+    /// the push limits (see `push_limits_env`).
     pub async fn receive_pack_env(&self, repo_id: i64) -> Result<Vec<(String, String)>> {
         let rules = self.branch_rules(repo_id).await?;
         if rules.is_empty() {
             return Ok(self.push_limits_env(&[]));
         }
         let exe = std::env::current_exe().map_err(anyhow::Error::from)?;
-        let hooks = self.config.hooks_dir().to_string_lossy().into_owned();
         let mut env = vec![
             (RULES_ENV.into(), serde_json::to_string(&rules).map_err(anyhow::Error::from)?),
             (EXE_ENV.into(), exe.to_string_lossy().into_owned()),
         ];
-        env.extend(self.push_limits_env(&[("core.hooksPath", &hooks)]));
+        env.extend(self.push_limits_env(&[]));
         if rules.iter().any(|r| r.require_signed) {
             env.push((DATA_ENV.into(), self.config.data_dir.to_string_lossy().into_owned()));
             if !self.mail_enabled() {
@@ -353,12 +352,17 @@ impl Core {
         Ok(env)
     }
 
-    /// Environment for any `git receive-pack`: the push size limit, and
-    /// `extra` settings, as `-c key=value` options in the environment (git
-    /// 2.31+).
+    /// Environment for any `git receive-pack`: the push size limit, keel's
+    /// hooks instead of the repository's (whose `pre-receive` only checks
+    /// rules if they're given), and `extra` settings, as `-c key=value`
+    /// options in the environment (git 2.31+).
     pub(crate) fn push_limits_env(&self, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         let limit = self.config.max_push_bytes.to_string();
-        let config: Vec<(&str, &str)> = std::iter::once(("receive.maxInputSize", limit.as_str())).chain(extra.iter().copied()).collect();
+        let hooks = self.config.hooks_dir().to_string_lossy().into_owned();
+        let config: Vec<(&str, &str)> = [("receive.maxInputSize", limit.as_str()), ("core.hooksPath", hooks.as_str())]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .collect();
         let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), config.len().to_string())];
         for (i, (key, value)) in config.iter().enumerate() {
             env.push((format!("GIT_CONFIG_KEY_{i}"), (*key).to_owned()));
@@ -649,6 +653,15 @@ mod tests {
         let eve = core.register("eve", "eve@example.com", "password1").await.unwrap();
         let repo = core.create_repo(&ada, "engine", "", false).await.unwrap();
         core.set_collaborator(&repo, "bob", Access::Write).await.unwrap();
+        // Without rules too, git runs keel's hooks, never the repository's.
+        let hooks = core.config.hooks_dir().to_string_lossy().into_owned();
+        let env = core.receive_pack_env(repo.id).await.unwrap();
+        let value_of = |env: &[(String, String)], key: &str| {
+            let n = env.iter().find(|(_, v)| v == key).and_then(|(k, _)| k.strip_prefix("GIT_CONFIG_KEY_")).map(str::to_owned);
+            n.and_then(|n| env.iter().find(|(k, _)| *k == format!("GIT_CONFIG_VALUE_{n}")).map(|(_, v)| v.clone()))
+        };
+        assert_eq!(value_of(&env, "core.hooksPath"), Some(hooks.clone()));
+        assert!(!env.iter().any(|(k, _)| k == RULES_ENV));
 
         let mut r = BranchRule { id: 0, required_approvals: 1, dismiss_stale: true, ..rule("main", true, false) };
         core.save_branch_rule(repo.id, &r).await.unwrap();
@@ -661,6 +674,9 @@ mod tests {
         assert!(core.may_update_branch(repo.id, "topic", false, true).await.unwrap());
         let env = core.receive_pack_env(repo.id).await.unwrap();
         assert!(env.iter().any(|(k, v)| k == RULES_ENV && v.contains("\"main\"")));
+        assert_eq!(value_of(&env, "core.hooksPath"), Some(hooks));
+        let set = env.iter().filter(|(k, v)| k.starts_with("GIT_CONFIG_KEY_") && v == "core.hooksPath").count();
+        assert_eq!(set, 1, "set once");
 
         // A pull request (flagged directly; see reviews.rs).
         let issue = core.create_issue(repo.id, &ada, "Change", "").await.unwrap();

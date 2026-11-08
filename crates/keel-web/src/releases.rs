@@ -39,6 +39,8 @@ pub(crate) struct ReleaseView {
     pub prerelease: bool,
     pub latest: bool,
     pub author: String,
+    /// The author's profile: here, or where an imported release came from.
+    pub author_url: String,
     pub when: String,
     pub when_full: String,
     pub url: String,
@@ -69,6 +71,10 @@ async fn view(state: &AppState, repo: &Repo, r: &Release, latest: Option<i64>, r
         })
         .collect();
     let when = r.published_at.unwrap_or(r.created_at);
+    let who = match &r.imported_author {
+        Some(_) => crate::issues::person(&None, &r.imported_author),
+        None => crate::issues::person(&r.author, &None),
+    };
     Ok(ReleaseView {
         id: r.id,
         name: r.name().to_owned(),
@@ -76,7 +82,8 @@ async fn view(state: &AppState, repo: &Repo, r: &Release, latest: Option<i64>, r
         draft: r.draft,
         prerelease: r.prerelease,
         latest: latest == Some(r.id),
-        author: r.author.clone().unwrap_or_else(|| "ghost".into()),
+        author: who.name,
+        author_url: who.url,
         when: relative_time(when),
         when_full: datetime(when),
         url: format!("{b}/releases/tag/{tag}"),
@@ -382,7 +389,7 @@ pub async fn delete(
 
 /// Streams an upload to a temporary file next to the release files,
 /// refusing it past the size limit. Returns its path and size.
-pub(crate) async fn receive_upload<S, E>(state: &AppState, mut chunks: S) -> AppResult<Result<(std::path::PathBuf, u64), String>>
+pub(crate) async fn receive_upload<S, E>(state: &AppState, room: Option<u64>, mut chunks: S) -> AppResult<Result<(std::path::PathBuf, u64), String>>
 where
     S: futures_util::Stream<Item = Result<axum::body::Bytes, E>> + Unpin,
     E: std::fmt::Display,
@@ -407,6 +414,12 @@ where
             drop(file);
             let _ = tokio::fs::remove_file(&tmp).await;
             return Ok(Err(format!("Files can be at most {}.", human_size(max as usize))));
+        }
+        // Stop as soon as it can't fit, rather than after receiving it all.
+        if room.is_some_and(|r| size > r) {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Ok(Err("The repository's owner is out of storage on this server.".into()));
         }
         file.write_all(&chunk).await?;
     }
@@ -433,7 +446,8 @@ pub async fn upload(
         }
         let content_type = field.content_type().unwrap_or("application/octet-stream").to_owned();
         let stream = field.map(|c| c.map_err(|e| e.body_text()));
-        let (tmp, size) = match receive_upload(&state, Box::pin(stream)).await? {
+        let room = state.core.storage_room(repo.owner_id).await?;
+        let (tmp, size) = match receive_upload(&state, room, Box::pin(stream)).await? {
             Ok(v) => v,
             Err(msg) => {
                 error = Some(msg);

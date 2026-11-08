@@ -48,7 +48,8 @@ impl Core {
     /// The account `claims` sign in to: the one the identity is linked to;
     /// else, with `link_by_email`, the account with the same address, if
     /// both the provider and keel verified it (so it's the same person) and
-    /// it isn't a site administrator's, now linked; else a new account, if
+    /// it isn't a site administrator's or protected by two-factor
+    /// authentication, now linked; else a new account, if
     /// sign-ups are open or `allow_signup`. The first account (the
     /// administrator) can't be made this way: it needs the setup code.
     pub async fn sso_sign_in(&self, claims: &Claims, allow_signup: bool, link_by_email: bool) -> Result<SsoOutcome> {
@@ -65,8 +66,10 @@ impl Core {
         if let Some(user) = self.user_by_email(email).await? {
             // Taking the provider's word for the address would make every
             // account only as safe as its `email_verified`: opt-in, and
-            // never for administrators.
-            if !(link_by_email && claims.email_verified && user.email_verified && !user.is_admin) {
+            // never for administrators, nor accounts with two-factor
+            // authentication, which would be connected before the second
+            // step.
+            if !(link_by_email && claims.email_verified && user.email_verified && !user.is_admin && !user.totp_enabled) {
                 return invalid(format!(
                     "An account with the address {email} exists. Sign in to it with its password, \
                      then connect it in Settings → Security."
@@ -285,7 +288,8 @@ mod tests {
         assert!(matches!(&again, SsoOutcome::Linked(u) if u.id == sam.id));
 
         // Same address: linked only if allowed, both sides verified it, and
-        // it isn't an administrator's.
+        // it isn't an administrator's or protected by two-factor
+        // authentication.
         let by_email = |id: &str, email: &str, verified: bool, allowed: bool| {
             let c = claims(id, email, verified, "");
             let core = &core;
@@ -296,6 +300,10 @@ mod tests {
         assert!(by_email("2", "bob@example.com", false, true).await.is_err(), "the provider's isn't");
         assert!(by_email("2", "bob@example.com", true, false).await.is_err(), "not without --oidc-link-by-email");
         assert!(by_email("3", "ada@example.com", true, true).await.is_err(), "never an administrator's");
+        let two_factor = |on: bool| sqlx::query("UPDATE users SET totp_secret = CASE WHEN ?2 THEN 'on' END WHERE id = ?1").bind(bob.id).bind(on);
+        two_factor(true).execute(&core.db).await.unwrap();
+        assert!(by_email("2", "bob@example.com", true, true).await.is_err(), "nor one with two-factor authentication");
+        two_factor(false).execute(&core.db).await.unwrap();
         let linked = by_email("2", "bob@example.com", true, true).await.unwrap();
         assert!(matches!(&linked, SsoOutcome::LinkedByEmail(u) if u.id == bob.id));
         let bob = core.user_by_id(bob.id).await.unwrap().unwrap();

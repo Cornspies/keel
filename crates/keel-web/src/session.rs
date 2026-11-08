@@ -13,13 +13,31 @@ use crate::{AppError, AppState};
 
 const COOKIE: &str = "keel_session";
 
-fn session_token(headers: &HeaderMap) -> Option<&str> {
+/// Whether the site is served over `https://`. Cookies are then `Secure`
+/// and named `__Host-…`, which only this host can set: other sites under
+/// the same domain (and anyone on plain HTTP) can't plant a session or
+/// sign-in attempt of their own.
+pub(crate) fn secure(state: &AppState) -> bool {
+    state.core.config.base_url.starts_with("https://")
+}
+
+/// The name of keel's cookie `name` (see [`secure`]).
+pub(crate) fn cookie_name(state: &AppState, name: &str) -> String {
+    if secure(state) { format!("__Host-{name}") } else { name.to_owned() }
+}
+
+/// The value of cookie `name` in a request.
+pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(COOKIE)?.strip_prefix('='))
+        .find_map(|c| c.trim().strip_prefix(name)?.strip_prefix('='))
+}
+
+fn session_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    cookie(headers, &cookie_name(state, COOKIE))
 }
 
 /// The signed-in user, if any.
@@ -33,7 +51,7 @@ impl FromRequestParts<AppState> for Viewer {
         if let Some(v) = parts.extensions.get::<Viewer>() {
             return Ok(v.clone());
         }
-        let user = match session_token(&parts.headers) {
+        let user = match session_token(state, &parts.headers) {
             Some(token) => state.core.session_user(token).await?,
             None => None,
         };
@@ -66,25 +84,27 @@ impl FromRequestParts<AppState> for SignedIn {
     }
 }
 
-pub fn set_cookie(state: &AppState, token: &str) -> HeaderValue {
-    let secure = if state.core.config.base_url.starts_with("https://") {
-        "; Secure"
-    } else {
-        ""
-    };
-    let max_age = 30 * 24 * 3600;
+/// A cookie for the whole site (`__Host-` ones must be), `Secure` behind
+/// `https://`.
+pub(crate) fn site_cookie(state: &AppState, name: &str, value: &str, max_age: i64) -> HeaderValue {
+    let secure = if secure(state) { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
+        "{}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
+        cookie_name(state, name)
     ))
-    .expect("token is base64url")
+    .expect("cookies are ASCII")
 }
 
-pub fn clear_cookie() -> HeaderValue {
-    HeaderValue::from_static("keel_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+pub fn set_cookie(state: &AppState, token: &str) -> HeaderValue {
+    site_cookie(state, COOKIE, token, 30 * 24 * 3600)
 }
 
-pub fn token_from(headers: &HeaderMap) -> Option<&str> {
-    session_token(headers)
+pub fn clear_cookie(state: &AppState) -> HeaderValue {
+    site_cookie(state, COOKIE, "", 0)
+}
+
+pub fn token_from<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    session_token(state, headers)
 }
 
 /// How long after signing in accounts without a password may make the
@@ -103,7 +123,7 @@ pub(crate) async fn confirm(state: &AppState, user: &User, headers: &HeaderMap, 
             Err(keel_core::Error::Invalid("Your password is incorrect.".into()))
         };
     }
-    let started = match token_from(headers) {
+    let started = match token_from(state, headers) {
         Some(t) => state.core.session_started(t).await?,
         None => None,
     };
@@ -174,7 +194,11 @@ mod tests {
     fn parses_cookie_and_basic_auth() {
         let mut h = HeaderMap::new();
         h.insert(header::COOKIE, HeaderValue::from_static("a=b; keel_session=tok123; c=d"));
-        assert_eq!(session_token(&h), Some("tok123"));
+        assert_eq!(cookie(&h, COOKIE), Some("tok123"));
+        // Other sites under the same domain can set a `keel_session`
+        // cookie, but not a `__Host-` one: behind https, only that counts.
+        h.insert(header::COOKIE, HeaderValue::from_static("keel_session=theirs; __Host-keel_session=ours"));
+        assert_eq!(cookie(&h, "__Host-keel_session"), Some("ours"));
 
         h.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic YWRhOnB3OmQ="));
         assert_eq!(basic_auth(&h), Some(("ada".into(), "pw:d".into())));

@@ -4,7 +4,7 @@
 use keel_git::{Identity, Oid, replace_line};
 
 use crate::activity::{Activity, IssueAction};
-use crate::issues::{insert_comment, touch, validate_comment};
+use crate::issues::{ensure_issue_unarchived, insert_comment, touch, validate_comment};
 use crate::protection::pinned_head;
 use crate::{Access, Comment, Core, Error, Issue, Repo, Result, User, invalid, now};
 
@@ -83,6 +83,7 @@ impl Core {
         }
         validate_comment(body)?;
         let mut tx = self.write_tx().await?;
+        ensure_issue_unarchived(&mut *tx, issue.id).await?;
         let (id,): (i64,) = sqlx::query_as(
             "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at,
                 path, side, line, commit_id, blob_id, hunk)
@@ -115,6 +116,7 @@ impl Core {
         validate_comment(body)?;
         let root = to.reply_to.unwrap_or(to.id);
         let mut tx = self.write_tx().await?;
+        ensure_issue_unarchived(&mut *tx, issue.id).await?;
         let (id,): (i64,) = sqlx::query_as(
             "INSERT INTO comments (issue_id, author_id, kind, body, created_at, updated_at,
                 path, side, line, commit_id, blob_id, hunk, reply_to)
@@ -229,6 +231,7 @@ impl Core {
         let candidates = self.reviewer_candidates(repo, issue).await?;
         let current: Vec<i64> = self.review_requests(issue.id).await?.into_iter().map(|(id, _)| id).collect();
         let mut tx = self.write_tx().await?;
+        ensure_issue_unarchived(&mut *tx, issue.id).await?;
         let mut changed = Vec::new();
         for user in candidates {
             let (was, is) = (current.contains(&user.id), user_ids.contains(&user.id));
@@ -278,6 +281,7 @@ impl Core {
         if !issue.is_open() {
             return invalid("This pull request is not open.");
         }
+        ensure_issue_unarchived(&self.db, issue.id).await?;
         if comment.side.as_deref() != Some("new") {
             return invalid("Only suggestions on added or unchanged lines can be applied.");
         }
@@ -295,6 +299,7 @@ impl Core {
         if self.is_mirror(head_repo.id).await? {
             return invalid("The branch is in a mirror, which can't be changed here.");
         }
+        self.check_repo_storage(head_repo.id, replacement.len() as u64 + 1).await?;
         if !self.may_update_branch(head_repo.id, &pull.head_ref, false, false).await? {
             return invalid(format!("{} is protected; change it through a pull request.", pull.head_ref));
         }

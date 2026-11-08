@@ -13,6 +13,9 @@ use tokio::io::AsyncWriteExt;
 const LFS_JSON: &str = "application/vnd.git-lfs+json";
 /// Objects per batch request.
 const BATCH: usize = 100;
+/// Most bytes a batch response may have (for 100 objects, which take a few
+/// KiB each at most).
+const MAX_BATCH_ANSWER: usize = 16 << 20;
 
 /// Where the LFS server of the repository at `url` is, by the convention
 /// LFS clients use.
@@ -63,6 +66,18 @@ pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
+/// Whether a server's action may set header `name`. Not headers about the
+/// connection or the body, which keel sets, nor `Host`, which would pick
+/// another site at the address that was checked.
+fn action_header_allowed(name: &str) -> bool {
+    const KEEL_SETS: &[&str] = &[
+        "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
+        "expect", "cookie",
+    ];
+    let name = name.to_ascii_lowercase();
+    !KEEL_SETS.contains(&name.as_str()) && !name.starts_with("proxy-")
+}
+
 /// A request to `url` with the action's headers, and the remote's
 /// credentials if the action brings none and it's the remote's origin
 /// (not, say, plain HTTP on the same host).
@@ -72,7 +87,7 @@ fn request(client: &reqwest::Client, core: &Core, method: reqwest::Method, remot
     let same_host = reqwest::Url::parse(&remote.url).is_ok_and(|r| same_origin(&r, &url));
     let mut req = client.request(method, url);
     let mut has_auth = false;
-    for (k, v) in &action.header {
+    for (k, v) in action.header.iter().filter(|(k, _)| action_header_allowed(k)) {
         has_auth |= k.eq_ignore_ascii_case("authorization");
         req = req.header(k, v);
     }
@@ -100,15 +115,15 @@ async fn batch(client: &reqwest::Client, core: &Core, remote: &MirrorRemote, ope
     }
     let res = req.send().await.map_err(|e| format!("batch request failed: {e}"))?;
     let status = res.status();
-    let text = res.text().await.map_err(|e| e.to_string())?;
+    let text = crate::read_capped(res, MAX_BATCH_ANSWER).await.map_err(|e| format!("the batch response couldn't be read: {e}"))?;
     if !status.is_success() {
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
+        let msg = serde_json::from_slice::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| v["message"].as_str().map(str::to_owned))
             .unwrap_or_else(|| status.to_string());
         return Err(format!("the server said: {msg}"));
     }
-    serde_json::from_str::<BatchResponse>(&text)
+    serde_json::from_slice::<BatchResponse>(&text)
         .map(|r| r.objects)
         .map_err(|_| "the server's batch response isn't valid".to_owned())
 }
@@ -213,7 +228,7 @@ pub async fn upload(core: &Core, client: &reqwest::Client, remote: &MirrorRemote
             if let Some(e) = obj.error {
                 return Err(format!("{}: {}", obj.oid, e.message));
             }
-            let Some(actions) = obj.actions else { continue }; // it has it
+            let Some(actions) = obj.actions else { continue }; // the server has it already
             let Some((_, size)) = chunk.iter().find(|(oid, _)| *oid == obj.oid) else { continue };
             if let Some(up) = &actions.upload {
                 let file = tokio::fs::File::open(core.lfs_path(&obj.oid)).await.map_err(|e| e.to_string())?;
@@ -267,6 +282,11 @@ mod tests {
         let blocked = Outbound { blocked: vec![keel_core::Network::parse("203.0.113.0/24").unwrap()], ..open };
         assert!(check_url(&url("http://203.0.113.7/x"), &blocked).is_err());
         assert!(check_url(&url("http://198.51.100.7/x"), &blocked).is_ok());
+
+        assert!(action_header_allowed("Authorization") && action_header_allowed("x-amz-date"));
+        for header in ["Host", "content-length", "Transfer-Encoding", "Proxy-Authorization", "Cookie"] {
+            assert!(!action_header_allowed(header), "{header}");
+        }
 
         assert!(same_origin(&url("https://git.example/a"), &url("https://git.example:443/b")));
         assert!(!same_origin(&url("https://git.example/a"), &url("http://git.example/a")), "plain HTTP");

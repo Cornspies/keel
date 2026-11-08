@@ -150,10 +150,10 @@ pub async fn login(State(state): State<AppState>, Form(f): Form<LoginForm>) -> A
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppResult {
-    if let Some(token) = token_from(&headers) {
+    if let Some(token) = token_from(&state, &headers) {
         state.core.delete_session(token).await?;
     }
-    Ok(([(header::SET_COOKIE, clear_cookie())], Redirect::to("/")).into_response())
+    Ok(([(header::SET_COOKIE, clear_cookie(&state))], Redirect::to("/")).into_response())
 }
 
 #[derive(Template)]

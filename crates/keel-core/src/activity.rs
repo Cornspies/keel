@@ -465,7 +465,9 @@ impl Core {
             "body": r.notes,
             "draft": r.draft,
             "prerelease": r.prerelease,
-            "author": self.login_json(r.author.as_deref()),
+            // An imported release's author has no account here (as with
+            // imported issues): a login would point to whoever has the name.
+            "author": self.login_json(r.author.as_deref().filter(|_| r.imported_author.is_none())),
             "created_at": time(r.created_at),
             "published_at": r.published_at.map_or(Value::Null, time),
             "html_url": format!("{base}/releases/tag/{tag_url}"),

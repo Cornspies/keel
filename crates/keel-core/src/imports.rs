@@ -348,9 +348,12 @@ impl Core {
     /// push. Returns the Git LFS files the commits need.
     pub async fn import_git(&self, repo_id: i64, remote: &MirrorRemote) -> Result<Vec<(String, u64)>> {
         self.check_repo_storage(repo_id, 1).await?;
+        // git has no size limit for fetches (as it has for pushes), so the
+        // fetch is stopped once it brings more than the owner may still store.
+        let room = self.repo_storage_room(repo_id).await?;
         let before = self.ref_snapshot(repo_id).await?;
         let path = self.config.repo_path(repo_id);
-        self.with_remote(remote, move |r| keel_git::import_fetch(&path, r, FETCH_LIMIT)).await?;
+        self.with_remote(remote, move |r| keel_git::import_fetch(&path, r, FETCH_LIMIT, room)).await?;
         let after = self.ref_snapshot(repo_id).await?;
         let changes: Vec<_> = keel_git::ref_changes(&before, &after)
             .into_iter()
@@ -373,7 +376,8 @@ impl Core {
         }
         self.ensure_wiki(repo.id).await?;
         let git = self.wiki_path(repo.id);
-        self.with_remote(&wiki, move |r| keel_git::mirror_fetch(&git, r, FETCH_LIMIT)).await?;
+        let room = self.repo_storage_room(repo.id).await?;
+        self.with_remote(&wiki, move |r| keel_git::mirror_fetch(&git, r, FETCH_LIMIT, room)).await?;
         // Maintenance (and a HEAD pointing at an existing branch).
         self.after_wiki_change(repo, None, Vec::new()).await;
         Ok(true)

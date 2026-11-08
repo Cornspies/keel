@@ -6,6 +6,25 @@ use std::path::Path;
 
 use crate::{Core, Result, User, invalid};
 
+/// Bytes stored for an account's repositories; see
+/// [`Core::storage_used`].
+async fn used_by<'c>(db: impl sqlx::SqliteExecutor<'c>, owner_id: i64) -> Result<u64> {
+    let (used,): (i64,) = sqlx::query_as(
+        "SELECT
+            (SELECT COALESCE(SUM(disk_bytes), 0) FROM repositories WHERE owner_id = ?1)
+          + (SELECT COALESCE(SUM(size), 0) FROM (
+                SELECT DISTINCT l.oid, l.size FROM lfs_objects l
+                JOIN repositories r ON r.id = l.repo_id WHERE r.owner_id = ?1))
+          + (SELECT COALESCE(SUM(a.size), 0) FROM release_assets a
+                JOIN releases rel ON rel.id = a.release_id
+                JOIN repositories r ON r.id = rel.repo_id WHERE r.owner_id = ?1)",
+    )
+    .bind(owner_id)
+    .fetch_one(db)
+    .await?;
+    Ok(used.max(0) as u64)
+}
+
 impl Core {
     /// Errors when `owner` may not have another repository.
     pub(crate) async fn check_repo_limit(&self, owner: &User) -> Result<()> {
@@ -38,20 +57,7 @@ impl Core {
     /// Bytes stored for an account's repositories: git data and wikis (as
     /// last measured), Git LFS files and release files.
     pub async fn storage_used(&self, owner_id: i64) -> Result<u64> {
-        let (used,): (i64,) = sqlx::query_as(
-            "SELECT
-                (SELECT COALESCE(SUM(disk_bytes), 0) FROM repositories WHERE owner_id = ?1)
-              + (SELECT COALESCE(SUM(size), 0) FROM (
-                    SELECT DISTINCT l.oid, l.size FROM lfs_objects l
-                    JOIN repositories r ON r.id = l.repo_id WHERE r.owner_id = ?1))
-              + (SELECT COALESCE(SUM(a.size), 0) FROM release_assets a
-                    JOIN releases rel ON rel.id = a.release_id
-                    JOIN repositories r ON r.id = rel.repo_id WHERE r.owner_id = ?1)",
-        )
-        .bind(owner_id)
-        .fetch_one(&self.db)
-        .await?;
-        Ok(used.max(0) as u64)
+        used_by(&self.db, owner_id).await
     }
 
     /// How many more bytes the account `owner_id` may store; `None` without
@@ -72,15 +78,49 @@ impl Core {
         match self.storage_room(owner_id).await? {
             Some(room) if bytes > room => {
                 let owner = self.user_by_id(owner_id).await?.map(|u| u.username).unwrap_or_default();
-                let quota = self.config.quota_bytes.unwrap_or(0);
-                invalid(format!(
-                    "{owner} is out of storage: this server allows {} MiB per account. \
-                     Delete repositories, large files or release files to make room.",
-                    quota >> 20
-                ))
+                self.out_of_storage(&owner)
             }
             _ => Ok(()),
         }
+    }
+
+    fn out_of_storage(&self, owner: &str) -> Result<()> {
+        let quota = self.config.quota_bytes.unwrap_or(0);
+        invalid(format!(
+            "{owner} is out of storage: this server allows {} MiB per account. \
+             Delete repositories, large files or release files to make room.",
+            quota >> 20
+        ))
+    }
+
+    /// [`check_storage`](Self::check_storage) for the account owning
+    /// `repo_id`, in the write transaction that then records the `bytes`,
+    /// so that concurrent uploads can't each use the same free space.
+    pub(crate) async fn check_repo_storage_in(&self, conn: &mut sqlx::SqliteConnection, repo_id: i64, bytes: u64) -> Result<()> {
+        let Some(quota) = self.config.quota_bytes else { return Ok(()) };
+        let (owner_id, owner, is_admin): (i64, String, bool) = sqlx::query_as(
+            "SELECT u.id, u.username, u.is_admin FROM repositories r JOIN users u ON u.id = r.owner_id WHERE r.id = ?1",
+        )
+        .bind(repo_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if !is_admin && used_by(&mut *conn, owner_id).await?.saturating_add(bytes) > quota {
+            return self.out_of_storage(&owner);
+        }
+        Ok(())
+    }
+
+    /// [`storage_room`](Self::storage_room) of the account that owns
+    /// `repo_id`.
+    pub(crate) async fn repo_storage_room(&self, repo_id: i64) -> Result<Option<u64>> {
+        if self.config.quota_bytes.is_none() {
+            return Ok(None);
+        }
+        let (owner_id,): (i64,) = sqlx::query_as("SELECT owner_id FROM repositories WHERE id = ?1")
+            .bind(repo_id)
+            .fetch_one(&self.db)
+            .await?;
+        self.storage_room(owner_id).await
     }
 
     /// Like [`check_storage`](Self::check_storage), for the account that

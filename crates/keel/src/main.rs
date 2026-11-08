@@ -146,8 +146,9 @@ struct ServeArgs {
     /// Sign in to an existing account with the same address when both the
     /// provider and keel verified it, connecting the two. Only for a
     /// provider whose email_verified you trust: it vouches for every
-    /// account's address. Never for site administrators. Without it, people
-    /// connect existing accounts in Settings → Security.
+    /// account's address. Never for site administrators or accounts with
+    /// two-factor authentication. Without it, people connect existing
+    /// accounts in Settings → Security.
     #[arg(long, env = "KEEL_OIDC_LINK_BY_EMAIL", requires = "oidc_issuer")]
     oidc_link_by_email: bool,
 

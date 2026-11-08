@@ -96,6 +96,9 @@ pub struct Inner {
     blames: Cache<(Oid, String), Arc<keel_git::Blame>>,
     /// Limits how many blames run at once.
     blame_slots: tokio::sync::Semaphore,
+    /// Limits how many searches read all of a repository's files at once
+    /// (see `search`).
+    scan_slots: tokio::sync::Semaphore,
     /// The single sign-on provider, if configured.
     oidc: Option<oidc::Provider>,
     /// Fetches images for [`images`], a few at a time.
@@ -166,6 +169,7 @@ impl AppState {
                 })
                 .build(),
             blame_slots: tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get().div_ceil(2))),
+            scan_slots: tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get().div_ceil(2))),
             mergeability: Cache::new(10_000),
             unread: Cache::new(100_000),
             started: std::time::Instant::now(),
@@ -553,7 +557,7 @@ async fn web_guard(State(state): State<AppState>, req: Request, next: Next) -> R
     }
     let path = req.uri().path().to_owned();
     let query = req.uri().query().map(str::to_owned);
-    let session = session::token_from(req.headers()).map(str::to_owned);
+    let session = session::token_from(&state, req.headers()).map(str::to_owned);
     let theme = theme::from_cookie(req.headers());
     let mut res = theme::with_cookie(theme, next.run(req)).await;
     // Pages of renamed or transferred repositories move along.
@@ -610,17 +614,28 @@ async fn moved(state: &AppState, path: &str, query: Option<&str>, session: Optio
     Some(to)
 }
 
+/// Whether a state-changing request comes from one of our pages, going by
+/// what browsers say about where requests come from: `Sec-Fetch-Site`
+/// (current browsers), `Origin` (every POST) and, from older ones,
+/// `Referer`. Requests that say nothing are refused: browsers that left all
+/// of these out (or were made to, by a referrer policy) would otherwise get
+/// through with the session cookie. Scripts use the API instead.
 fn same_origin(req: &Request, base_url: &str) -> bool {
     let headers = req.headers();
+    // Set by the browser itself, which pages can't change.
+    let site = headers.get("sec-fetch-site").and_then(|h| h.to_str().ok());
+    if site.is_some_and(|s| s != "same-origin" && s != "none") {
+        return false;
+    }
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
     let source = headers
         .get(header::ORIGIN)
         .or_else(|| headers.get(header::REFERER))
         .and_then(|h| h.to_str().ok());
     match (source, host) {
-        // Non-browser clients send neither; without a cookie they can't act
-        // as anyone anyway.
-        (None, _) => true,
+        // Neither header: only if `Sec-Fetch-Site` says same-origin (some
+        // proxies and extensions strip `Origin` and `Referer`).
+        (None, _) => site == Some("same-origin"),
         // Behind a reverse proxy, Host may differ from the public URL.
         (Some(source), _) if source == base_url || source.starts_with(&format!("{base_url}/")) => {
             true
@@ -648,11 +663,26 @@ mod tests {
             r.body(axum::body::Body::empty()).unwrap()
         };
         let base = "https://git.example";
-        assert!(same_origin(&req("git.example", None), base));
+        assert!(!same_origin(&req("git.example", None), base), "no Origin, Referer or Sec-Fetch-Site");
+        assert!(!same_origin(&req("git.example", Some("null")), base), "Origin: null (a hidden origin)");
         assert!(same_origin(&req("git.example", Some("https://git.example")), base));
         assert!(same_origin(&req("internal:3000", Some("https://internal:3000")), base), "behind a proxy");
         assert!(!same_origin(&req("git.example", Some("http://git.example")), base), "plain HTTP");
         assert!(!same_origin(&req("git.example", Some("https://evil.example")), base));
         assert!(same_origin(&req("localhost:3000", Some("http://localhost:3000")), "http://localhost:3000"));
+
+        // `Sec-Fetch-Site` is checked first.
+        let fetched = |site: &str, origin: Option<&str>| {
+            let mut r = Request::builder().header(header::HOST, "git.example").header("sec-fetch-site", site);
+            if let Some(o) = origin {
+                r = r.header(header::ORIGIN, o);
+            }
+            same_origin(&r.body(axum::body::Body::empty()).unwrap(), base)
+        };
+        assert!(fetched("same-origin", Some("https://git.example")));
+        assert!(fetched("same-origin", None), "Origin and Referer stripped by a proxy");
+        assert!(!fetched("same-site", Some("https://git.example")), "a sibling subdomain");
+        assert!(!fetched("cross-site", Some("https://git.example")));
+        assert!(!fetched("none", None));
     }
 }

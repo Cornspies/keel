@@ -267,25 +267,36 @@ pub async fn upload(
         Err(e) => return internal(e),
     };
     match receive(&state, &oid, body, room).await {
-        Ok(Ok(size)) => match state.core.lfs_link(repo.id, &oid, size).await.inspect(|_| state.core.metrics().lfs_transfer("upload", size)) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(e) => internal(e),
-        },
+        // The room is checked again as it's recorded: other uploads may have
+        // used it meanwhile.
+        Ok(Ok((tmp, size))) => {
+            let stored = state.core.lfs_store(repo.id, &tmp, &oid, size).await;
+            let _ = tokio::fs::remove_file(&tmp).await; // gone already if it was stored
+            match stored {
+                Ok(()) => {
+                    state.core.metrics().lfs_transfer("upload", size);
+                    StatusCode::OK.into_response()
+                }
+                Err(keel_core::Error::Invalid(msg)) => fail(StatusCode::INSUFFICIENT_STORAGE, &msg),
+                Err(e) => internal(e),
+            }
+        }
         Ok(Err(res)) => res,
         Err(e) => internal(e),
     }
 }
 
-/// Writes an upload to a temporary file while hashing it, then moves it
-/// into place. Returns its size, or the response for a bad upload.
-/// `room` is how much more the repository's owner may store, if limited.
-async fn receive(state: &AppState, oid: &str, body: Body, room: Option<u64>) -> std::io::Result<Result<u64, Response>> {
+/// Writes an upload to a temporary file while hashing it. Returns the file
+/// (for `lfs_store` to move into place) and its size, or the response for a
+/// bad upload. `room` is how much more the repository's owner may store, if
+/// limited.
+async fn receive(state: &AppState, oid: &str, body: Body, room: Option<u64>) -> std::io::Result<Result<(std::path::PathBuf, u64), Response>> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp_dir = state.core.lfs_tmp_dir();
     tokio::fs::create_dir_all(&tmp_dir).await?;
     let tmp = tmp_dir.join(format!("{}-{}-{}", std::process::id(), crate::now(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let max = state.core.config.lfs_max_bytes;
-    let result = async {
+    let result: std::io::Result<Result<u64, Response>> = async {
         let mut file = tokio::fs::File::create(&tmp).await?;
         let mut hasher = Sha256::new();
         let mut size = 0u64;
@@ -307,16 +318,13 @@ async fn receive(state: &AppState, oid: &str, body: Body, room: Option<u64>) -> 
         if hex::encode(hasher.finalize()) != oid {
             return Ok(Err(fail(StatusCode::UNPROCESSABLE_ENTITY, "The content doesn't match the object id")));
         }
-        let path = state.core.lfs_path(oid);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::rename(&tmp, &path).await?;
         Ok(Ok(size))
     }
     .await;
-    let _ = tokio::fs::remove_file(&tmp).await; // gone already if it was stored
-    result
+    if !matches!(result, Ok(Ok(_))) {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    Ok(result?.map(|size| (tmp, size)))
 }
 
 // ---------------------------------------------------------------------------
