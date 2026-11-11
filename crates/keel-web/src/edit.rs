@@ -21,6 +21,13 @@ const MAX_EDIT: usize = 1024 * 1024;
 /// Per uploaded file, and for all files of an upload.
 pub(crate) const MAX_UPLOAD_FILE: usize = 25 * 1024 * 1024;
 pub(crate) const MAX_UPLOAD: usize = 100 * 1024 * 1024;
+/// Uploads read at once; more wait their turn. Their files are held in
+/// memory until they're committed (up to [`MAX_UPLOAD`] each), which
+/// anyone with a repository can ask for.
+pub(crate) const CONCURRENT_UPLOADS: usize = 2;
+/// How long receiving one upload may take, so that slow ones don't keep
+/// their turn (and others waiting) for good.
+const UPLOAD_TIME: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Where a change happens: a branch, its tip (`None` in an empty
 /// repository) and a path in it.
@@ -479,38 +486,56 @@ pub async fn upload_form(
     upload_page(&state, user, &repo, access, &s, CommitBox::new(&s, "Add files via upload".into()), None).await
 }
 
-pub async fn upload(
-    State(state): State<AppState>,
-    SignedIn(user): SignedIn,
-    Path((owner, name, rest)): Path<(String, String, String)>,
-    mut form: Multipart,
-) -> AppResult {
-    let (repo, access) = writer(&state, &user, &owner, &name).await?;
-    let s = spot(&state, &repo, &user, rest).await?;
-    folder(&state, &repo, &s).await?;
-    let mut fields = CommitFields::default();
-    let mut files = Vec::new();
+/// What an upload's form held: the commit fields and the files, or why
+/// the files can't be taken.
+struct Received {
+    fields: CommitFields,
+    files: Vec<FileWrite>,
+    problem: Option<String>,
+}
+
+/// Reads an upload's form: the files (for folder `dir`) and the commit
+/// fields. Files are read piece by piece: once one is too big (or they're
+/// more than the limit, or than the `room` the repository's `owner` has
+/// left), the rest is still received, so the browser gets its answer, but
+/// nothing of the upload is kept.
+async fn receive(form: &mut Multipart, dir: &str, owner: &str, room: Option<u64>) -> AppResult<Received> {
+    let mut received = Received { fields: CommitFields::default(), files: Vec::new(), problem: None };
     let mut total = 0;
-    let mut problem = None;
     let bad = |e: axum::extract::multipart::MultipartError| AppError::BadRequest(format!("The upload failed: {e}"));
-    while let Some(field) = form.next_field().await.map_err(bad)? {
+    while let Some(mut field) = form.next_field().await.map_err(bad)? {
         let field_name = field.name().unwrap_or_default().to_owned();
         if field_name == "files" {
             let file = field.file_name().unwrap_or_default().to_owned();
-            let data = field.bytes().await.map_err(bad)?;
-            if file.is_empty() {
-                continue;
+            let mut data = Vec::new();
+            let mut size = 0;
+            while let Some(chunk) = field.chunk().await.map_err(bad)? {
+                size += chunk.len();
+                total += chunk.len();
+                if received.problem.is_none() {
+                    if size > MAX_UPLOAD_FILE {
+                        received.problem =
+                            Some(format!("{file} is bigger than {}; push big files with git (and Git LFS).", human_size(MAX_UPLOAD_FILE)));
+                    } else if total > MAX_UPLOAD {
+                        received.problem = Some(format!("Uploads can be at most {} in all.", human_size(MAX_UPLOAD)));
+                    } else if room.is_some_and(|r| total as u64 > r) {
+                        received.problem = Some(format!("{owner} is out of storage on this server."));
+                    }
+                }
+                if received.problem.is_some() {
+                    data = Vec::new();
+                    received.files.clear();
+                } else {
+                    data.extend_from_slice(&chunk);
+                }
             }
-            total += data.len();
-            if data.len() > MAX_UPLOAD_FILE {
-                problem = Some(format!("{file} is bigger than {}; push big files with git (and Git LFS).", human_size(MAX_UPLOAD_FILE)));
-            } else if total > MAX_UPLOAD {
-                problem = Some(format!("Uploads can be at most {} in all.", human_size(MAX_UPLOAD)));
+            if !file.is_empty() && received.problem.is_none() {
+                received.files.push(FileWrite { path: join(dir, file_name(&file)), content: Some(data), from: None, new: false });
             }
-            files.push(FileWrite { path: join(&s.path, file_name(&file)), content: Some(data.to_vec()), from: None, new: false });
             continue;
         }
         let value = field.text().await.map_err(bad)?;
+        let fields = &mut received.fields;
         match field_name.as_str() {
             "summary" => fields.summary = value,
             "description" => fields.description = value,
@@ -520,6 +545,27 @@ pub async fn upload(
             _ => {}
         }
     }
+    Ok(received)
+}
+
+pub async fn upload(
+    State(state): State<AppState>,
+    SignedIn(user): SignedIn,
+    Path((owner, name, rest)): Path<(String, String, String)>,
+    mut form: Multipart,
+) -> AppResult {
+    let (repo, access) = writer(&state, &user, &owner, &name).await?;
+    let s = spot(&state, &repo, &user, rest).await?;
+    folder(&state, &repo, &s).await?;
+    // Nothing is read before it's this upload's turn.
+    let _turn = state.upload_slots.acquire().await.map_err(|e| AppError::Internal(e.into()))?;
+    // What the owner may still store: more than that isn't kept either.
+    let room = state.core.storage_room(repo.owner_id).await?;
+    let received = match tokio::time::timeout(UPLOAD_TIME, receive(&mut form, &s.path, &repo.owner, room)).await {
+        Ok(received) => received?,
+        Err(_) => return Err(AppError::BadRequest("The upload took too long; push the files with git instead.".into())),
+    };
+    let Received { fields, files, mut problem } = received;
     if files.is_empty() && problem.is_none() {
         problem = Some("Choose one or more files to upload.".into());
     }

@@ -140,6 +140,8 @@ struct ComparePage {
     notice: Option<String>,
     changes: Option<Changes>,
     existing: Option<(i64, String)>,
+    /// Why no pull request can be opened for these, if none can.
+    refused: Option<String>,
     can_open: bool,
     title: String,
     body: String,
@@ -295,8 +297,18 @@ async fn compare_page(
     };
     let mut base_repos = vec![full_name(repo)];
     base_repos.extend(related.iter().filter(|r| repo.forked_from == Some(r.id)).map(full_name));
+    // The viewer can compare with a private fork they can see, but a pull
+    // request would copy its commits here, for everyone.
+    let refused = keel_core::private_into_public(repo, &head_repo).then(|| {
+        format!(
+            "{} is private and {} isn’t, so a pull request can’t be opened: it would make these commits public.",
+            full_name(&head_repo),
+            full_name(repo)
+        )
+    });
     html(ComparePage {
         repo: RepoView::new(state, repo, access, viewer.as_ref(), "pulls", &default).await?,
+        refused,
         can_open: viewer.is_some() && existing.is_none(),
         page: Page::new(state, viewer, format!("Compare {base}...{head_label} · {}/{}", repo.owner, repo.name)),
         base_repos,

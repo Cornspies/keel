@@ -94,7 +94,7 @@ pub(crate) async fn basic_credentials(state: &AppState, headers: &HeaderMap) -> 
     let Some((login, secret)) = basic_auth(headers) else { return Ok(None) };
     let token = [&secret, &login].into_iter().find(|s| looks_like_token(s));
     let result = match token {
-        Some(t) => state.core.authenticate_token(t).await,
+        Some(t) => state.core.authenticate_token(t).await.map(|found| found.map(|(u, rights)| (u, rights.write))),
         None => state.core.authenticate(&login, &secret).await.map(|u| u.map(|u| (u, true))),
     };
     match result {

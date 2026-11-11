@@ -36,7 +36,30 @@ pub struct FileEdit {
     pub files: Vec<FileWrite>,
 }
 
-/// A path for a file: no empty, `.` or `..` parts, nothing in `.git`.
+/// Whether a file system would take `part` for `.git`, as git checks in
+/// what's pushed (`fsck`'s `hasDotgit`): macOS ignores some invisible
+/// characters in names, Windows ignores trailing dots and spaces, knows
+/// `.git` as `git~1` too, and reads `name:stream` as the file `name`. A
+/// tree with such an entry could write into the `.git` directory of
+/// whoever checks it out there.
+fn is_dot_git(part: &str) -> bool {
+    let visible: String = part
+        .chars()
+        .filter(|c| !matches!(c, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}'))
+        .collect();
+    if visible.eq_ignore_ascii_case(".git") {
+        return true;
+    }
+    let lower = part.to_ascii_lowercase();
+    let rest = lower.strip_prefix(".git").or_else(|| lower.strip_prefix("git~1"));
+    rest.is_some_and(|r| {
+        let r = r.trim_start_matches(['.', ' ']);
+        r.is_empty() || r.starts_with(':')
+    })
+}
+
+/// A path for a file: no empty, `.` or `..` parts, nothing in `.git` (or
+/// what some file system takes for it).
 pub fn clean_path(path: &str) -> Result<String> {
     let path = path.trim().trim_matches('/');
     if path.is_empty() {
@@ -46,7 +69,7 @@ pub fn clean_path(path: &str) -> Result<String> {
         return invalid("That path is too long.");
     }
     for part in path.split('/') {
-        if part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git") {
+        if part.is_empty() || part == "." || part == ".." || is_dot_git(part) {
             return invalid(format!("“{path}” isn't a valid path."));
         }
         if part.chars().any(|c| c.is_control() || c == '\\') || part.len() > 255 {
@@ -194,6 +217,13 @@ mod tests {
         assert_eq!(clean_path(" /docs/a b.md/ ").unwrap(), "docs/a b.md");
         for bad in ["", "/", "a//b", "../x", "a/./b", ".git/config", "a/.GIT/x", "a\\b", "x\ny"] {
             assert!(clean_path(bad).is_err(), "{bad:?}");
+        }
+        // What macOS or Windows would take for `.git`.
+        for bad in [".g\u{200c}it/config", "a/.Git\u{feff}/x", ".git./config", ".git /x", "GIT~1/config", "git~1. ./x", ".git::$INDEX_ALLOCATION/x", ".git. :x"] {
+            assert!(clean_path(bad).is_err(), "{bad:?}");
+        }
+        for fine in [".gitignore", ".github/workflows/ci.yml", ".gitmodules", "git~10", ".git-blame-ignore-revs", "x.git/y", "git~1x"] {
+            assert_eq!(clean_path(fine).unwrap(), fine);
         }
     }
 

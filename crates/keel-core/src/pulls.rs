@@ -62,6 +62,12 @@ pub fn related(base: &Repo, head: &Repo) -> bool {
     base.id == head.id || head.forked_from == Some(base.id) || base.forked_from == Some(head.id)
 }
 
+/// Whether a pull request from `head` into `base` would take a private
+/// repository's commits into a public one: those are refused.
+pub fn private_into_public(base: &Repo, head: &Repo) -> bool {
+    base.id != head.id && head.is_private && !base.is_private
+}
+
 impl Core {
     pub(crate) async fn git<T: Send + 'static>(
         &self,
@@ -96,6 +102,16 @@ impl Core {
             return invalid("This repository is a mirror; open pull requests where it's mirrored from.");
         }
         let cross = repo.id != head_repo.id;
+        // Opening it copies the head's commits into the base, where
+        // everyone who reads the base can fetch them (see `may_fetch_head`
+        // for afterwards).
+        if private_into_public(repo, head_repo) {
+            return invalid(format!(
+                "{}/{} is private and {}/{} isn't: a pull request would make its commits public. \
+                 Make {}/{} public first, if they may be.",
+                head_repo.owner, head_repo.name, repo.owner, repo.name, head_repo.owner, head_repo.name
+            ));
+        }
         if !cross && base_ref == head_ref {
             return invalid("Choose two different branches.");
         }
@@ -267,7 +283,7 @@ impl Core {
             return Ok(true);
         }
         let Some(base) = self.repo_by_id(issue.repo_id).await? else { return Ok(false) };
-        if !base.is_private {
+        if private_into_public(&base, &head) {
             return Ok(false);
         }
         let author = match issue.author_id {
@@ -795,6 +811,14 @@ mod tests {
         core.sync_pulls(fork.id, Some(bob.id)).await.unwrap();
         assert_eq!(core.pull_tips(&open, &open_pull).await.unwrap().1, None);
         assert_eq!(pinned(open.number).await.unwrap(), before);
+        // Nor can a new pull request bring them: opening one would copy
+        // the private branch into the public repository.
+        git(&["push", "-q", core.repo_path(&fork).to_str().unwrap(), "topic:hidden"]);
+        let fork_now = core.repo_by_id(fork.id).await.unwrap().unwrap();
+        let hidden = core.git(fork.id, |g| Ok(g.branch_tip("hidden"))).await.unwrap().unwrap();
+        let e = core.create_pull(&repo, &bob, "Oops", "", "main", &fork_now, "hidden", false).await.unwrap_err();
+        assert!(matches!(&e, Error::Invalid(m) if m.contains("bob/engine is private")), "{e:?}");
+        assert!(core.git(repo.id, move |g| Ok(g.commit_summary(hidden).is_err())).await.unwrap(), "not copied");
 
         // Deleting the fork keeps the pull request.
         core.delete_repo(&fork).await.unwrap();

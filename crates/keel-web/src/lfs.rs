@@ -245,6 +245,10 @@ pub(crate) async fn serve_object(state: &AppState, oid: &str, size: u64, content
     if let Ok(v) = HeaderValue::from_str(content_type) {
         h.insert(header::CONTENT_TYPE, v);
     }
+    // Whatever someone uploaded, served from keel's origin: never run, or
+    // taken for another type than it's sent as.
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     res
 }
 

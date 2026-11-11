@@ -172,7 +172,12 @@ impl RepoView {
         let cfg = &state.core.config;
         let counts = state.core.issue_counts(repo.id).await?;
         let parent = match repo.forked_from {
-            Some(id) => state.core.repo_by_id(id).await?.map(|p| format!("{}/{}", p.owner, p.name)),
+            // A parent that's private (now) stays unnamed to those who
+            // can't see it.
+            Some(id) => match state.core.repo_by_id(id).await? {
+                Some(p) if state.core.access(&p, viewer).await? != Access::None => Some(format!("{}/{}", p.owner, p.name)),
+                _ => None,
+            },
             None => None,
         };
         let mirror = state.core.mirror(repo.id).await?.map(|m| MirrorView {

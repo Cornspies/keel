@@ -1,0 +1,30 @@
+# Advisories `cargo audit` reports for crates in Cargo.lock that keel can't
+# upgrade yet (each is held back by the newest release of the crate that
+# pulls it in) and that don't reach keel the way it uses them. The release
+# workflow runs `cargo audit`, which stops at anything not listed here.
+#
+# Remove an entry as soon as its crate can be upgraded: `cargo update`,
+# then `cargo audit` without the entry.
+
+[advisories]
+ignore = [
+    # SQLite before 3.54 can return uninitialized memory when it opens a
+    # database next to a crafted `-wal` file. Bundled by libsqlite3-sys
+    # before 0.39; sqlx 0.9.0 requires < 0.38. keel only opens its own
+    # database, in a data directory nobody else can write to (0700).
+    "RUSTSEC-2026-0459",
+
+    # Marvin attack: timing side channel in RSA private-key operations.
+    # rsa 0.9 comes with pgp 0.21, and russh 0.65 pins rsa 0.10.0-rc.18.
+    # keel only verifies RSA signatures (SSH sign-ins, signed commits), and
+    # the keys it makes itself (SSH host key, commit signing key) are
+    # Ed25519. Don't replace the SSH host key with an RSA one while this
+    # is here.
+    "RUSTSEC-2023-0071",
+
+    # crypto-bigint before 0.7.6: operations meant to be constant-time
+    # could leak secret numbers through timing. 0.5 comes with pgp 0.21
+    # (cx448, elliptic-curve), which keel only uses to verify signatures
+    # with public keys: no secrets pass through it.
+    "RUSTSEC-2026-0387",
+]

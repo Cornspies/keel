@@ -18,7 +18,7 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::{HashAlg, PrivateKey};
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, PublicKeyOffer, Server, Session, VerifiedPublicKey};
-use russh::{Channel, ChannelId, ChannelOpenFailure, MethodKind, MethodSet, SshId};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Disconnect, MethodKind, MethodSet, SshId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
@@ -87,6 +87,7 @@ impl Server for SshServer {
             peer,
             user: None,
             deploy_key: None,
+            fingerprint: None,
             protocol: HashMap::new(),
             stdin: HashMap::new(),
             channels: Channels::default(),
@@ -106,6 +107,9 @@ struct Connection {
     user: Option<User>,
     /// Signed in with a repository's deploy key instead of a person's key.
     deploy_key: Option<keel_core::DeployKey>,
+    /// The key that signed in, to check before every command that it
+    /// still does (see [`Connection::still_signed_in`]).
+    fingerprint: Option<String>,
     /// `GIT_PROTOCOL` sent via `SetEnv`, per channel.
     protocol: HashMap<ChannelId, String>,
     /// Feeds client data to the running git process, per channel.
@@ -194,7 +198,44 @@ fn parse_lfs_command(cmd: &str) -> Option<(String, String, bool)> {
     Some((owner.to_owned(), repo.to_owned(), upload))
 }
 
+/// What a connection whose key was removed (or whose account was disabled)
+/// since it signed in is told.
+const SIGNED_OUT: &str = "keel: this key is no longer accepted; it was removed, or its account was disabled";
+
 impl Connection {
+    /// Whether the key this connection signed in with still signs in the
+    /// same account (or is still the same deploy key), checked before every
+    /// command: a connection can stay open for days, and meanwhile the
+    /// account may have been disabled or the key removed. Also brings who
+    /// it is up to date (an administrator may not be one any more, a deploy
+    /// key may have lost pushing).
+    async fn still_signed_in(&mut self) -> anyhow::Result<bool> {
+        let Some(fingerprint) = self.fingerprint.clone() else { return Ok(false) };
+        if let Some(user) = &self.user {
+            let now = self.core.user_by_ssh_fingerprint(&fingerprint).await?;
+            self.user = now.filter(|u| u.id == user.id);
+            return Ok(self.user.is_some());
+        }
+        if let Some(key) = &self.deploy_key {
+            let now = self.core.deploy_key_by_fingerprint(&fingerprint).await?;
+            self.deploy_key = now.filter(|k| k.id == key.id);
+            return Ok(self.deploy_key.is_some());
+        }
+        Ok(false)
+    }
+
+    /// Tells the client its key is no longer accepted, and ends the
+    /// connection.
+    fn sign_out(&self, channel: ChannelId, session: &mut Session) -> anyhow::Result<()> {
+        session.channel_success(channel)?;
+        let handle = session.handle();
+        tokio::spawn(async move {
+            Self::fail(&handle, channel, SIGNED_OUT).await;
+            let _ = handle.disconnect(Disconnect::ByApplication, SIGNED_OUT.into(), "en".into()).await;
+        });
+        Ok(())
+    }
+
     /// What the signed-in key may do with `repo` (or its wiki): a person's
     /// access, or a deploy key's, which only reaches its own repository
     /// (not the wiki) and can't push to archived ones.
@@ -417,11 +458,13 @@ impl russh::server::Handler for Connection {
         if let Some(user) = self.core.user_by_ssh_fingerprint(&fingerprint).await? {
             tracing::info!(user = %user.username, peer = ?self.peer, "ssh login");
             self.user = Some(user);
+            self.fingerprint = Some(fingerprint);
             return Ok(Auth::Accept);
         }
         if let Some(key) = self.core.deploy_key_by_fingerprint(&fingerprint).await? {
             tracing::info!(repo = key.repo_id, key = key.id, peer = ?self.peer, "ssh login with a deploy key");
             self.deploy_key = Some(key);
+            self.fingerprint = Some(fingerprint);
             return Ok(Auth::Accept);
         }
         Ok(Auth::reject())
@@ -462,6 +505,9 @@ impl russh::server::Handler for Connection {
             session.channel_failure(channel)?;
             return Ok(());
         }
+        if !self.still_signed_in().await? {
+            return self.sign_out(channel, session);
+        }
         session.channel_success(channel)?;
         let name = match (&self.user, &self.deploy_key) {
             (Some(u), _) => u.username.clone(),
@@ -487,6 +533,11 @@ impl russh::server::Handler for Connection {
         if !self.channels.start(channel) {
             session.channel_failure(channel)?;
             return Ok(());
+        }
+        // The key may have been removed, or its account disabled, since
+        // this connection signed in.
+        if !self.still_signed_in().await? {
+            return self.sign_out(channel, session);
         }
         let command = String::from_utf8_lossy(data).into_owned();
         let handle = session.handle();

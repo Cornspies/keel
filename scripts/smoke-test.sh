@@ -159,6 +159,7 @@ curl -s -c "$T/ada" -o /dev/null -H "$O" -d "username=ada&email=ada@example.com&
 check "with it, the first account is the administrator" is "$(status -b "$T/ada" "$B/admin")" 200
 signup bob "$T/bob"
 check "later sign-ups don't need it" is "$(status -b "$T/bob" "$B/settings/tokens")" 200
+check "an address with a name around it isn't an address" contains "$(curl -s -H "$O" --data-urlencode "username=mal" --data-urlencode "email=mal <ada@example.com>" --data-urlencode "password=password-mal" "$B/register")" "valid email address"
 check "signing in redirects to local paths only" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" -d "login=bob&password=password-bob&next=/%09/evil.example" "$B/login")" "$B/"
 check "non-ASCII ones are encoded" is "$(curl -s -o /dev/null -w '%{redirect_url}' -H "$O" --data-urlencode "login=bob" --data-urlencode "password=password-bob" --data-urlencode "next=/ada/é" "$B/login")" "$B/ada/%C3%A9"
 check "cross-origin POST is rejected" is "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: http://evil.example' -d x=1 "$B/new")" 403
@@ -397,6 +398,20 @@ echo "more" >>"$T/fork/bob.txt" && $BOB_GIT commit -qam "More from bob"
 $BOB_GIT push -q origin HEAD:topic
 check "pushing to the fork updates the pull request" eventually_contains "$B/ada/engine/pull/$FPR/commits" "More from bob"
 check "the fork's commits are fetchable from the base" git -C "$T/c1" fetch -q origin "refs/pull/$FPR/head"
+EVE_ID=$(curl -s "$B/api/v1/users/eve" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+post "$T/bob" /bob/secret/collaborators username=eve role=read >/dev/null
+check "someone who reads a private fork" is "$(status -b "$T/eve" "$B/bob/secret")" 200
+check "isn't told a parent they can't see" bash -c "! curl -s -b '$T/eve' '$B/bob/secret' | grep -q 'forked from'"
+check "its owner, who can, is" contains "$(curl -s -b "$T/bob" "$B/bob/secret")" "forked from"
+post "$T/bob" "/bob/secret/collaborators/$EVE_ID/remove" x=1 >/dev/null
+check "eve forks ada/engine too" is "$(post "$T/eve" /ada/engine/fork owner=eve name=engine)" 303
+check "and makes her fork private" is "$(post "$T/eve" /eve/engine/settings description= private=on)" 303
+git clone -q "$B/ada/engine.git" "$T/hush" && echo hush >"$T/hush/hush.txt" && git -C "$T/hush" add -A && git -C "$T/hush" commit -qm "Private work"
+git -C "$T/hush" push -q "http://eve:password-eve@127.0.0.1:$HTTP_PORT/eve/engine.git" HEAD:hush
+check "its branches compare with the public parent" contains "$(curl -s -b "$T/eve" "$B/ada/engine/compare/main...eve/engine:hush")" "Private work"
+check "but a pull request would publish them" contains "$(curl -s -b "$T/eve" "$B/ada/engine/compare/main...eve/engine:hush")" "would make these commits public"
+check "so it's refused" contains "$(curl -s -b "$T/eve" -H "$O" -d base=main -d head=eve/engine:hush -d title=Oops "$B/ada/engine/pulls")" "eve/engine is private"
+check "and they stay out of the public repository" bash -c "! git ls-remote '$B/ada/engine.git' | grep -q $(git -C "$T/hush" rev-parse HEAD)"
 
 echo "== labels and assignees"
 check "repos start with labels" contains "$(curl -s "$B/ada/engine/labels")" "good first issue"
@@ -722,6 +737,17 @@ check "main has it" is "$(curl -s "$B/ada/engine/raw/main/api.txt")" api
 check "create a repository" is "$(api_status "$RW" POST /user/repos -d '{"name":"from-api","private":true}')" 201
 check "it's private" is "$(status "$API/repos/ada/from-api")" 404
 check "delete it" is "$(api_status "$RW" DELETE /repos/ada/from-api)" 204
+ssh-keygen -q -t ed25519 -N "" -C api -f "$T/apikey"
+NEWKEY="{\"title\":\"api\",\"key\":\"$(cat "$T/apikey.pub")\"}"
+check "everyday tokens can't add SSH keys" contains "$(api "$RW" POST /user/keys -d "$NEWKEY")" "can't change SSH or GPG keys"
+check "nor GPG keys" is "$(api_status "$RW" POST /user/gpg_keys -d '{"armored_public_key":"x"}')" 403
+check "tokens that manage keys must be able to push" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=keys" --data-urlencode "keys=on" --data-urlencode "password=password-ada" "$B/settings/tokens")" "needs to allow pushing"
+page=$(curl -s -b "$T/ada" -H "$O" --data-urlencode "name=keys" --data-urlencode "write=on" --data-urlencode "keys=on" --data-urlencode "password=password-ada" "$B/settings/tokens")
+KEYTOK=$(grep -o 'value="keel_[A-Za-z0-9_-]*"' <<<"$page" | cut -d'"' -f2)
+check "a token made for it adds them" is "$(api_status "$KEYTOK" POST /user/keys -d "$NEWKEY")" 201
+KID=$(api "$RW" GET /user/keys | python3 -c 'import json,sys; print([k["id"] for k in json.load(sys.stdin) if k["title"] == "api"][0])')
+check "everyday tokens can't remove them either" is "$(api_status "$RW" DELETE "/user/keys/$KID")" 403
+check "the token made for it can" is "$(api_status "$KEYTOK" DELETE "/user/keys/$KID")" 204
 
 echo "== deploy keys"
 ssh-keygen -q -t ed25519 -N "" -C ci@build -f "$T/deploy"
@@ -762,8 +788,15 @@ check "sign-ups are closed" contains "$(curl -s -H "$O" -d "username=yan&email=y
 check "admins still create accounts" is "$(post "$T/ada" /admin/users username=zed email=zed@example.com password=password-zed)" 303
 check "the new account signs in" is "$(curl -s -o /dev/null -w '%{http_code}' -c "$T/zed" -H "$O" -d "login=zed&password=password-zed" "$B/login")" 303
 Z=$(curl -s -b "$T/ada" "$B/admin/users?q=zed" | grep -o 'admin/users/[0-9]*/disable' | head -1 | grep -o '[0-9]*')
+ssh-keygen -q -t ed25519 -N "" -C zed -f "$T/zedkey"
+post "$T/zed" /settings/keys "key=$(cat "$T/zedkey.pub")" password=password-zed >/dev/null
+ZED_SSH="ssh -i $T/zedkey -S $T/zed.sock -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT"
+$ZED_SSH -M -N -f git@127.0.0.1
+check "an SSH connection it keeps open works" bash -c "GIT_SSH_COMMAND='$ZED_SSH' git ls-remote '$SSH_URL/ada/engine.git' >/dev/null"
 check "disable it" is "$(post "$T/ada" "/admin/users/$Z/disable" to=on)" 303
 check "which signs it out" is "$(status -b "$T/zed" "$B/settings/account")" 303
+check "also from SSH connections that were open" contains "$(GIT_SSH_COMMAND="$ZED_SSH" git ls-remote "$SSH_URL/ada/engine.git" 2>&1)" "no longer accepted"
+$ZED_SSH -O exit git@127.0.0.1 2>/dev/null
 check "and keeps it out" contains "$(curl -s -H "$O" -d "login=zed&password=password-zed" "$B/login")" "Incorrect"
 check "the last admin stays" contains "$(curl -s -b "$T/ada" -H "$O" -d to=off "$B/admin/users/1/admin")" "at least one administrator"
 check "delete the account" is "$(post "$T/ada" "/admin/users/$Z/delete" x=1)" 303
@@ -884,6 +917,7 @@ HREF=$(field '["objects"][0]["actions"]["upload"]["href"]' <<<"$UP")
 AUTH=$(field '["objects"][0]["actions"]["upload"]["header"]["Authorization"]' <<<"$UP")
 check "content that doesn't match is refused" is "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: $AUTH" --data-binary 'other' "$HREF")" 422
 check "upload with the batch's token" is "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: $AUTH" --data-binary @"$T/large.txt" "$HREF")" 200
+check "large files are served without guessing their type" contains "$(curl -s -D - -o /dev/null -H "Authorization: $AUTH" "$HREF" | tr -d '\r' | tr 'A-Z' 'a-z')" "x-content-type-options: nosniff"
 check "then it's already there" bash -c "! grep -q '\"actions\"' <<<'$(batch "$RW" engine "$REQ")'"
 DOWN=$(batch "" engine '{"operation":"download","objects":[{"oid":"'$OID'","size":6}]}')
 check "public repositories' files download anonymously" is "$(curl -s "$(field '["objects"][0]["actions"]["download"]["href"]' <<<"$DOWN")")" large
@@ -1094,6 +1128,8 @@ TB1=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
 check "edit it" is "$(post "$T/ada" /ada/tracker/edit/main/README.md path=README.md "text="$'# Tracker\r\nAll the issues\r\n' "base=$TB1" "summary=Describe it")" 303
 check "browsers' line endings are fixed" is "$(curl -s "$B/ada/tracker/raw/main/README.md" | od -c | grep -c '\\r')" 0
 check "edits based on old versions are refused" contains "$(curl -s -b "$T/ada" -H "$O" -d path=README.md -d text=x -d "base=$TB1" "$B/ada/tracker/edit/main/README.md")" "Someone changed"
+check "names Windows takes for .git are refused" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "path=.git./config" -d text=x "$B/ada/tracker/new/main")" "a valid path"
+check "and names macOS does" contains "$(curl -s -b "$T/ada" -H "$O" --data-urlencode "path=$(printf '.g\xe2\x80\x8cit')/config" -d text=x "$B/ada/tracker/new/main")" "a valid path"
 TB2=$(git ls-remote "$B/ada/tracker.git" refs/heads/main | cut -f1)
 check "rename it" is "$(post "$T/ada" /ada/tracker/edit/main/README.md path=docs/README.md "text=# Tracker" "base=$TB2")" 303
 check "it moved" is "$(curl -s "$B/ada/tracker/raw/main/docs/README.md")" "# Tracker"

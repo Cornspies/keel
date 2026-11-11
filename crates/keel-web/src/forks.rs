@@ -75,7 +75,10 @@ pub async fn create(
     match state.core.fork_repo(&repo, &target, &f.name).await {
         Ok(fork) => {
             state.core.set_watching(user.id, fork.id, true).await?;
-            state.core.repo_created_event(fork.id, &user, Some(&format!("{}/{}", repo.owner, repo.name))).await?;
+            // Everyone who can read the fork reads this in the feed, so a
+            // private parent isn't named in it.
+            let parent = (!repo.is_private).then(|| format!("{}/{}", repo.owner, repo.name));
+            state.core.repo_created_event(fork.id, &user, parent.as_deref()).await?;
             Ok(Redirect::to(&format!("/{}/{}", fork.owner, fork.name)).into_response())
         }
         Err(keel_core::Error::Invalid(msg)) => html(ForkPage {

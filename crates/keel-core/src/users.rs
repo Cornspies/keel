@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::auth::{hash_password, hash_token, new_token, verify_password};
-use crate::{Core, Result, invalid, now, validate_username};
+use crate::{Core, Result, invalid, now, validate_email, validate_username};
 
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
 /// 80 random bits in four groups from an alphabet without look-alikes, e.g.
@@ -167,10 +167,7 @@ impl Core {
     /// Creates an account; `by_admin` even when registration is closed.
     pub(crate) async fn insert_user(&self, username: &str, email: &str, password: &str, by_admin: bool) -> Result<User> {
         validate_username(username)?;
-        let email = email.trim();
-        if !email.contains('@') || email.len() > 254 {
-            return invalid("Please enter a valid email address.");
-        }
+        let email = validate_email(email)?;
         if password.chars().count() < 8 {
             return invalid("Passwords must be at least 8 characters long.");
         }
@@ -347,10 +344,7 @@ impl Core {
     /// callers that confirmed the owner another way.
     pub async fn set_email(&self, user: &User, email: &str) -> Result<()> {
         let user_id = user.id;
-        let email = email.trim();
-        if !email.contains('@') || email.len() > 254 {
-            return invalid("Please enter a valid email address.");
-        }
+        let email = validate_email(email)?;
         let result = sqlx::query(
             "UPDATE users SET email = ?2,
                 email_verified_at = CASE WHEN email = ?2 THEN email_verified_at END

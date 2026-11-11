@@ -2,7 +2,7 @@
 //! single sign-on. keel-web speaks the protocol; this is who's who.
 
 use crate::names::RESERVED_USERNAMES;
-use crate::{Core, Error, Result, User, invalid, now, validate_username};
+use crate::{Core, Error, Result, User, invalid, now, validate_email, validate_username};
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct ExternalIdentity {
@@ -87,7 +87,7 @@ impl Core {
         if !allow_signup && !self.registration_open() {
             return invalid("Sign-ups are closed: ask an administrator for an account, then connect it in Settings → Security.");
         }
-        if !email.contains('@') || email.len() > 254 {
+        if validate_email(email).is_err() {
             return invalid("The provider didn't give an email address, which accounts need.");
         }
         let user = self.create_sso_user(&claims.username, email, claims.email_verified).await?;

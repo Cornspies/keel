@@ -159,7 +159,7 @@ impl crate::Config {
 pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
@@ -168,6 +168,9 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_documentation()
                 || a == 0
                 || (a == 100 && (64..128).contains(&b)) // carrier-grade NAT
+                || (a, b, c) == (192, 0, 0) // IETF protocol assignments
+                || (a, b, c) == (192, 88, 99) // 6to4 relays (deprecated)
+                || (a == 198 && (18..20).contains(&b)) // benchmarking
                 || a >= 224 // multicast and reserved
         }
         IpAddr::V6(v6) => {
@@ -189,6 +192,10 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
                 || s[0] == 0x2002 && embedded((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8) // 6to4
                 || s[..2] == [0x2001, 0] // Teredo
                 || s[..2] == [0x2001, 0xdb8] // documentation
+                || s[0] == 0x3fff && s[1] < 0x1000 // documentation (3fff::/20)
+                || s[..3] == [0x2001, 2, 0] // benchmarking
+                || s[0] == 0x2001 && matches!(s[1] & 0xfff0, 0x10 | 0x20) // ORCHID
+                || s[..4] == [0x100, 0, 0, 0] // discard-only
         }
     }
 }
@@ -570,10 +577,16 @@ mod tests {
         for ip in [
             "::7f00:1", "::a01:203", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b:1::1", "2002:7f00:1::1",
             "2002:a00:1::", "2001::1", "2001:0:4136:e378::1", "2001:db8::1", "fec0::1",
+            // Other special-purpose networks that aren't on the internet.
+            "192.0.0.8", "192.88.99.1", "198.18.0.1", "198.19.255.254", "100::1", "2001:2::1", "2001:10::1",
+            "2001:20::1", "3fff:fff::1", "::ffff:198.18.0.1",
         ] {
             assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["1.1.1.1", "93.184.216.34", "2606:4700::1111", "64:ff9b::101:101", "2002:101:101::1", "2001:4860::8888"] {
+        for ip in [
+            "1.1.1.1", "93.184.216.34", "2606:4700::1111", "64:ff9b::101:101", "2002:101:101::1", "2001:4860::8888",
+            "192.0.1.1", "198.17.0.1", "198.20.0.1", "2001:30::1", "2001:2:1::1", "100:0:0:1::1", "3fff:1000::1",
+        ] {
             assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
         }
         let strict = Outbound::default();

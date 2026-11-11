@@ -4,9 +4,9 @@ default-members = ["crates/keel"]
 resolver = "3"
 
 [workspace.package]
-version = "0.24.1"
+version = "0.24.2"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.99.1"
 
 [workspace.dependencies]
 regex = "1.11"

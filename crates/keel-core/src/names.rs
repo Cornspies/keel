@@ -22,6 +22,30 @@ pub fn validate_username(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A plain email address, `someone@example.com`, without surrounding
+/// spaces. Not a display name with an address (`Ada <ada@example.com>`),
+/// a list or a comment: mail programs would deliver those to the address
+/// inside, so they'd let several accounts share one address (and each have
+/// mail sent to it), past the rule of one account per address.
+pub fn validate_email(email: &str) -> Result<&str> {
+    let email = email.trim();
+    let plain = |part: &str| {
+        !part.is_empty() && !part.chars().any(|c| c.is_whitespace() || c.is_control() || "<>()[]\\,;:\"@".contains(c))
+    };
+    let ok = email.len() <= 254
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            plain(local)
+                && plain(domain)
+                && !domain.starts_with(['.', '-'])
+                && !domain.ends_with(['.', '-'])
+                && !domain.contains("..")
+        });
+    if !ok {
+        return invalid("Please enter a valid email address, like someone@example.com.");
+    }
+    Ok(email)
+}
+
 pub fn validate_repo_name(name: &str) -> Result<()> {
     let ok_chars = name
         .bytes()
@@ -49,6 +73,32 @@ mod tests {
         assert!(validate_username("ada-lovelace2").is_ok());
         for bad in ["", "-ada", "ada-", "a da", "ada/x", "Login", &"a".repeat(40)] {
             assert!(validate_username(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn emails() {
+        for good in ["ada@example.com", " ada@example.com ", "a.b+tag@mail.example.org", "ada@localhost", "ünï@exämple.de"] {
+            assert_eq!(validate_email(good).unwrap(), good.trim(), "{good}");
+        }
+        let long = format!("{}@example.com", "a".repeat(250));
+        for bad in [
+            "",
+            "ada",
+            "@example.com",
+            "ada@",
+            "a <victim@example.com>",
+            "victim@example.com (a)",
+            "victim@example.com, other@example.com",
+            "\"a b\"@example.com",
+            "a@b@example.com",
+            "ada@example.com\nBcc: x@example.com",
+            "ada@.example.com",
+            "ada@example..com",
+            "ada@example.com.",
+            long.as_str(),
+        ] {
+            assert!(validate_email(bad).is_err(), "{bad:?}");
         }
     }
 

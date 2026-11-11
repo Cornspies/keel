@@ -107,7 +107,7 @@ commit statuses.
 
 ## Quick start
 
-Requirements: a Rust toolchain (1.94+) to build, and `git` (2.38+, for
+Requirements: a Rust toolchain (1.99.1+) to build, and `git` (2.38+, for
 `merge-tree --write-tree`) on the `PATH` at runtime; keel won't start with
 an older one.
 
@@ -376,7 +376,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -d '{"merge_method":"squash"}' \
 | --- | --- |
 | `GET /user`, `GET /user/repos`, `POST /user/repos` | you and your repositories; `mirror_url` (with `mirror_username`, `mirror_password`, `mirror_interval`) creates a mirror |
 | `GET /users/{name}`, `GET /users/{name}/repos`, `GET /orgs/{org}`, `POST /orgs/{org}/repos` | an organization has a `description` where people have a `bio` |
-| `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`) |
+| `GET /user/keys`, `/user/gpg_keys`, `POST`, `GET`, `DELETE …/{id}` | your SSH keys (`title`, `key`) and GPG keys (`armored_public_key`); adding and removing them takes a token created to manage keys |
 | `GET`, `POST /repos/{owner}/{repo}/keys`, `GET`, `DELETE …/keys/{id}` | deploy keys, for repository admins: `title`, `key`, `read_only` (unlike GitHub's, `true` unless set to `false`) |
 | `GET`, `PATCH`, `DELETE /repos/{owner}/{repo}` | `name` (renames), `description`, `private`, `is_template`, `archived` |
 | `POST /repos/{owner}/{repo}/generate` | from a template: `owner`, `name`, `description`, `private`, `include_all_branches` |
@@ -534,7 +534,10 @@ itself) are only fetched into a private base, and only while the pull
 request's author can still read the head; otherwise the head counts as
 deleted. So someone who lost access to a private parent doesn't keep getting
 its commits through a pull request into their fork, and making a fork private
-keeps its new commits out of a public parent.
+keeps its new commits out of a public parent. For the same reason a pull
+request from a private repository into a public one can't be opened (the
+compare page still shows the changes to those who can see both): it would
+copy the private commits to where everyone can fetch them.
 
 **Line comments** record the file, side, line number and the blob of that side
 they were made on. While that side of the file is unchanged in the current
@@ -632,7 +635,12 @@ request; a "new branch" named like the protected one is refused. A new branch
 must not exist yet, but may match a protected pattern, as with pushes.
 Line endings are kept (browsers send `\r\n`), as is the executable
 bit when editing or renaming. Uploads are up to 25 MiB per file and 100 MiB
-in all and go into git directly; push big files with Git LFS instead.
+in all and go into git directly; push big files with Git LFS instead. They're
+held in memory until they're committed, so two are received at a time (others
+wait their turn), each within ten minutes, and nothing is kept of one that's
+too big or more than its owner may still store. File names that Windows or
+macOS would take for `.git` (`.git.`, `git~1`, `.git` with invisible
+characters) are refused, as git refuses them in pushes.
 
 **Templates** are read from the default branch where GitHub and Gitea look
 for them: `.keel/`, `.github/`, `.gitea/`, the top level or `docs/`, with
@@ -822,16 +830,18 @@ clients thread them. They only go to verified addresses (verified by a link
 sent at sign-up or after changing the address, or by a password reset), so
 nobody can sign someone else's address up for mail. By default people get
 emails about threads they take part in, not about everything in watched
-repositories; each person can change that.
+repositories; each person can change that. A comment notifies the first 50
+people it mentions, so one comment can't notify (and email) every account.
 
 **Organization webhooks** get the events of all of the organization's
 repositories, in addition to each repository's own hooks.
 
 Webhooks don't follow redirects or use proxies. Unless
 `--webhook-allow-private` is set, they can't reach loopback, private, link-local
-or other internal addresses: names are resolved by keel and checked on the
-addresses actually connected to, so a hostname pointing at an internal address
-doesn't get around it.
+or other internal addresses (nor the networks set aside for benchmarking,
+documentation and protocol use, which aren't on the internet): names are
+resolved by keel and checked on the addresses actually connected to, so a
+hostname pointing at an internal address doesn't get around it.
 
 **Deploy keys** are SSH keys of a repository rather than of a person, for
 servers and CI: Settings → Deploy keys, or the API. A key reaches only its
@@ -904,7 +914,13 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   refused for the rest of those 15 minutes. The count is kept in memory.
 - Changing the email address, adding SSH or GPG keys and creating access
   tokens ask for the password, so a stolen session can't be turned into
-  lasting access.
+  lasting access. Through the API, only a token created to manage keys
+  (which takes the password) adds or removes them: any other token, leaked,
+  could otherwise add a key that outlasts it, and that over SSH is its
+  owner in full, an administrator included.
+- Email addresses are plain addresses (`ada@example.com`, not `Ada
+  <ada@example.com>`), so each belongs to one account, and nobody gets an
+  account's mail sent to an address that has one already.
 - State-changing requests must come from the same origin (CSRF), going by
   the `Sec-Fetch-Site`, `Origin` or `Referer` header the browser sends.
   Behind `https://`, an origin on plain HTTP doesn't count, and requests
@@ -932,9 +948,13 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   administrator (every repository, the admin API) if it was created for
   site administration; otherwise it reaches what its owner could without
   being one, so a leaked CI token isn't a key to everything. (Tokens from
-  before 0.19 are everyday tokens.)
+  before 0.19 are everyday tokens.) Likewise only a token created for it
+  changes its owner's SSH and GPG keys.
 - Strict Content Security Policy. Raw files are served with `sandbox` and
   never as `text/html`, so user content can't run scripts on keel's origin.
+  Git LFS files, which anyone can fetch from a public repository, are
+  served sandboxed too, and they and everything git answers say `nosniff`,
+  so no browser takes what someone uploaded for a script or a page.
 - Images from other servers in Markdown (issues, comments, READMEs,
   releases, wikis) load through keel's image proxy (`/_image`), like GitHub's
   camo, so whoever posts one can't see who viewed it; pages may only load
@@ -949,13 +969,16 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
   `-wal` and `-shm` files the database's permissions. Under systemd, also
   set `UMask=0077`.
 - Private repositories return 404 (web) or 401 (git) to anyone who can't see
-  them, so their names don't leak. That includes fork lists and the
-  repositories offered on the compare page.
+  them, so their names don't leak. That includes fork lists, the
+  repositories offered on the compare page, and the parent a fork names
+  (in its header and in the activity feed).
 - Only `git-upload-pack` and `git-receive-pack` can be run over SSH, once
   per channel, with at most ten channels per connection; git stops when its
   channel or connection closes. Repositories never run their own hooks (only
   keel's branch protection hook), and `GIT_PROTOCOL` values are validated
-  before being passed to git.
+  before being passed to git. A connection can stay open for days, so
+  before every command keel checks that the key it signed in with is still
+  there and its account not disabled, and otherwise ends the connection.
 - Gzip-compressed git requests are decompressed as they stream into git, and
   refused (`413`) past 64 MiB, as are uncompressed fetch requests (which
   only list what the client has and wants). Pushes are limited to
@@ -980,7 +1003,8 @@ display at 2 MiB, and diffs at 300 files / 10,000 lines.
 - The API only accepts access tokens, never passwords or cookies, so it can't
   be used cross-site or to guess passwords.
 - Administrators can disable accounts: sessions end at once, and passwords,
-  tokens and SSH keys stop working.
+  tokens and SSH keys stop working, also over SSH connections that were
+  already open.
 - Mirrors only fetch from and push to http(s) URLs at public addresses by
   default (see above). `/metrics` is off unless a token is set, and compares
   it in constant time. Git LFS tokens are HMAC-signed, scoped to one repository and one

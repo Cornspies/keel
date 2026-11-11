@@ -305,7 +305,7 @@ mod tests {
 
         // Disabling locks people out.
         let session = core.create_session(bob.id).await.unwrap();
-        let (_, token) = core.create_token(bob.id, "ci", true, false, None).await.unwrap();
+        let (_, token) = core.create_token(bob.id, "ci", true, false, false, None).await.unwrap();
         assert!(core.set_disabled(&ada, &ada, true).await.is_err(), "not yourself");
         core.set_disabled(&ada, &bob, true).await.unwrap();
         assert!(core.session_user(&session).await.unwrap().is_none());

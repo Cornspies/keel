@@ -2,9 +2,15 @@
 # keel, builds it for x86_64 and aarch64 Linux and publishes a GitHub release
 # with the tagged commit's message as its notes.
 #
-# Every release uses the newest versions of its dependencies that
-# Cargo.toml allows: `cargo update` picks them once, and that Cargo.lock is
-# what gets tested, built and attached to the release.
+# Releases are built with the dependencies in the tagged commit's
+# Cargo.lock (`--locked`): the versions that were developed and tested
+# with. They're checked against the RustSec advisory database first: a
+# release with a known vulnerability stops there, until Cargo.lock is
+# updated (or, for one that doesn't reach keel and can't be upgraded yet,
+# until it's listed in .cargo/audit.toml with the reason).
+#
+# The actions are pinned to commits (the tag is in the comment), so a tag
+# that's moved later can't change what builds a release.
 name: Release
 
 on:
@@ -18,11 +24,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  resolve:
+  check:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Check the tag matches Cargo.toml
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "keel") | .version')
@@ -31,27 +39,20 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
             exit 1
           fi
-      - name: Update dependencies
+      - name: Check the dependencies for known vulnerabilities
         run: |
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cargo update 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
+          cargo install cargo-audit --locked
+          cargo audit
 
   test:
-    needs: resolve
+    needs: check
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          name: cargo-lock
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install smoke test tools
         run: sudo apt-get update && sudo apt-get install -y sqlite3 git-lfs gnupg
       - name: Unit tests
@@ -62,7 +63,7 @@ jobs:
           scripts/smoke-test.sh target/debug/keel
 
   build:
-    needs: resolve
+    needs: check
     strategy:
       matrix:
         include:
@@ -72,12 +73,11 @@ jobs:
             runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          name: cargo-lock
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build
         run: cargo build --release --locked
       - name: Package
@@ -87,7 +87,7 @@ jobs:
           cp target/release/keel README.md "$name"/
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: keel-${{ matrix.arch }}
           path: keel-*.tar.gz*
@@ -99,9 +99,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      # The binaries and the Cargo.lock they were built with.
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # The binaries.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true

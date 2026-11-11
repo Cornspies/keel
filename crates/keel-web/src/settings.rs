@@ -377,6 +377,7 @@ struct TokenView {
     hint: String,
     can_write: bool,
     site_admin: bool,
+    manage_keys: bool,
     created: String,
     last_used: Option<String>,
     expires: Option<String>,
@@ -392,6 +393,7 @@ impl From<AccessToken> for TokenView {
             hint: t.hint,
             can_write: t.can_write,
             site_admin: t.site_admin,
+            manage_keys: t.manage_keys,
             created: date(t.created_at),
             last_used: t.last_used_at.map(relative_time),
             expires: t.expires_at.map(date),
@@ -437,6 +439,8 @@ pub struct TokenForm {
     write: Option<String>,
     /// For administrators: the token may administer the site.
     admin: Option<String>,
+    /// The token may add and remove SSH and GPG keys.
+    keys: Option<String>,
     /// Days until expiry; empty for never.
     #[serde(default)]
     expires: String,
@@ -453,7 +457,7 @@ pub async fn create_token(
     let expires = f.expires.trim().parse::<i64>().ok().filter(|d| *d > 0);
     let created = async {
         confirm(&state, &user, &headers, &f.password).await?;
-        state.core.create_token(user.id, &f.name, f.write.is_some(), f.admin.is_some(), expires).await
+        state.core.create_token(user.id, &f.name, f.write.is_some(), f.admin.is_some(), f.keys.is_some(), expires).await
     }
     .await;
     match created {

@@ -17,6 +17,8 @@
 {% else if let Some(c) = changes %}
   {% if let Some((number, url)) = existing %}
   <p class="flash">Pull request <a href="{{ url }}">#{{ number }}</a> for these branches is already open.</p>
+  {% else if let Some(why) = refused %}
+  <p class="flash">{{ why }}</p>
   {% else if can_open %}
   <div class="box pr-form">
     <div class="box-head">Open a pull request</div>

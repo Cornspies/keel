@@ -5,7 +5,8 @@
 //! existing clients and habits mostly carry over. Callers authenticate
 //! with a personal access token (`Authorization: Bearer <token>`, `token
 //! <token>` or Basic with the token as password); read-only tokens can only
-//! read. Without a token, public repositories are readable. Cookies are
+//! read, and only tokens created for it change their owner's SSH and GPG
+//! keys. Without a token, public repositories are readable. Cookies are
 //! ignored, so there is nothing to forge cross-site.
 
 use std::collections::HashMap;
@@ -192,10 +193,12 @@ async fn not_found() -> ApiError {
     not_found_error()
 }
 
-/// Who is calling: the token's owner (if any) and whether it may write.
+/// Who is calling: the token's owner (if any), whether it may write, and
+/// whether it may change its owner's SSH and GPG keys.
 pub struct Caller {
     user: Option<User>,
     can_write: bool,
+    can_manage_keys: bool,
 }
 
 impl FromRequestParts<AppState> for Caller {
@@ -203,7 +206,7 @@ impl FromRequestParts<AppState> for Caller {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let token = match parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-            None => return Ok(Self { user: None, can_write: false }),
+            None => return Ok(Self { user: None, can_write: false, can_manage_keys: false }),
             Some(value) => match value.split_once(' ') {
                 Some((scheme, t)) if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("token") => {
                     Some(t.trim().to_owned())
@@ -218,7 +221,7 @@ impl FromRequestParts<AppState> for Caller {
             None => None,
         };
         match found {
-            Some((user, can_write)) => Ok(Self { user: Some(user), can_write }),
+            Some((user, rights)) => Ok(Self { user: Some(user), can_write: rights.write, can_manage_keys: rights.manage_keys }),
             None => Err(error(
                 StatusCode::UNAUTHORIZED,
                 "Bad credentials: use a personal access token (passwords don't work here)",
@@ -237,6 +240,20 @@ impl Caller {
         let user = self.user()?;
         if !self.can_write {
             return Err(error(StatusCode::FORBIDDEN, "This access token is read-only"));
+        }
+        Ok(user)
+    }
+
+    /// The user, if their token may add and remove their SSH and GPG keys.
+    /// A key is lasting access (and over SSH, all of an administrator's),
+    /// so only tokens created for it may: on the web it takes the password.
+    fn key_manager(&self) -> ApiResult<&User> {
+        let user = self.writer()?;
+        if !self.can_manage_keys {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "This access token can't change SSH or GPG keys; create one that manages keys (Settings → Access tokens)",
+            ));
         }
         Ok(user)
     }
@@ -417,12 +434,12 @@ pub struct NewSshKey {
 }
 
 async fn add_ssh_key(State(state): State<AppState>, caller: Caller, Body(body): Body<NewSshKey>) -> ApiResult {
-    let key = state.core.add_ssh_key(caller.writer()?.id, &body.title, &body.key).await?;
+    let key = state.core.add_ssh_key(caller.key_manager()?.id, &body.title, &body.key).await?;
     Ok((StatusCode::CREATED, Json(ssh_key_value(&key))).into_response())
 }
 
 async fn delete_ssh_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-    state.core.delete_ssh_key(caller.writer()?.id, id).await?;
+    state.core.delete_ssh_key(caller.key_manager()?.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -527,12 +544,12 @@ pub struct NewGpgKey {
 }
 
 async fn add_gpg_key(State(state): State<AppState>, caller: Caller, Body(body): Body<NewGpgKey>) -> ApiResult {
-    let key = state.core.add_gpg_key(caller.writer()?.id, &body.armored_public_key).await?;
+    let key = state.core.add_gpg_key(caller.key_manager()?.id, &body.armored_public_key).await?;
     Ok((StatusCode::CREATED, Json(gpg_key_value(&key))).into_response())
 }
 
 async fn delete_gpg_key(State(state): State<AppState>, caller: Caller, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-    state.core.delete_gpg_key(caller.writer()?.id, id).await?;
+    state.core.delete_gpg_key(caller.key_manager()?.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -53,7 +53,12 @@ pub struct Subscription {
     pub reason: &'static str,
 }
 
-/// Usernames mentioned as `@name` in Markdown, outside code.
+/// Most people one comment notifies by mentioning them (the first ones):
+/// otherwise a single comment could notify, and email, every account.
+const MAX_MENTIONS: usize = 50;
+
+/// Usernames mentioned as `@name` in Markdown, outside code: the first
+/// [`MAX_MENTIONS`] of them.
 pub fn mentions(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut fenced = false;
@@ -82,6 +87,9 @@ pub fn mentions(text: &str) -> Vec<String> {
                 let name = name.trim_end_matches('.');
                 if !name.is_empty() && !out.iter().any(|n| n.eq_ignore_ascii_case(name)) {
                     out.push(name.to_owned());
+                    if out.len() == MAX_MENTIONS {
+                        return out;
+                    }
                 }
             }
             prev = Some(c);
@@ -344,6 +352,10 @@ mod tests {
         assert_eq!(mentions("cc @ada and @Bob."), ["ada", "Bob"]);
         assert_eq!(mentions("mail me@example.com or `@code` @ada @ada"), ["ada"]);
         assert_eq!(mentions("```\n@fenced\n```\n    @indented\n@after"), ["after"]);
+        // One comment can't notify everyone.
+        let everyone: String = (0..200).map(|i| format!("@user{i} ")).collect();
+        let found = mentions(&everyone);
+        assert_eq!((found.len(), found[49].as_str()), (MAX_MENTIONS, "user49"));
     }
 
     #[tokio::test]

@@ -115,6 +115,9 @@ pub struct Inner {
     storage: tokio::sync::Mutex<Option<(keel_core::StorageUsage, std::time::Instant)>>,
     /// Limits how many archives are built at once.
     archives: Arc<tokio::sync::Semaphore>,
+    /// Limits how many uploads of files into a repository are held in
+    /// memory at once (see `edit::upload`).
+    upload_slots: tokio::sync::Semaphore,
 }
 
 impl Deref for AppState {
@@ -175,6 +178,7 @@ impl AppState {
             started: std::time::Instant::now(),
             storage: tokio::sync::Mutex::new(None),
             archives: Arc::new(tokio::sync::Semaphore::new(archive::CONCURRENT_ARCHIVES)),
+            upload_slots: tokio::sync::Semaphore::new(edit::CONCURRENT_UPLOADS),
         }))
     }
 
@@ -460,7 +464,8 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/_image", get(images::image))
         .route("/metrics", get(metrics))
-        .route("/signing-key.pub", get(signing_key));
+        .route("/signing-key.pub", get(signing_key))
+        .layer(middleware::from_fn(no_sniffing));
 
     // The API authenticates with tokens only, so needs no CSRF check.
     let api = api::routes().layer(compression());
@@ -470,6 +475,15 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), track))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+/// For git, Git LFS and the other endpoints without page headers: browsers
+/// must take responses for what their content type says (some hold what
+/// people pushed or uploaded), never guess a script or a page in them.
+async fn no_sniffing(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    res
 }
 
 /// Compresses pages and API responses as they're sent. Brotli's default
