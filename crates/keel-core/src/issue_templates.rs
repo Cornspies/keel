@@ -141,8 +141,8 @@ fn is_markdown(name: &str) -> bool {
 }
 
 fn read_text(g: &GitRepo, commit: Oid, path: &str) -> keel_git::Result<Option<String>> {
-    Ok(g.blob(commit, path)?
-        .filter(|b| !b.binary && b.data.len() <= MAX_SIZE)
+    Ok(g.blob(commit, path, MAX_SIZE)?
+        .filter(|b| !b.binary)
         .map(|b| String::from_utf8_lossy(&b.data).replace("\r\n", "\n")))
 }
 

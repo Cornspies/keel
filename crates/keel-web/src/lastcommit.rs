@@ -2,6 +2,14 @@
 //! served from three cache levels: memory, the database (survives
 //! restarts), and incremental updates from a stored result for an ancestor
 //! commit. Only when all of those miss is history walked from scratch.
+//!
+//! A page walks a little way (its budget) and is sent without last commits
+//! if that isn't enough. The whole walk then runs in the background, once
+//! per directory however many ask: pages meanwhile don't walk again, and
+//! the browser's request for the result waits for it. Crawlers never send
+//! that request; without the background walk, every view of such a
+//! directory would repeat the budgeted one (0.2 s of CPU for a large
+//! directory) and never get anywhere.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +30,14 @@ pub const BACKGROUND_WALK: usize = 1_000_000;
 
 pub type LastCommits = Arc<HashMap<String, CommitSummary>>;
 
+/// A walk without budget that's under way, and its result for everyone
+/// waiting (`Err` if it failed; why is in the log).
+pub type Job = futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<Option<LastCommits>, ()>>>;
+
+/// Directories that may wait for their walk at once. Past that, pages
+/// don't start more (the browser's request still does).
+const MAX_JOBS: usize = 256;
+
 /// Returns the last commit of every entry of `path` at `commit`, or `None`
 /// if it couldn't be computed within `budget` commits of history.
 pub async fn last_commits_for(
@@ -35,6 +51,56 @@ pub async fn last_commits_for(
     if let Some(hit) = state.last_commits.get(&key) {
         return Ok(Some(hit));
     }
+    if budget >= BACKGROUND_WALK {
+        return match job(state, repo, key, false) {
+            Some(job) => job.await.map_err(|()| crate::AppError::Internal(anyhow::anyhow!("computing last commits failed"))),
+            None => Ok(None),
+        };
+    }
+    // A page. If the whole walk is under way, a short one adds nothing.
+    if state.last_commit_jobs.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key) {
+        return Ok(None);
+    }
+    let found = compute(state, repo, commit, path, budget).await?;
+    if found.is_none() {
+        job(state, repo, key, true);
+    }
+    Ok(found)
+}
+
+/// The walk without budget for `key` (a commit and a directory): the one
+/// under way, or a new one, unless `limited` and [`MAX_JOBS`] are waiting.
+/// It runs as a task of its own, so it finishes even if whoever asked
+/// first goes away.
+fn job(state: &AppState, repo: &Repo, key: (Oid, String), limited: bool) -> Option<Job> {
+    use futures_util::FutureExt;
+    let mut jobs = state.last_commit_jobs.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(job) = jobs.get(&key) {
+        return Some(job.clone());
+    }
+    if limited && jobs.len() >= MAX_JOBS {
+        return None;
+    }
+    let (st, repo, k) = (state.clone(), repo.clone(), key.clone());
+    // The task can't take itself off the list before it's on it: that
+    // needs the lock held here.
+    let task = tokio::spawn(async move {
+        let found = {
+            let _slot = st.last_commit_slots.acquire().await;
+            compute(&st, &repo, k.0, &k.1, BACKGROUND_WALK).await
+        };
+        st.last_commit_jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&k);
+        found.map_err(|e| tracing::warn!(repo = repo.id, path = %k.1, "computing last commits: {e:?}"))
+    });
+    let job: Job = async move { task.await.unwrap_or(Err(())) }.boxed().shared();
+    jobs.insert(key, job.clone());
+    Some(job)
+}
+
+/// [`last_commits_for`] past the memory cache: from the database, from a
+/// stored result for an ancestor, or by walking up to `budget` commits.
+async fn compute(state: &AppState, repo: &Repo, commit: Oid, path: &str, budget: usize) -> AppResult<Option<LastCommits>> {
+    let key = (commit, path.to_owned());
     let stored = state.core.stored_last_commits(repo.id, path, &commit.to_string()).await?;
     let bases = match stored {
         Some(_) => Vec::new(),

@@ -191,6 +191,9 @@ pub struct Core {
     /// recorded, and exclusively while `prune_lfs` removes unrecorded files,
     /// so pruning can't remove a file that's moved in but not recorded yet.
     lfs_gc: Arc<tokio::sync::RwLock<()>>,
+    /// Held while a repository is repacked: one at a time, as each uses
+    /// every core and plenty of disk.
+    repack_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Makes a data directory from before 0.15 (or one someone loosened)
@@ -313,6 +316,7 @@ impl Core {
             setup_code: Arc::default(),
             secrets: Arc::new(secret_box),
             lfs_gc: Arc::default(),
+            repack_lock: Arc::default(),
         }
     }
 

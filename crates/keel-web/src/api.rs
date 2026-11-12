@@ -1198,16 +1198,21 @@ async fn contents(
                 .collect::<Vec<_>>();
             return Ok(Some(Err(list)));
         }
-        Ok(g.blob(commit, &p)?.map(Ok))
+        // A file too large for the API isn't read to say so.
+        Ok(match g.blob_info(commit, &p)? {
+            Some(file) if file.size <= MAX_CONTENT => Some(Ok(Some(g.read_blob(file.id)?))),
+            Some(_) => Some(Ok(None)),
+            None => None,
+        })
     })
     .await?
     .ok_or_else(not_found_error)?;
     let join = |n: &str| if path.is_empty() { n.to_owned() } else { format!("{path}/{n}") };
     match found {
         Ok(blob) => {
-            if blob.data.len() > MAX_CONTENT {
+            let Some(blob) = blob else {
                 return Err(error(StatusCode::FORBIDDEN, "This file is too large for the API; clone the repository"));
-            }
+            };
             let file = path.rsplit('/').next().unwrap_or(&path).to_owned();
             Ok(Json(json!({
                 "type": "file",

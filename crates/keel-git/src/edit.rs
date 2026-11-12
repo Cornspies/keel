@@ -36,6 +36,10 @@ pub fn replace_line(text: &str, line: usize, replacement: &str) -> Option<String
     Some(out)
 }
 
+/// The largest file [`GitRepo::commit_file_edit`] changes: larger ones aren't
+/// shown line by line anywhere, so nothing asks for it.
+const MAX_EDITED_BYTES: usize = 16 * 1024 * 1024;
+
 impl GitRepo {
     /// Commits a new version of `path` on top of `branch`, which must still
     /// point at `tip`, and moves the branch. `edit` gets the file's current
@@ -61,6 +65,10 @@ impl GitRepo {
             0o100644 => git2::FileMode::Blob,
             _ => return Err(Error::Other(format!("{path} is not a regular file"))),
         };
+        // Edited in memory: not something for a file that large.
+        if self.blob_size(entry.id())? > MAX_EDITED_BYTES {
+            return Err(Error::Other(format!("{path} is too large to change here")));
+        }
         let blob = self.repo.find_blob(entry.id())?;
         let content = edit(blob.content(), entry.id())?;
         let new_blob = self.repo.blob(&content)?;
@@ -216,8 +224,8 @@ mod tests {
             .commit_files("main", Some(first), &[("Home.md", None), ("Start.md", Some(b"go"))], "Rename", &who)
             .unwrap();
         assert_eq!(repo.branch_tip("main"), Some(second));
-        assert!(repo.blob(second, "Home.md").unwrap().is_none());
-        assert_eq!(repo.blob(second, "Start.md").unwrap().unwrap().data, b"go");
+        assert!(repo.blob(second, "Home.md", usize::MAX).unwrap().is_none());
+        assert_eq!(repo.blob(second, "Start.md", usize::MAX).unwrap().unwrap().data, b"go");
 
         // Executable files stay executable, also when renamed; a new branch
         // starts from another one's commit.
@@ -255,7 +263,7 @@ mod tests {
         let edit = |text: &[u8], _: Oid| Ok(replace_line(std::str::from_utf8(text).unwrap(), 2, "2").unwrap().into_bytes());
         let commit = repo.commit_file_edit("main", tip, "src/lib.rs", "Apply", &who, edit).unwrap();
         assert_eq!(repo.branch_tip("main"), Some(commit));
-        assert_eq!(repo.blob(commit, "src/lib.rs").unwrap().unwrap().data, b"one\n2\n");
+        assert_eq!(repo.blob(commit, "src/lib.rs", usize::MAX).unwrap().unwrap().data, b"one\n2\n");
         assert_eq!(repo.commit_summary(commit).unwrap().summary, "Apply");
 
         // The branch moved meanwhile: nothing is overwritten.
@@ -314,10 +322,10 @@ mod tests {
         assert_eq!(repo.repo.find_commit(main).unwrap().parent_count(), 0);
         let c = repo.commit_summary(main).unwrap();
         assert_eq!((c.summary.as_str(), c.author.name.as_str()), ("Initial commit", "Bob"));
-        assert_eq!(repo.blob(main, "README.md").unwrap().unwrap().data, b"# Template v2");
-        assert_eq!(repo.blob(main, "src/main.rs").unwrap().unwrap().data, b"fn main() {}");
+        assert_eq!(repo.blob(main, "README.md", usize::MAX).unwrap().unwrap().data, b"# Template v2");
+        assert_eq!(repo.blob(main, "src/main.rs", usize::MAX).unwrap().unwrap().data, b"fn main() {}");
         let docs = repo.branch_tip("docs").unwrap();
-        assert_eq!(repo.blob(docs, "docs/index.md").unwrap().unwrap().data, b"docs");
+        assert_eq!(repo.blob(docs, "docs/index.md", usize::MAX).unwrap().unwrap().data, b"docs");
         assert_eq!(repo.default_branch().unwrap().as_deref(), Some("docs"));
         assert!(repo.repo.revparse_single("HEAD~1").is_err(), "no history");
     }

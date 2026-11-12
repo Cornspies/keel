@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::Form;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use keel_core::{Access, Repo, User};
-use keel_git::{CommitSummary, DiffLineKind, DiffStatus, EntryKind, GitRepo, Oid, Resolved};
+use keel_git::{BlobInfo, CommitSummary, DiffLineKind, DiffStatus, EntryKind, GitRepo, Oid, Resolved};
 use serde::Deserialize;
+use tokio_util::io::ReaderStream;
 
 use crate::error::{AppResult, html};
 use crate::lastcommit::{BACKGROUND_WALK, last_commits_for};
@@ -28,6 +30,15 @@ const COMMITS_PER_PAGE: usize = 50;
 pub(crate) const MAX_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const DIFF_MAX_FILES: usize = 300;
 pub(crate) const DIFF_MAX_LINES: usize = 10_000;
+/// How much of a file or archive is read at a time when it's streamed.
+/// The 4 KiB `ReaderStream` reads by default make a system call, and for
+/// files a turn on the blocking pool, for every 4 KiB sent.
+pub(crate) const STREAM_CHUNK: usize = 64 * 1024;
+/// Raw files up to this size are sent from memory; larger ones are
+/// streamed from git, so a download never holds the file in memory.
+const MAX_BUFFERED_RAW: usize = 1024 * 1024;
+/// Git LFS pointer files are smaller than this.
+const MAX_POINTER_BYTES: usize = 1024;
 const README_NAMES: &[&str] = &["readme.md", "readme.markdown", "readme", "readme.txt"];
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"];
 
@@ -330,16 +341,42 @@ pub(crate) struct RefNames {
 }
 
 impl RefNames {
-    pub(crate) fn load(g: &GitRepo, base: &str, mode: &str) -> AppResult<Self> {
-        let link = |r: keel_git::RefInfo| RefLink {
-            url: format!("{base}/{mode}/{}", encode_path(&r.name)),
-            name: r.name,
+    pub(crate) fn load(state: &AppState, g: &GitRepo, base: &str, mode: &str) -> AppResult<Self> {
+        let names = ref_names(state, g)?;
+        let link = |name: &String| RefLink {
+            url: format!("{base}/{mode}/{}", encode_path(name)),
+            name: name.clone(),
         };
         Ok(Self {
-            branches: g.branches()?.into_iter().map(link).collect(),
-            tags: g.tags()?.into_iter().map(link).collect(),
+            branches: names.branches.iter().map(link).collect(),
+            tags: names.tags.iter().map(link).collect(),
         })
     }
+}
+
+/// The repository's branch and tag names, newest commit first.
+///
+/// Ordering them reads the commit of every ref, 15 ms for a repository
+/// with a thousand tags, and most pages want the list (for the switcher).
+/// So it's kept, under what the refs point at: listing that reads no
+/// objects (a fraction of a millisecond), and it changes exactly when the
+/// names or their order can. Nothing needs to say that refs changed.
+pub(crate) fn ref_names(state: &AppState, g: &GitRepo) -> AppResult<Arc<keel_git::RefNames>> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for (name, target) in g.ref_targets()? {
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update(target.as_bytes());
+    }
+    let mut key = [0; 32];
+    key.copy_from_slice(&hash.finalize());
+    if let Some(hit) = state.ref_names.get(&key) {
+        return Ok(hit);
+    }
+    let names = Arc::new(g.ref_names()?);
+    state.ref_names.insert(key, names.clone());
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +516,8 @@ async fn render_tree(
                     raw: &format!("{link_base}/raw/{rev}"),
                     dir: &resolved.path,
                 };
-                g.blob(resolved.commit, &file)?
-                    .filter(|b| !b.binary && b.data.len() <= MAX_DISPLAY_BYTES)
+                g.blob(resolved.commit, &file, MAX_DISPLAY_BYTES)?
+                    .filter(|b| !b.binary)
                     .map(|b| (e.name.clone(), render_text_doc(&st, &e.name, &b, &links)))
             }
             None => None,
@@ -492,7 +529,7 @@ async fn render_tree(
                 && crate::repo_side::is_license_file(&e.name)
         }) {
             Some(e) => {
-                let text = g.blob(resolved.commit, &e.name)?.filter(|b| !b.binary && b.data.len() <= 256 * 1024);
+                let text = g.blob(resolved.commit, &e.name, 256 * 1024)?.filter(|b| !b.binary);
                 let kind = text.and_then(|b| crate::repo_side::license_name(&String::from_utf8_lossy(&b.data)));
                 Some((e.name.clone(), kind))
             }
@@ -507,7 +544,7 @@ async fn render_tree(
         Ok(TreeData::Dir {
             tree,
             license,
-            refs: RefNames::load(g, &link_base, "tree")?,
+            refs: RefNames::load(&st, g, &link_base, "tree")?,
             default_branch: default_branch.unwrap_or_default(),
             resolved,
             entries,
@@ -721,42 +758,47 @@ pub async fn blob(
         if r.path.is_empty() || g.is_dir(r.commit, &r.path)? {
             return Ok(Err(r));
         }
-        let blob = g.blob(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
+        let file = g.blob_info(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
         let filename = r.path.rsplit('/').next().unwrap_or_default().to_owned();
         let ext = extension(&filename);
         let is_markdown = matches!(ext.as_str(), "md" | "markdown");
-        let size = blob.data.len();
+        let size = file.size;
+        // Only what can be shown is read: a file can be gigabytes.
+        let blob = if size <= MAX_DISPLAY_BYTES { Some(g.read_blob(file.id)?) } else { None };
 
-        let lfs = keel_core::parse_pointer(&blob.data);
+        let lfs = blob.as_ref().and_then(|b| keel_core::parse_pointer(&b.data));
         let content = if let Some((_, size)) = &lfs {
             // Whether it's stored is checked below.
             BlobContent::Lfs { size: human_size(*size as usize), stored: false }
         } else if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             BlobContent::Image
-        } else if blob.binary {
-            BlobContent::Binary
-        } else if size > MAX_DISPLAY_BYTES {
-            BlobContent::TooLarge
-        } else if is_markdown && !plain {
-            let dir = r.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let rev = encode_path(&r.rev);
-            let links = LinkBase {
-                blob: &format!("{link_base}/blob/{rev}"),
-                raw: &format!("{link_base}/raw/{rev}"),
-                dir,
-            };
-            BlobContent::Rendered(render_text_doc(&st, &filename, &blob, &links))
         } else {
-            BlobContent::Lines(highlighted(&st, &blob, &filename))
+            match &blob {
+                None => BlobContent::TooLarge,
+                Some(blob) if blob.binary => BlobContent::Binary,
+                Some(blob) if is_markdown && !plain => {
+                    let dir = r.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                    let rev = encode_path(&r.rev);
+                    let links = LinkBase {
+                        blob: &format!("{link_base}/blob/{rev}"),
+                        raw: &format!("{link_base}/raw/{rev}"),
+                        dir,
+                    };
+                    BlobContent::Rendered(render_text_doc(&st, &filename, blob, &links))
+                }
+                Some(blob) => BlobContent::Lines(highlighted(&st, blob, &filename)),
+            }
         };
-        let line_count = match &content {
-            BlobContent::Lines(l) => l.len(),
-            _ => bytecount_lines(&blob.data),
+        let line_count = match (&content, &blob) {
+            (BlobContent::Lines(l), _) => l.len(),
+            (_, Some(blob)) => bytecount_lines(&blob.data),
+            // Not read, so not counted.
+            (_, None) => 0,
         };
         let latest = g.log(r.commit, &r.path, 0, 1)?.into_iter().next();
         let image = IMAGE_EXTENSIONS.contains(&ext.as_str());
         let tree = crate::file_view::tree_html(g, &link_base, &r.rev, r.commit, &r.path)?;
-        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(g, &link_base, "tree")?, lfs, image, tree)))
+        Ok(Ok((r, g.default_branch()?.unwrap_or_default(), size, line_count, content, is_markdown, latest, RefNames::load(&st, g, &link_base, "tree")?, lfs, image, tree)))
     })
     .await?;
 
@@ -859,15 +901,19 @@ pub async fn raw(
 ) -> AppResult {
     let download = q.download.is_some_and(|d| d != "0");
     let (repo, _) = load(&state, viewer.as_ref(), &owner, &name).await?;
-    let (r, blob) = with_git(&state, &repo, move |g| {
+    // Which file and how large, not its content yet: a request that only
+    // asks whether it changed is answered without it, and a large file is
+    // streamed rather than read.
+    let (r, file, pointer) = with_git(&state, &repo, move |g| {
         let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
-        let blob = g.blob(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
-        Ok((r, blob))
+        let file = g.blob_info(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
+        let pointer = if file.size <= MAX_POINTER_BYTES { keel_core::parse_pointer(&g.read_blob(file.id)?.data) } else { None };
+        Ok((r, file, pointer))
     })
     .await?;
 
     // Git LFS: the file itself rather than its pointer, if it's stored.
-    if let Some((oid, size)) = keel_core::parse_pointer(&blob.data)
+    if let Some((oid, size)) = pointer
         && state.core.lfs_object(repo.id, &oid).await?.is_some()
     {
         let content_type = match extension(&r.path).as_str() {
@@ -887,7 +933,7 @@ pub async fn raw(
         }
         return Ok(res);
     }
-    let etag = format!("\"{}\"", blob.id);
+    let etag = format!("\"{}\"", file.id);
     let cache = match (repo.is_private, r.rev.len() == 40) {
         // A full commit hash pins the content forever.
         (false, true) => "public, max-age=31536000, immutable",
@@ -900,7 +946,7 @@ pub async fn raw(
     {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        ([(header::CONTENT_TYPE, raw_content_type(&r.path, blob.binary))], blob.data).into_response()
+        file_response(state.core.repo_path(&repo), file, &r.path).await?
     };
     let h = res.headers_mut();
     h.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex"));
@@ -909,6 +955,40 @@ pub async fn raw(
     if download {
         h.insert(header::CONTENT_DISPOSITION, attachment(&r.path));
     }
+    Ok(res)
+}
+
+/// The file `file` of the repository at `git_dir`, as a response with its
+/// content type (by the name in `path`) and length. Up to
+/// [`MAX_BUFFERED_RAW`] it's read and sent; a larger one is streamed from
+/// `git cat-file`, which stops when the client does.
+pub(crate) async fn file_response(git_dir: std::path::PathBuf, file: BlobInfo, path: &str) -> AppResult<Response> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncReadExt;
+    let (body, binary) = if file.size <= MAX_BUFFERED_RAW {
+        let blob = tokio::task::spawn_blocking(move || GitRepo::open(&git_dir)?.read_blob(file.id)).await??;
+        (Body::from(blob.data), blob.binary)
+    } else {
+        let mut child = tokio::process::Command::from(keel_git::cat_blob_command(&git_dir, file.id)).kill_on_drop(true).spawn()?;
+        let Some(mut stdout) = child.stdout.take() else {
+            return Err(AppError::Internal(anyhow::anyhow!("git cat-file: no output")));
+        };
+        // Whether it's text shows at its start, as git tells: no NUL byte
+        // in the first 8000.
+        let mut start = Vec::with_capacity(8000);
+        (&mut stdout).take(8000).read_to_end(&mut start).await?;
+        let binary = start.contains(&0);
+        // `child` lives as long as the response is read: dropping it
+        // (the client went away) stops git.
+        let rest = futures_util::stream::unfold((ReaderStream::with_capacity(stdout, STREAM_CHUNK), child), |(mut stream, child)| async move {
+            let chunk = stream.next().await?;
+            Some((chunk, (stream, child)))
+        });
+        let start = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(start)) });
+        (Body::from_stream(start.chain(rest)), binary)
+    };
+    let mut res = ([(header::CONTENT_TYPE, raw_content_type(path, binary))], body).into_response();
+    res.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(file.size as u64));
     Ok(res)
 }
 
@@ -988,6 +1068,7 @@ pub async fn commits(
     let link_base = base.clone();
     let author = q.author.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty() && a.len() <= 254);
     let by = author.clone();
+    let st = state.clone();
     let (r, default_branch, mut list, refs) = with_git(&state, &repo, move |g| {
         let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
         // One extra to know whether there is an older page.
@@ -996,7 +1077,7 @@ pub async fn commits(
             Some(email) => g.log_by(r.commit, &r.path, email, skip, limit)?,
             None => g.log(r.commit, &r.path, skip, limit)?,
         };
-        Ok((r, g.default_branch()?.unwrap_or_default(), list, RefNames::load(g, &link_base, "commits")?))
+        Ok((r, g.default_branch()?.unwrap_or_default(), list, RefNames::load(&st, g, &link_base, "commits")?))
     })
     .await?;
 

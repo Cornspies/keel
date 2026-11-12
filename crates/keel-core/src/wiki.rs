@@ -19,6 +19,8 @@ use crate::{Core, Error, Repo, Result, User, invalid};
 /// Branch for new wikis (pushes may use another, e.g. GitHub's `master`).
 const WIKI_BRANCH: &str = "main";
 const MAX_TITLE: usize = 100;
+/// The largest file shown as a page.
+const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 /// Extensions of page files, the first for new pages.
 const EXTENSIONS: [&str; 2] = [".md", ".markdown"];
 /// Pages shown around every page.
@@ -220,7 +222,8 @@ impl Core {
                 },
             };
             let Some(page) = find_page(&pages_at(g, commit)?, &name) else { return Ok(None) };
-            let Some(blob) = g.blob(commit, &page.path)? else { return Ok(None) };
+            // A file too large to be a page (someone pushed it) isn't one.
+            let Some(blob) = g.blob(commit, &page.path, MAX_PAGE_BYTES)? else { return Ok(None) };
             let last = g.log(commit, &page.path, 0, 1)?.into_iter().next();
             Ok(Some(WikiContent { text: String::from_utf8_lossy(&blob.data).into_owned(), page, commit, last }))
         })
@@ -232,14 +235,15 @@ impl Core {
         })
     }
 
-    /// A file of the wiki (e.g. an image a page shows).
-    pub async fn wiki_file(&self, repo_id: i64, path: &str) -> Result<Option<keel_git::Blob>> {
+    /// A file of the wiki (e.g. an image a page shows): which blob of the
+    /// repository at [`wiki_path`](Self::wiki_path) it is, and its size.
+    pub async fn wiki_file(&self, repo_id: i64, path: &str) -> Result<Option<keel_git::BlobInfo>> {
         if !self.has_wiki(repo_id) {
             return Ok(None);
         }
         let path = path.to_owned();
         self.wiki_git(repo_id, move |g| match wiki_tip(g)? {
-            Some((_, tip)) => g.blob(tip, &path),
+            Some((_, tip)) => g.blob_info(tip, &path),
             None => Ok(None),
         })
         .await
@@ -301,8 +305,8 @@ impl Core {
                             if let (Some(base), Some(tip)) = (base, tip)
                                 && base != tip
                             {
-                                let before = g.blob(base, &page.path).ok().flatten().map(|b| b.id);
-                                let now = g.blob(tip, &page.path)?.map(|b| b.id);
+                                let before = g.blob_info(base, &page.path).ok().flatten().map(|b| b.id);
+                                let now = g.blob_info(tip, &page.path)?.map(|b| b.id);
                                 if before != now {
                                     return Ok(Err(
                                         "Someone else changed this page while you were editing it. Copy your text, reload the page and make your changes again."
@@ -374,12 +378,14 @@ impl Core {
     pub(crate) async fn after_wiki_change(&self, repo: &Repo, actor: Option<i64>, changes: Vec<WikiChange>) {
         let (path, core, repo_id) = (self.wiki_path(repo.id), self.clone(), repo.id);
         tokio::spawn(async move {
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&path)).await {
+            let maintained = path.clone();
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&maintained)).await {
                 tracing::warn!("wiki maintenance failed: {e}");
             }
             if let Err(e) = core.measure_repo(repo_id).await {
                 tracing::warn!(repo = repo_id, "measuring disk usage failed: {e}");
             }
+            core.repack(repo_id, path).await;
         });
         if changes.is_empty() {
             return;

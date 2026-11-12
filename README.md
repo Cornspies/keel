@@ -475,11 +475,37 @@ constant memory (pushing all of git.git's 322 MB used about 56 MB server
 memory). This also brings protocol v2, partial clone (`--filter`) and
 bitmaps for free.
 
+**Repositories are kept packed.** git's own housekeeping is off (`gc.auto`:
+the server decides when), so keel does it after pushes, in the background:
+
+- Refs go into `packed-refs` once more than 32 are files of their own.
+  Every clone, fetch and push starts by listing them: with a thousand loose
+  ones that takes 14 ms, packed 2 ms.
+- A repository whose pack has no bitmap index (after a first push, an
+  import or a mirror's first sync) is repacked into one pack that has. A
+  full clone of git.git then costs the server 0.6 s of work instead of
+  2.8 s. A pack shared with a fork is left alone: rewriting it would end
+  the sharing, and the fork has the parent's bitmap anyway.
+- Loose objects (small pushes, edits in the browser and merges leave them)
+  are packed once there are more than 2,000; more than 16 packs become one.
+- Objects nothing refers to any more go into a pack of their own and are
+  deleted two weeks later, as `git gc` does, so nothing is taken from a
+  push that's still under way.
+
+One repository is repacked at a time (it uses every core), after everything
+else a push sets off. Repositories from before keel did this, and those
+nobody pushes to, get their turn when it starts.
+
 **Reads use libgit2, except where git is faster.** Trees, blobs, diffs and
 plain history use libgit2. Path-limited history ("History" for a file or
 directory) uses `git log`, because git can use the changed-path Bloom filters
 keel writes into each repository's commit-graph after every push. On git.git
-that is about 50 ms instead of 5 s.
+that is about 50 ms instead of 5 s. History past its first thousand commits
+(`?page=22` and on) comes from `git log` too: git reads the commit-graph
+where libgit2 parses every commit it skips, so the last page of git.git's
+history takes 25 ms instead of 600. libgit2 doesn't re-hash each object it
+reads (its default; git doesn't either, and objects are checked as they're
+pushed), which makes reading files and walking history 20–35% faster.
 
 **Last commit per file** (the column in tree views) is one streamed
 `git log --name-only` walk per directory that stops once every entry is
@@ -487,7 +513,10 @@ resolved. Directories, and entries whose change arrived through a merge, are
 confirmed with a Bloom-filtered `git log -1 -- <path>` so the result matches
 git's history simplification. If the result isn't known within a small budget
 (500 commits), the page is sent immediately and the browser fetches the
-column from `/<owner>/<repo>/last-commits/...`.
+column from `/<owner>/<repo>/last-commits/...`. The whole walk then runs in
+the background, once per directory, whether or not a browser asks (crawlers
+don't): pages don't walk again meanwhile, and the browser's request waits
+for the same result.
 
 Results are stored in SQLite, so they survive restarts. After a push the
 newest stored result for an ancestor commit is updated by walking only the new
@@ -864,7 +893,10 @@ maintenance): cache warming, search indexing and pull request updates.
 
 **Caches are keyed by git object ids**, so they never need invalidation, only
 a size bound: last commits per (commit, directory), highlighted files per
-blob, rendered Markdown per blob, blame per (commit, file).
+blob, rendered Markdown per blob, blame per (commit, file). The branches and
+tags in the switcher are ordered by their commits, which takes reading each
+(15 ms for a thousand tags, on every page): the list is kept under a hash of
+what the refs point at, which is cheap to list and changes when they do.
 
 **Blame** runs `git blame --incremental`, which skips commits that didn't
 touch the file using the commit-graph's changed-path Bloom filters, and
@@ -877,7 +909,9 @@ for crawlers. Binary files, Git LFS files and files over 2 MiB aren't blamed.
 **Loading pages:** pages are compressed with brotli at quality 4 (the
 default, 11, is for compressing ahead of time and cost more than rendering
 the page); the stylesheet, script and icon are compressed once at startup,
-at the best quality, and cached by browsers for good. Pages tell
+at the best quality, and cached by browsers for good. Only text is
+compressed: archives, release files and other downloads are sent as they
+are, with their length. Pages tell
 Chromium-based browsers (Speculation Rules) to load a link while the pointer
 rests on it, so the page is often there by the time of the click; only pages
 that change nothing when loaded qualify (not signing in or out, downloads,
@@ -885,21 +919,34 @@ raw files, git or `nofollow` links). Debug builds run with optimized
 dependencies (`[profile.dev.package."*"]`).
 
 **Rendering work is bounded:** syntax highlighting stops at 256 KiB, file
-display at 2 MiB, and diffs at 300 files / 10,000 lines.
+display at 2 MiB, and diffs at 300 files / 10,000 lines (a file over 4 MiB
+counts as binary there). Highlighted code is marked up where its colour
+changes, with a class per colour, not with a span for every syntax scope:
+an 80 KB C file makes a 0.7 MB page (68 KB compressed) instead of 2 MB,
+in the same colours.
+
+**Files are read as far as they're shown.** A file in a repository can be
+gigabytes, and reading one holds all of it in memory. Its size comes from
+the object's header first: pages, blame, diffs and the API leave a file
+that's too large for them unread, a request that only asks whether a raw
+file changed (`If-None-Match`) is answered from its id, and raw files over
+1 MiB are streamed from `git cat-file`, which stops when the client does.
 
 ### Measured on git.git (82k commits), release build, warm OS cache
 
 | Page | Time |
 | --- | --- |
-| Tree (cached last commits) | ~20 ms |
-| Tree (first view; column loads afterwards) | ~60 ms + 0.1–3 s async |
-| File view, highlighted (7,860 lines; first view) | ~30 ms (~350 ms) |
-| Commit list | ~20 ms |
-| File history | ~50 ms |
-| Blame (`diff.c`, 7,860 lines; first view) | ~35 ms (~2 s) |
-| Commit with diff | ~5 ms |
-| Contributors graph (first view; after a push only new commits are counted) | ~7 ms (~375 ms) |
-| Commit activity graph | ~2 ms |
+| Tree (cached last commits) | ~4 ms |
+| Tree (first view; column loads afterwards) | ~30–130 ms + 0.1–3 s in the background |
+| File view, highlighted (7,860 lines; first view) | ~6 ms (~340 ms) |
+| Commit list | ~3 ms |
+| Commit list, the last of 1,659 pages | ~25 ms |
+| File history | ~10 ms |
+| Blame (`diff.c`, 7,860 lines; first view) | ~9 ms (~0.4 s) |
+| Commit with diff | ~3 ms |
+| Code search for a common word, in one repository or all | ~15 ms |
+| Contributors graph (first view; after a push only new commits are counted) | ~5 ms (~375 ms) |
+| Commit activity graph | ~1 ms |
 | Commit list of 50 signed commits, all verified (first view, RSA-3072 GPG) | ~3.5 ms (~20 ms) |
 
 ## Security

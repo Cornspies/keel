@@ -11,6 +11,27 @@ pub struct FileRef {
     pub id: Oid,
 }
 
+/// The command that writes the file `blob` to stdout, for sending one too
+/// large to hold in memory: git reads it from the repository at `path`
+/// piece by piece (unless it's stored as a difference to another version,
+/// which git has to put together first). stdout is piped.
+pub fn cat_blob_command(path: &std::path::Path, blob: Oid) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("--git-dir")
+        .arg(path)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    crate::standard_env(&mut cmd)
+        // Below `core.bigFileThreshold` (512 MiB by default) git loads a
+        // file before writing it.
+        .args(["-c", "core.bigFileThreshold=1m", "cat-file", "blob"])
+        .arg(blob.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
 /// Files that differ between two commits.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FileChanges {
@@ -100,5 +121,8 @@ mod tests {
         let id = changes.changed[1].id;
         assert_eq!(repo.blob_size(id).unwrap(), 1);
         assert_eq!(repo.blob_by_id(id).unwrap().unwrap(), (b"x".to_vec(), false));
+        let out = super::cat_blob_command(repo.repo.path(), id).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"x");
     }
 }

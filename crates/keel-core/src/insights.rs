@@ -127,8 +127,11 @@ impl Core {
     /// verified email (any email if this server can't send mail to verify
     /// them).
     pub async fn commit_authors(&self, emails: &[&str]) -> Result<HashMap<String, String>> {
+        // `u.email` is `COLLATE NOCASE`, and compared as it is its unique
+        // index finds each address. `lower(u.email) = j.value` reads every
+        // account for every address instead: 67 ms with 20,000 accounts.
         let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT lower(u.email), u.username FROM users u JOIN json_each(?1) j ON lower(u.email) = j.value
+            "SELECT lower(u.email), u.username FROM json_each(?1) j JOIN users u ON u.email = j.value
              WHERE u.kind = 'user' AND u.disabled_at IS NULL AND (u.email_verified_at IS NOT NULL OR ?2)",
         )
         .bind(serde_json::json!(emails).to_string())
@@ -201,5 +204,17 @@ mod tests {
         let authors = core.commit_authors(&["ada@example.com", "bob@example.com"]).await.unwrap();
         assert_eq!(authors.get("ada@example.com").map(String::as_str), Some("ada"), "no mail: any email counts");
         assert_eq!(authors.len(), 1);
+        // Whatever the case the account's address is written in, and found
+        // through the index on it.
+        sqlx::query("UPDATE users SET email = 'Ada@Example.COM' WHERE id = ?1").bind(ada.id).execute(&core.db).await.unwrap();
+        let authors = core.commit_authors(&["ada@example.com", "ada@example.com"]).await.unwrap();
+        assert_eq!(authors.get("ada@example.com").map(String::as_str), Some("ada"));
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT lower(u.email), u.username FROM json_each('[]') j JOIN users u ON u.email = j.value",
+        )
+        .fetch_all(&core.db)
+        .await
+        .unwrap();
+        assert!(plan.iter().any(|(.., detail)| detail.contains("SEARCH u USING INDEX")), "{plan:?}");
     }
 }

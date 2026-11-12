@@ -136,27 +136,190 @@ pub fn backup(src: &Path, dst: &Path) -> Result<()> {
     })
 }
 
-/// Runs after every push. Keeps reads fast without full `git gc` runs:
+/// More loose refs than this are packed into `packed-refs`. Each loose ref
+/// is a file to open whenever refs are listed, which every clone, fetch
+/// and push starts with, and git never packs them by itself here
+/// (`gc.auto` is off).
+const MAX_LOOSE_REFS: usize = 32;
+/// More packs than this are repacked into one.
+const MAX_PACKS: usize = 16;
+/// More loose objects than this are packed. Small pushes, edits in the
+/// browser and merges all leave loose objects: a file each, uncompressed
+/// against each other, and outside the bitmap index.
+const MAX_LOOSE_OBJECTS: usize = 2000;
+
+/// Runs after every push, before anything reads what was pushed. Quick:
 /// - points HEAD at an existing branch if it is unborn (first push was to a
 ///   branch other than the default),
-/// - updates the commit-graph incrementally (fast `git log`/last-commit),
-/// - repacks with bitmaps once loose objects and small packs pile up.
+/// - packs refs once many are loose,
+/// - updates the commit-graph incrementally (fast `git log`/last-commit).
+///
+/// Packing objects takes longer and can wait: see [`repack_if_due`].
 pub fn run_maintenance(path: &Path) -> Result<()> {
     fix_unborn_head(path)?;
     apply_config(path)?;
+    pack_refs_if_due(path)?;
     git(path, &[
         "commit-graph", "write", "--reachable", "--changed-paths", "--split",
     ])?;
-    let packs = std::fs::read_dir(path.join("objects/pack"))?
-        .filter(|e| {
-            e.as_ref()
-                .is_ok_and(|e| e.path().extension().is_some_and(|x| x == "pack"))
-        })
-        .count();
-    if packs > 16 {
-        git(path, &["repack", "-a", "-d", "--write-bitmap-index", "-q"])?;
+    Ok(())
+}
+
+/// Packs the repository's refs into one file once more than
+/// [`MAX_LOOSE_REFS`] are files of their own.
+pub fn pack_refs_if_due(path: &Path) -> Result<()> {
+    if count_files(&path.join("refs"), MAX_LOOSE_REFS + 1) > MAX_LOOSE_REFS {
+        git(path, &["pack-refs", "--all"])?;
     }
     Ok(())
+}
+
+/// Regular files under `dir`, counted up to `limit`.
+fn count_files(dir: &Path, limit: usize) -> usize {
+    let mut found = 0;
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+                Ok(_) => {
+                    found += 1;
+                    if found >= limit {
+                        return found;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    found
+}
+
+/// Loose objects of the repository at `path`, counted up to `limit`.
+fn loose_objects(path: &Path, limit: usize) -> usize {
+    let Ok(dirs) = std::fs::read_dir(path.join("objects")) else { return 0 };
+    let mut found = 0;
+    for dir in dirs.flatten() {
+        // `objects/3f`, not `objects/pack` or `objects/info`.
+        let name = dir.file_name();
+        if name.len() != 2 || !name.to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_hexdigit())) {
+            continue;
+        }
+        if let Ok(files) = std::fs::read_dir(dir.path()) {
+            found += files.flatten().count();
+            if found >= limit {
+                return found;
+            }
+        }
+    }
+    found
+}
+
+/// What decides whether a repository is repacked.
+struct Packs {
+    packs: usize,
+    /// There's a bitmap index, which lets git answer a clone or fetch
+    /// without walking every object.
+    bitmap: bool,
+    /// A pack is also another repository's (a fork's or its parent's, by
+    /// hardlink): rewriting it would end that, and take its size again.
+    shared: bool,
+}
+
+impl Packs {
+    fn of(path: &Path) -> Self {
+        let mut found = Self { packs: 0, bitmap: false, shared: false };
+        let Ok(entries) = std::fs::read_dir(path.join("objects/pack")) else { return found };
+        for entry in entries.flatten() {
+            match entry.path().extension().and_then(|x| x.to_str()) {
+                Some("pack") => {
+                    found.packs += 1;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        found.shared |= entry.metadata().is_ok_and(|m| m.nlink() > 1);
+                    }
+                }
+                Some("bitmap") => found.bitmap = true,
+                _ => {}
+            }
+        }
+        found
+    }
+}
+
+/// Repositories being repacked, and those a repack left without a bitmap
+/// index (nothing to index): they aren't repacked for one again.
+static REPACKING: std::sync::Mutex<Option<RepackState>> = std::sync::Mutex::new(None);
+
+#[derive(Default)]
+struct RepackState {
+    running: std::collections::HashSet<std::path::PathBuf>,
+    no_bitmap: std::collections::HashSet<std::path::PathBuf>,
+}
+
+fn repack_state<T>(f: impl FnOnce(&mut RepackState) -> T) -> T {
+    let mut state = REPACKING.lock().unwrap_or_else(|e| e.into_inner());
+    f(state.get_or_insert_with(RepackState::default))
+}
+
+/// Packs the repository's objects if that's due, and returns whether it
+/// did. It keeps clones and fetches cheap and the repository small:
+/// - a repository whose packs have no bitmap index gets one pack with one
+///   (unless a pack is shared with a fork: see [`Packs::shared`]),
+/// - loose objects are packed once there are more than
+///   [`MAX_LOOSE_OBJECTS`], into a pack of their own,
+/// - more than [`MAX_PACKS`] packs become one again.
+///
+/// Objects nothing refers to any more go into a pack of their own (a
+/// "cruft pack") and are deleted two weeks after they were last written,
+/// as `git gc` does: what a push or an edit that's still under way just
+/// wrote is never taken away from it.
+///
+/// Takes seconds for most repositories and minutes for very large ones;
+/// reading and pushing carry on meanwhile. Does nothing if the repository
+/// is being repacked already.
+pub fn repack_if_due(path: &Path) -> Result<bool> {
+    let key = path.to_owned();
+    let (free, no_bitmap) = repack_state(|s| (s.running.insert(key.clone()), s.no_bitmap.contains(&key)));
+    if !free {
+        return Ok(false);
+    }
+    struct Done(std::path::PathBuf);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            repack_state(|s| s.running.remove(&self.0));
+        }
+    }
+    let _done = Done(key.clone());
+
+    let now = Packs::of(path);
+    let unindexed = now.packs > 0 && !now.bitmap && !now.shared && !no_bitmap;
+    let loose = loose_objects(path, MAX_LOOSE_OBJECTS + 1) > MAX_LOOSE_OBJECTS;
+    let mut all = now.packs > MAX_PACKS || unindexed || (loose && now.packs == 0);
+    if !all && !loose {
+        return Ok(false);
+    }
+    if !all {
+        // Only what's loose, leaving the large pack (and its bitmap) as it
+        // is. `repack.writeBitmaps` is for packing everything.
+        git(path, &["repack", "-d", "-q", "--no-write-bitmap-index"])?;
+        // Objects nothing refers to stay loose that way.
+        all = loose_objects(path, MAX_LOOSE_OBJECTS + 1) > MAX_LOOSE_OBJECTS;
+    }
+    if all {
+        repack_all(path)?;
+        if !Packs::of(path).bitmap {
+            repack_state(|s| s.no_bitmap.insert(key));
+        }
+    }
+    Ok(true)
+}
+
+/// Everything into one pack with a bitmap index (see [`repack_if_due`]).
+fn repack_all(path: &Path) -> Result<()> {
+    git(path, &["repack", "--cruft", "--cruft-expiration=2.weeks.ago", "-d", "--write-bitmap-index", "-q"])
 }
 
 /// Writes keel's repository config; also brings repositories created by
@@ -286,6 +449,62 @@ mod tests {
             .unwrap();
         assert!(!out.status.success());
         assert!(git2::Repository::open_bare(&bare).unwrap().find_reference(&format!("refs/replace/{a}")).is_err());
+    }
+
+    #[test]
+    fn packs_refs_and_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let bare = root.path().join("r.git");
+        create_bare(&bare, "main").unwrap();
+        let s = Scratch::new();
+        s.write("a", "1");
+        let first = s.commit("first");
+        s.write("a", "2");
+        let gone = s.commit("on a branch that's deleted");
+        s.git(&["branch", "gone"]);
+        s.git(&["reset", "-q", "--hard", &first.to_string()]);
+        for i in 0..40 {
+            s.git(&["tag", &format!("v{i}")]);
+        }
+        s.git(&["push", "-q", bare.to_str().unwrap(), "main", "gone", "--tags"]);
+        let loose_refs = || count_files(&bare.join("refs"), usize::MAX);
+        assert_eq!(loose_refs(), 42);
+
+        // Refs: many loose ones are packed, and still resolve.
+        run_maintenance(&bare).unwrap();
+        assert_eq!(loose_refs(), 0);
+        assert!(bare.join("packed-refs").is_file());
+        let repo = GitRepo::open(&bare).unwrap();
+        assert_eq!(repo.branch_tip("main"), Some(first));
+        assert_eq!(repo.resolve_rev("v39"), Some(first));
+        assert_eq!(repo.tags().unwrap().len(), 40);
+
+        // Objects: a few loose ones are left alone.
+        assert!(loose_objects(&bare, usize::MAX) > 0);
+        assert!(!repack_if_due(&bare).unwrap());
+        // A pack without a bitmap index (a large push, an import) is
+        // repacked with one, once.
+        git(&bare, &["repack", "-a", "-d", "-q", "--no-write-bitmap-index"]).unwrap();
+        let packs = Packs::of(&bare);
+        assert!(packs.packs == 1 && !packs.bitmap && !packs.shared);
+        assert!(repack_if_due(&bare).unwrap());
+        assert!(Packs::of(&bare).bitmap);
+        assert_eq!(loose_objects(&bare, usize::MAX), 0);
+        assert!(!repack_if_due(&bare).unwrap());
+
+        // What nothing refers to any more is kept (for two weeks).
+        repo.update_ref("refs/heads/gone", None, Some(gone)).unwrap();
+        repack_all(&bare).unwrap();
+        let repo = GitRepo::open(&bare).unwrap();
+        assert_eq!(repo.commit_summary(gone).unwrap().summary, "on a branch that's deleted");
+        assert_eq!(repo.commit_summary(first).unwrap().summary, "first");
+
+        // A fork shares its parent's packs: those aren't rewritten for a
+        // bitmap index (the fork has the parent's).
+        let forked = root.path().join("f.git");
+        fork(&bare, &forked).unwrap();
+        assert!(Packs::of(&forked).shared && Packs::of(&forked).bitmap);
+        assert!(!repack_if_due(&forked).unwrap());
     }
 
     #[test]

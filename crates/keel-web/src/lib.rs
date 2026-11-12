@@ -64,6 +64,7 @@ use keel_git::{CommitSummary, Oid};
 use moka::sync::Cache;
 use tower_http::CompressionLevel;
 use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{And, Predicate, SizeAbove};
 use tower_http::trace::TraceLayer;
 
 pub use error::AppError;
@@ -90,6 +91,14 @@ pub struct Inner {
     last_commits: Cache<(Oid, String), Arc<HashMap<String, CommitSummary>>>,
     highlighted: Cache<(Oid, String), Arc<Vec<String>>>,
     markdown: Cache<(Oid, String), Arc<String>>,
+    /// Branch and tag names in the order they're listed, by a hash of what
+    /// the refs point at (see `repo::ref_names`).
+    ref_names: Cache<[u8; 32], Arc<keel_git::RefNames>>,
+    /// Directories whose last commits are being computed in full, with
+    /// the result once it's there (see `lastcommit`).
+    last_commit_jobs: std::sync::Mutex<HashMap<(Oid, String), lastcommit::Job>>,
+    /// Limits how many of those run at once.
+    last_commit_slots: tokio::sync::Semaphore,
     /// Languages per commit, for repositories' front pages.
     languages: Cache<Oid, Arc<Vec<repo_side::Language>>>,
     /// Blame per (commit, path).
@@ -163,6 +172,15 @@ impl AppState {
                 .max_capacity(mib(32))
                 .weigher(|_, v: &Arc<String>| v.len().min(u32::MAX as usize) as u32)
                 .build(),
+            ref_names: Cache::builder()
+                .max_capacity(mib(16))
+                .weigher(|_, v: &Arc<keel_git::RefNames>| {
+                    let bytes: usize = v.branches.iter().chain(&v.tags).map(|n| n.len() + 24).sum();
+                    (bytes + 64).min(u32::MAX as usize) as u32
+                })
+                .build(),
+            last_commit_jobs: std::sync::Mutex::default(),
+            last_commit_slots: tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get().div_ceil(2))),
             languages: Cache::new(10_000),
             blames: Cache::builder()
                 .max_capacity(mib(64))
@@ -490,8 +508,31 @@ async fn no_sniffing(req: Request, next: Next) -> Response {
 /// (quality 11) is meant for compressing files ahead of time and costs more
 /// than rendering most pages; quality 4 is several times faster and still
 /// smaller than gzip. Static files come compressed already (`assets`).
-fn compression() -> CompressionLayer {
-    CompressionLayer::new().quality(CompressionLevel::Precise(4))
+fn compression() -> CompressionLayer<And<SizeAbove, Text>> {
+    CompressionLayer::new().quality(CompressionLevel::Precise(4)).compress_when(SizeAbove::new(32).and(Text))
+}
+
+/// Whether a response is text, going by its content type: pages, JSON,
+/// feeds, SVG, raw text files. Only those are compressed. Archives
+/// (`.tar.gz`, `.zip`), release files and other raw files are mostly
+/// compressed already: doing it again costs time, makes them no smaller,
+/// and takes the `Content-Length` browsers show a download's progress by.
+#[derive(Clone, Copy)]
+struct Text;
+
+impl Predicate for Text {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        let kind = response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        is_text(kind)
+    }
+}
+
+fn is_text(content_type: &str) -> bool {
+    let kind = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    kind.starts_with("text/") || kind.ends_with("json") || kind.ends_with("xml") || kind.ends_with("javascript")
 }
 
 /// Counts requests and their durations, by route pattern.
@@ -666,6 +707,16 @@ fn same_origin(req: &Request, base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_text_is_compressed() {
+        for text in ["text/html; charset=utf-8", "application/json", "text/plain; charset=utf-8", "image/svg+xml", "application/atom+xml", "Text/CSS"] {
+            assert!(is_text(text), "{text}");
+        }
+        for other in ["application/gzip", "application/zip", "application/octet-stream", "image/png", "application/pdf", ""] {
+            assert!(!is_text(other), "{other}");
+        }
+    }
 
     #[test]
     fn origins() {

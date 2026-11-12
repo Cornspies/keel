@@ -93,6 +93,27 @@ pub struct Blob {
     pub binary: bool,
 }
 
+/// A file in a tree: which blob it is and how large, without its content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobInfo {
+    pub id: Oid,
+    pub size: usize,
+}
+
+/// Branches and tags by name, newest commit first. See
+/// [`GitRepo::ref_names`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefNames {
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+/// History further down than this is listed by `git log`: it reads the
+/// commit-graph, while libgit2 parses every commit it skips (about 8 µs
+/// each, so 0.6 s for the last page of an 80,000-commit history, where git
+/// takes 40 ms). Nearer the top, libgit2 is faster than starting git.
+const LIBGIT2_MAX_SKIP: usize = 1000;
+
 pub(crate) fn short(id: Oid) -> String {
     let mut s = id.to_string();
     s.truncate(10);
@@ -187,8 +208,23 @@ fn entry_kind(entry: &git2::TreeEntry<'_>) -> EntryKind {
     }
 }
 
+/// libgit2's settings for the whole process, made before the first
+/// repository is opened.
+fn configure_libgit2() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // By default libgit2 hashes every object it reads, to compare with
+        // the id it was asked for. git doesn't, and nothing is gained
+        // here: objects are checked as they arrive (`receive.fsckObjects`
+        // and its siblings), and damage on disk fails to decompress.
+        // Without it, reading files and walking history take 20-35% less.
+        git2::opts::strict_hash_verification(false);
+    });
+}
+
 impl GitRepo {
     pub fn open(path: &Path) -> Result<Self> {
+        configure_libgit2();
         Ok(Self {
             repo: Repository::open_bare(path)?,
         })
@@ -197,6 +233,7 @@ impl GitRepo {
     /// Opens the repository git runs in (`GIT_DIR`), seeing the objects of
     /// a push in progress (`GIT_QUARANTINE_PATH` alternates): for hooks.
     pub fn open_from_env() -> Result<Self> {
+        configure_libgit2();
         Ok(Self { repo: Repository::open_from_env()? })
     }
 
@@ -204,6 +241,7 @@ impl GitRepo {
     /// `other` (e.g. a fork), for comparing across repositories without
     /// copying anything. Only this handle sees them; nothing is written.
     pub fn open_with(path: &Path, other: &Path) -> Result<Self> {
+        configure_libgit2();
         let repo = Repository::open_bare(path)?;
         repo.odb()?.add_disk_alternate(&other.join("objects").to_string_lossy())?;
         Ok(Self { repo })
@@ -349,7 +387,9 @@ impl GitRepo {
         Ok(Some(entries))
     }
 
-    pub fn blob(&self, commit: Oid, path: &str) -> Result<Option<Blob>> {
+    /// The file at `path` and its size, read from the object's header:
+    /// nothing of its content is loaded. `None` if there's no file there.
+    pub fn blob_info(&self, commit: Oid, path: &str) -> Result<Option<BlobInfo>> {
         let tree = self.repo.find_commit(commit)?.tree()?;
         let Ok(entry) = tree.get_path(Path::new(path)) else {
             return Ok(None);
@@ -357,12 +397,29 @@ impl GitRepo {
         if entry.kind() != Some(ObjectType::Blob) {
             return Ok(None);
         }
-        let blob = self.repo.find_blob(entry.id())?;
-        Ok(Some(Blob {
+        let (size, _) = self.repo.odb()?.read_header(entry.id())?;
+        Ok(Some(BlobInfo { id: entry.id(), size }))
+    }
+
+    /// The file at `path`, if there's one of at most `max` bytes. A larger
+    /// one isn't read: files in a repository can be gigabytes, and reading
+    /// one holds all of it in memory (twice, while it's copied).
+    pub fn blob(&self, commit: Oid, path: &str, max: usize) -> Result<Option<Blob>> {
+        match self.blob_info(commit, path)? {
+            Some(info) if info.size <= max => self.read_blob(info.id).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Reads a whole blob into memory: check its size first
+    /// ([`blob_info`](Self::blob_info)).
+    pub fn read_blob(&self, id: Oid) -> Result<Blob> {
+        let blob = self.repo.find_blob(id)?;
+        Ok(Blob {
             id: blob.id(),
             binary: blob.is_binary(),
             data: blob.content().to_vec(),
-        }))
+        })
     }
 
     /// History starting at `start`, optionally limited to commits that
@@ -380,8 +437,17 @@ impl GitRepo {
         skip: usize,
         limit: usize,
     ) -> Result<Vec<CommitSummary>> {
+        self.log_from(start, path, skip, limit, LIBGIT2_MAX_SKIP)
+    }
+
+    /// [`log`](Self::log), walking with libgit2 while `skip` is at most
+    /// `libgit2_max_skip`.
+    fn log_from(&self, start: Oid, path: &str, skip: usize, limit: usize, libgit2_max_skip: usize) -> Result<Vec<CommitSummary>> {
         if !path.is_empty() {
             return self.log_path(start, path, skip, limit);
+        }
+        if skip > libgit2_max_skip {
+            return git_log(self.repo.path(), start, "", None, skip, limit);
         }
         let mut walk = self.repo.revwalk()?;
         // Not `Sort::TIME`: any explicit sorting makes libgit2 walk the
@@ -629,6 +695,35 @@ impl GitRepo {
         let tree = self.repo.find_commit(commit).ok()?.tree().ok()?;
         let entry = tree.get_path(Path::new(&format!("{prefix}{name}"))).ok()?;
         Some(entry.id())
+    }
+
+    /// The names of all branches and tags with what they point at (a
+    /// commit, or a tag object), read from the refs alone: no object is
+    /// loaded. Cheap enough for every page, and it changes exactly when
+    /// [`ref_names`](Self::ref_names) does, so it serves as the key to
+    /// cache that under.
+    pub fn ref_targets(&self) -> Result<Vec<(String, Oid)>> {
+        let mut out = Vec::new();
+        for glob in ["refs/heads/*", "refs/tags/*"] {
+            for r in self.repo.references_glob(glob)? {
+                let r = r?;
+                // A ref that names another ref: what that one points at.
+                if let Some(target) = r.target().or_else(|| r.resolve().ok()?.target()) {
+                    out.push((String::from_utf8_lossy(r.name_bytes()).into_owned(), target));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Branch and tag names, newest commit first, for choosing between
+    /// them. Reads every ref's commit to order them: 15 ms for a thousand
+    /// tags, so callers showing this on every page keep it (see
+    /// [`ref_targets`](Self::ref_targets)).
+    pub fn ref_names(&self) -> Result<RefNames> {
+        let names = |refs: Vec<RefInfo>| refs.into_iter().map(|r| r.name).collect();
+        Ok(RefNames { branches: names(self.branches()?), tags: names(self.tags()?) })
     }
 
     pub fn branches(&self) -> Result<Vec<RefInfo>> {
@@ -894,6 +989,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn deep_history_comes_from_git() {
+        let s = Scratch::new();
+        for i in 0..12 {
+            s.write("a.txt", &i.to_string());
+            s.commit(&format!("commit {i}"));
+        }
+        let repo = s.open();
+        let head = Oid::from_str(&s.git(&["rev-parse", "HEAD"])).unwrap();
+        let ids = |v: Vec<CommitSummary>| v.into_iter().map(|c| (c.id, c.summary, c.author.time)).collect::<Vec<_>>();
+        // The same commits whichever walks, also past the end.
+        for (skip, limit) in [(0, 5), (4, 3), (10, 5), (20, 5)] {
+            let by_libgit2 = ids(repo.log_from(head, "", skip, limit, usize::MAX).unwrap());
+            let by_git = ids(repo.log_from(head, "", skip, limit, 0).unwrap());
+            assert_eq!(by_libgit2, by_git, "skip {skip}");
+            assert_eq!(by_git.len(), limit.min(12usize.saturating_sub(skip)));
+        }
+    }
+
+    #[test]
+    fn large_files_are_not_read() {
+        let s = Scratch::new();
+        s.write("big.bin", &"x".repeat(5000));
+        s.write("small.txt", "hi");
+        let c = s.commit("files");
+        let repo = s.open();
+        assert_eq!(repo.blob_info(c, "big.bin").unwrap().unwrap().size, 5000);
+        assert!(repo.blob(c, "big.bin", 4999).unwrap().is_none());
+        assert_eq!(repo.blob(c, "big.bin", 5000).unwrap().unwrap().data.len(), 5000);
+        assert_eq!(repo.blob(c, "small.txt", 4999).unwrap().unwrap().data, b"hi");
+    }
+
+    #[test]
+    fn ref_names_and_targets() {
+        let s = Scratch::new();
+        s.write("a", "1");
+        let first = s.commit("first");
+        s.git(&["tag", "v1"]);
+        s.git(&["tag", "-a", "v2", "-m", "annotated"]);
+        s.write("a", "2");
+        let second = s.commit("second");
+        s.git(&["branch", "old", &first.to_string()]);
+        let repo = s.open();
+        let names = repo.ref_names().unwrap();
+        assert_eq!(names.branches, ["main", "old"], "newest commit first");
+        assert_eq!(names.tags.len(), 2);
+        let targets = repo.ref_targets().unwrap();
+        let of = |name: &str| targets.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        assert_eq!(of("refs/heads/main"), Some(second));
+        assert_eq!(of("refs/tags/v1"), Some(first));
+        assert!(of("refs/tags/v2").is_some_and(|id| id != first), "the tag object, not its commit");
+        // They change when a ref moves, and only then.
+        assert_eq!(targets, repo.ref_targets().unwrap());
+        s.git(&["branch", "-f", "old", &second.to_string()]);
+        assert_ne!(targets, s.open().ref_targets().unwrap());
+        // A branch that names another one counts too.
+        s.git(&["symbolic-ref", "refs/heads/alias", "refs/heads/old"]);
+        let with_alias = s.open().ref_targets().unwrap();
+        assert!(with_alias.contains(&("refs/heads/alias".to_owned(), second)), "{with_alias:?}");
+        assert_eq!(s.open().ref_names().unwrap().branches.len(), 3);
+    }
+
+    #[test]
     fn equal_timestamps_keep_children_before_parents() {
         let s = Scratch::new();
         s.write("a.txt", "1");
@@ -940,6 +1097,10 @@ pub(crate) mod tests {
         assert_eq!(names, ["src", "alpha.txt", "Zeta.txt"]);
         assert!(repo.tree(c, "alpha.txt").unwrap().is_none());
         assert_eq!(repo.default_branch().unwrap().as_deref(), Some("main"));
-        assert_eq!(repo.blob(c, "src/x.rs").unwrap().unwrap().data, b"");
+        assert_eq!(repo.blob(c, "src/x.rs", 10).unwrap().unwrap().data, b"");
+        // Sizes come from object headers; files over the limit aren't read.
+        let info = repo.blob_info(c, "alpha.txt").unwrap().unwrap();
+        assert_eq!((info.size, repo.read_blob(info.id).unwrap().data.len()), (0, 0));
+        assert!(repo.blob_info(c, "src").unwrap().is_none() && repo.blob_info(c, "nope").unwrap().is_none());
     }
 }

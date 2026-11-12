@@ -22,18 +22,18 @@ mod transport;
 pub use archive::{ArchiveFormat, archive_command};
 pub use diff::{CommitDiff, DiffLine, DiffLineKind, DiffStatus, FileDiff, Hunk};
 pub use read::{
-    Blob, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, Resolved, Signature,
-    TreeEntry,
+    Blob, BlobInfo, CommitDetail, CommitSummary, EntryKind, GitRepo, RefInfo, RefNames, Resolved,
+    Signature, TreeEntry,
 };
 pub use edit::{FileChange, replace_line};
-pub use files::{FileChanges, FileRef};
+pub use files::{FileChanges, FileRef, cat_blob_command};
 pub use merge::{Identity, MergeStyle, Mergeability, Signer};
 pub use blame::{Blame, BlameCommit, BlameHunk, IGNORE_REVS_FILE};
 pub use mirror::{Remote, import_fetch, ls_remote, mirror_fetch, mirror_push, parse_lfs_pointer};
 pub use push::{RefChange, Refs, ref_changes};
 pub use signed::SignedCommit;
 pub use stats::CommitStamp;
-pub use store::{backup, create_bare, fork, run_maintenance};
+pub use store::{backup, create_bare, fork, pack_refs_if_due, repack_if_due, run_maintenance};
 pub use transport::{Service, git_command};
 
 pub use git2::Oid;

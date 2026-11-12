@@ -599,7 +599,7 @@ mod tests {
         let _work = push_branches(&core, &repo);
         let issue = core.create_pull(&repo, &ada, "Add b", "", "main", &repo, "feature", false).await.unwrap();
         let tip = core.git(repo.id, |g| Ok(g.branch_tip("feature"))).await.unwrap().unwrap();
-        let blob = core.git(repo.id, move |g| Ok(g.blob(tip, "b")?.unwrap().id)).await.unwrap();
+        let blob = core.git(repo.id, move |g| Ok(g.blob_info(tip, "b")?.unwrap().id)).await.unwrap();
         let anchor = crate::InlineAnchor {
             path: "b".into(),
             new_side: true,
@@ -634,7 +634,7 @@ mod tests {
 
         let commit = core.apply_suggestion(&issue, &c, &ada).await.unwrap();
         let (new_tip, text) = core
-            .git(repo.id, move |g| Ok((g.branch_tip("feature"), g.blob(commit, "b")?.unwrap().data)))
+            .git(repo.id, move |g| Ok((g.branch_tip("feature"), g.blob(commit, "b", usize::MAX)?.unwrap().data)))
             .await
             .unwrap();
         assert_eq!((new_tip, text.as_slice()), (Some(commit), &b"two"[..]));

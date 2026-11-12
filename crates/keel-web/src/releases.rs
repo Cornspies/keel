@@ -191,7 +191,7 @@ pub async fn download(
     let asset = state.core.release_asset(release.id, file).await?.ok_or(AppError::NotFound)?;
     let f = tokio::fs::File::open(state.core.release_asset_path(asset.id)).await?;
     state.core.count_download(asset.id).await?;
-    let mut res = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f)).into_response();
+    let mut res = axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(f, crate::repo::STREAM_CHUNK)).into_response();
     let h = res.headers_mut();
     // Never shown inline: user content mustn't run on our origin.
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
@@ -245,12 +245,10 @@ struct Draft {
 }
 
 async fn form_page(state: &AppState, user: User, repo: &Repo, release: Option<&Release>, d: Draft, error: Option<String>) -> AppResult {
-    let (tags, branches, default) = with_git(state, repo, |g| {
-        Ok((
-            g.tags()?.into_iter().map(|t| t.name).collect::<Vec<_>>(),
-            g.branches()?.into_iter().map(|b| b.name).collect::<Vec<_>>(),
-            g.default_branch()?.unwrap_or_default(),
-        ))
+    let st = state.clone();
+    let (tags, branches, default) = with_git(state, repo, move |g| {
+        let names = crate::repo::ref_names(&st, g)?;
+        Ok((names.tags.clone(), names.branches.clone(), g.default_branch()?.unwrap_or_default()))
     })
     .await?;
     let view = match release {

@@ -337,22 +337,37 @@ async fn run_search(state: &AppState, matcher: &Matcher, repos: Vec<Repo>) -> Ap
             grouped.entry(c.repo_id as i64).or_default().push((c.path, blob));
         }
     }
-    let mut results = Vec::new();
-    for (repo_id, files) in grouped {
-        let Some(repo) = by_id.get(&repo_id).cloned() else { continue };
+    // Read in the order results are shown (by repository, then path), so
+    // reading can stop once there are enough: one more than is shown tells
+    // whether there are more. Reading every candidate first took six times
+    // as long for a common word.
+    let mut repos: Vec<_> = grouped
+        .into_iter()
+        .filter_map(|(id, files)| {
+            let repo = by_id.get(&id)?.clone();
+            Some((format!("{}/{}", repo.owner, repo.name), repo, files))
+        })
+        .collect();
+    repos.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut results: Vec<FileResult> = Vec::new();
+    for (full_name, repo, mut files) in repos {
+        let wanted = (MAX_RESULTS + 1).saturating_sub(results.len());
+        if wanted == 0 {
+            break;
+        }
+        files.sort();
         let m = matcher.clone();
-        let (full_name, base) = (format!("{}/{}", repo.owner, repo.name), format!("/{}/{}", repo.owner, repo.name));
+        let base = format!("/{full_name}");
         let found = with_git(state, &repo, move |g: &GitRepo| {
             let rev = encode_path(&g.default_branch()?.unwrap_or_default());
             let t = Target { repo: full_name, base, rev };
             let (mut out, mut budget) = (Vec::new(), usize::MAX);
-            scan(g, &m, files, &t, usize::MAX, &mut budget, &mut out);
+            scan(g, &m, files, &t, wanted, &mut budget, &mut out);
             Ok(out)
         })
         .await?;
         results.extend(found);
     }
-    results.sort_by(|a, b| (&a.repo, &a.path).cmp(&(&b.repo, &b.path)));
     let truncated = results.len() > MAX_RESULTS;
     results.truncate(MAX_RESULTS);
     Ok((results, truncated))
@@ -511,8 +526,9 @@ pub async fn in_repo(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let q = sq.q.trim().to_owned();
     let regex = sq.regex.is_some();
-    let (default, branches) = with_git(&state, &repo, |g| {
-        Ok((g.default_branch()?.unwrap_or_default(), g.branches()?.into_iter().map(|b| b.name).collect::<Vec<_>>()))
+    let st = state.clone();
+    let (default, branches) = with_git(&state, &repo, move |g| {
+        Ok((g.default_branch()?.unwrap_or_default(), crate::repo::ref_names(&st, g)?.branches.clone()))
     })
     .await?;
     let rev = sq.rev.filter(|r| !r.trim().is_empty()).unwrap_or(default);

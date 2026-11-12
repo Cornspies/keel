@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::error::{AppResult, html};
 use crate::render::{datetime, relative_time, wiki_markdown};
-use crate::repo::{RAW_CSP, RepoView, encode_path, load, raw_content_type};
+use crate::repo::{RAW_CSP, RepoView, encode_path, file_response, load};
 use crate::session::{SignedIn, Viewer};
 use crate::{AppError, AppState, Page};
 
@@ -293,8 +293,8 @@ pub async fn raw(
     Path((owner, name, path)): Path<(String, String, String)>,
 ) -> AppResult {
     let (repo, _) = load(&state, viewer.as_ref(), &owner, &name).await?;
-    let blob = state.core.wiki_file(repo.id, &path).await?.ok_or(AppError::NotFound)?;
-    let mut res = ([(header::CONTENT_TYPE, raw_content_type(&path, blob.binary))], blob.data).into_response();
+    let file = state.core.wiki_file(repo.id, &path).await?.ok_or(AppError::NotFound)?;
+    let mut res = file_response(state.core.wiki_path(repo.id), file, &path).await?;
     let h = res.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if repo.is_private { "private, no-cache" } else { "public, no-cache" }));
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(RAW_CSP));

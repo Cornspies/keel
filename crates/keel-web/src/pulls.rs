@@ -249,18 +249,14 @@ async fn compare_page(
 ) -> AppResult {
     let related = related_repos(state, repo, viewer.as_ref()).await?;
     let (head_repo, head) = resolve_head(&related, &head_label).ok_or(AppError::NotFound)?;
-    let b = base.clone();
+    let (b, st) = (base.clone(), state.clone());
     let (default, branches, base_tip) = with_git(state, repo, move |g| {
-        Ok((
-            g.default_branch()?.unwrap_or_default(),
-            g.branches()?.into_iter().map(|r| r.name).collect::<Vec<_>>(),
-            g.branch_tip(&b),
-        ))
+        Ok((g.default_branch()?.unwrap_or_default(), crate::repo::ref_names(&st, g)?.branches.clone(), g.branch_tip(&b)))
     })
     .await?;
-    let h = head.clone();
+    let (h, st) = (head.clone(), state.clone());
     let (head_branches, head_tip) = with_git(state, &head_repo, move |g| {
-        Ok((g.branches()?.into_iter().map(|r| r.name).collect::<Vec<_>>(), g.branch_tip(&h)))
+        Ok((crate::repo::ref_names(&st, g)?.branches.clone(), g.branch_tip(&h)))
     })
     .await?;
 

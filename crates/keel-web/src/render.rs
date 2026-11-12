@@ -2,13 +2,13 @@
 
 use std::sync::LazyLock;
 
+use std::collections::HashMap;
+
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
-use syntect::html::{ClassStyle, ClassedHTMLGenerator, css_for_theme_with_class_style};
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{Color, FontStyle};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
-
-const CLASS_STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "hl-" };
 
 /// Files larger than this are shown without highlighting: syntect is the
 /// slowest part of rendering a page and huge files are rarely read anyway.
@@ -16,55 +16,226 @@ const MAX_HIGHLIGHT_BYTES: usize = 256 * 1024;
 
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
-/// Loads the syntax definitions up front so the first request isn't slow.
-pub fn warm_up() {
-    LazyLock::force(&SYNTAXES);
+/// A theme, read the way a browser read the stylesheet keel sent for it
+/// until 0.24.2. Code was marked up with a span for every syntax scope,
+/// nested, the scope's parts as classes (`string.quoted.double.c` became
+/// `<span class="hl-string hl-quoted hl-double hl-c">`), and the theme was
+/// a stylesheet over those classes (`.hl-string { color: … }`). That made
+/// a page about 25 times the size of the file it showed.
+///
+/// Now the same rules are applied here, and only their outcome is sent:
+/// a span where the colour changes (see [`Look`]). The outcome is the
+/// same for every character, which is why this follows CSS and not the
+/// theme format's own (slightly different) rules for which rule wins.
+struct Sheet {
+    selectors: Vec<Selector>,
+    /// For each of the theme's rules: the class of its colour (its place
+    /// in `colors`), if it sets one, and its font style.
+    rules: Vec<(Option<u8>, FontStyle)>,
+    /// The colours the theme gives code, each a class by its place here.
+    colors: Vec<Color>,
 }
 
-/// CSS for highlighted code, following the OS light/dark preference unless
-/// the page picks one (`data-theme`, like the site's colors).
-pub fn highlight_css() -> String {
-    let themes = two_face::theme::extra();
-    let light = css_for_theme_with_class_style(themes.get(EmbeddedThemeName::OneHalfLight), CLASS_STYLE)
-        .unwrap_or_default();
-    let dark = css_for_theme_with_class_style(themes.get(EmbeddedThemeName::OneHalfDark), CLASS_STYLE)
-        .unwrap_or_default();
-    // Only token colours: backgrounds come from the site theme.
-    let strip = |css: String| {
-        css.lines()
-            .filter(|l| !l.trim_start().starts_with("background-color"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let dark = indigo(&strip(dark));
-    format!(
-        "{}\n@media (prefers-color-scheme: dark) {{\n{}\n}}\n{}\n",
-        strip(light),
-        scope_css(&dark, ":root:not([data-theme=\"light\"])"),
-        scope_css(&dark, ":root[data-theme=\"dark\"]")
-    )
+/// One selector of a rule, as in `.hl-meta.hl-mapping .hl-string`.
+struct Selector {
+    /// The classes the element must have (last), and those ancestors of
+    /// it must have, outermost first.
+    path: Vec<Vec<String>>,
+    /// How many classes that is: what CSS weighs selectors by.
+    classes: usize,
+    /// Which rule it belongs to: of two selectors that weigh the same,
+    /// the later rule's wins.
+    rule: usize,
 }
+
+/// The classes the element for `scope` had.
+fn classes_of(scope: Scope) -> Vec<String> {
+    scope.build_string().split('.').map(str::to_owned).collect()
+}
+
+impl Selector {
+    /// Whether it matches the innermost of these nested elements, each
+    /// given by its classes.
+    fn matches(&self, elements: &[Vec<String>]) -> bool {
+        let has = |element: &Vec<String>, part: &Vec<String>| part.iter().all(|class| element.contains(class));
+        let mut parts = self.path.iter().rev();
+        let mut elements = elements.iter().rev();
+        match (parts.next(), elements.next()) {
+            (Some(part), Some(element)) if has(element, part) => {}
+            _ => return false,
+        }
+        // Each earlier part, some ancestor further out than the last.
+        parts.all(|part| elements.any(|element| has(element, part)))
+    }
+}
+
+impl Sheet {
+    fn new(name: EmbeddedThemeName) -> Self {
+        let themes = two_face::theme::extra();
+        let (mut selectors, mut rules, mut colors) = (Vec::new(), Vec::new(), Vec::new());
+        for (rule, item) in themes.get(name).scopes.iter().enumerate() {
+            let color = item.style.foreground.map(|color| match colors.iter().position(|c| *c == color) {
+                Some(class) => class as u8,
+                None => {
+                    colors.push(color);
+                    (colors.len() - 1) as u8
+                }
+            });
+            rules.push((color, item.style.font_style.unwrap_or_default()));
+            for selector in &item.scope.selectors {
+                let path: Vec<Vec<String>> = selector.extract_scopes().into_iter().map(classes_of).collect();
+                if !path.is_empty() {
+                    selectors.push(Selector { classes: path.iter().map(Vec::len).sum(), path, rule });
+                }
+            }
+        }
+        Self { selectors, rules, colors }
+    }
+
+    /// What the rules say about the innermost of these nested elements
+    /// itself (not what it inherits): the colour of the rule that wins
+    /// there, if any sets one, and the font styles of all that match
+    /// (a rule can only add those).
+    fn at(&self, elements: &[Vec<String>]) -> (Option<u8>, FontStyle) {
+        let mut winner: Option<&Selector> = None;
+        let mut font = FontStyle::empty();
+        for selector in self.selectors.iter().filter(|s| s.matches(elements)) {
+            let (color, style) = self.rules[selector.rule];
+            font.insert(style);
+            if color.is_some() && winner.is_none_or(|w| (selector.classes, selector.rule) >= (w.classes, w.rule)) {
+                winner = Some(selector);
+            }
+        }
+        (winner.and_then(|w| self.rules[w.rule].0), font)
+    }
+}
+
+/// The themes code is shown in: on light pages and on dark ones.
+static LIGHT: LazyLock<Sheet> = LazyLock::new(|| Sheet::new(EmbeddedThemeName::OneHalfLight));
+static DARK: LazyLock<Sheet> = LazyLock::new(|| Sheet::new(EmbeddedThemeName::OneHalfDark));
+
+/// Loads the syntax definitions and themes up front so the first request
+/// isn't slow.
+pub fn warm_up() {
+    LazyLock::force(&SYNTAXES);
+    LazyLock::force(&LIGHT);
+    LazyLock::force(&DARK);
+}
+
+/// How a piece of code looks: its colour's class on light pages and on
+/// dark ones (`None`: the page's text colour), and its font style.
+///
+/// It's marked up with just that: `<span class="hl3 hd3">`, the light
+/// theme's colour 3 and the dark theme's.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Look {
+    light: Option<u8>,
+    /// `None` also where only the light theme has a colour: that one then
+    /// shows on dark pages too (as it did: its rules aren't limited to
+    /// light pages).
+    dark: Option<u8>,
+    font: FontStyle,
+    /// What the dark theme adds to `font`.
+    dark_font: FontStyle,
+}
+
+impl Look {
+    /// The look of text inside these nested elements (syntax scopes),
+    /// each given by its classes.
+    fn of(elements: &[Vec<String>]) -> Self {
+        let mut look = Self::default();
+        let (mut light_set, mut dark_set) = (false, false);
+        // From the innermost out: an element a rule colours hides what
+        // those around it would pass on; font styles add up.
+        for depth in (1..=elements.len()).rev() {
+            let (light, font) = LIGHT.at(&elements[..depth]);
+            let (dark, dark_font) = DARK.at(&elements[..depth]);
+            look.font.insert(font);
+            look.dark_font.insert(dark_font);
+            if !light_set && light.is_some() {
+                (look.light, light_set) = (light, true);
+            }
+            if !dark_set && (dark.is_some() || light.is_some()) {
+                (look.dark, dark_set) = (dark, true);
+            }
+        }
+        look.dark_font.remove(look.font);
+        look
+    }
+
+    fn plain(self) -> bool {
+        self == Self::default()
+    }
+
+    /// Appends the classes, separated by spaces.
+    fn classes(self, out: &mut String) {
+        use std::fmt::Write;
+        let mut class = |name: std::fmt::Arguments<'_>| {
+            if !out.ends_with('"') {
+                out.push(' ');
+            }
+            let _ = out.write_fmt(name);
+        };
+        if let Some(n) = self.light {
+            class(format_args!("hl{n}"));
+        }
+        for (font, letter) in FONTS {
+            if self.font.contains(font) {
+                class(format_args!("hl{letter}"));
+            }
+        }
+        if let Some(n) = self.dark {
+            class(format_args!("hd{n}"));
+        }
+        for (font, letter) in FONTS {
+            if self.dark_font.contains(font) {
+                class(format_args!("hd{letter}"));
+            }
+        }
+    }
+}
+
+/// Font styles, the letter in their classes (`hlb`, `hdi`) and their CSS.
+const FONTS: [(FontStyle, char); 3] = [(FontStyle::BOLD, 'b'), (FontStyle::ITALIC, 'i'), (FontStyle::UNDERLINE, 'u')];
+const FONT_CSS: [(char, &str); 3] = [('b', "font-weight: bold"), ('i', "font-style: italic"), ('u', "text-decoration: underline")];
 
 /// One Half Dark, tuned to the dark theme's indigo: cooler keywords,
 /// functions and comments, a softer orange for numbers.
-fn indigo(css: &str) -> String {
+fn indigo(color: &str) -> &str {
     const SWAPS: [(&str, &str); 4] = [("#c678dd", "#c39bf0"), ("#61afef", "#7fa8ff"), ("#d19a66", "#e0a46e"), ("#5c6370", "#5f6680")];
-    SWAPS.iter().fold(css.to_owned(), |css, (from, to)| css.replace(from, to))
+    SWAPS.iter().find(|(from, _)| *from == color).map_or(color, |(_, to)| to)
 }
 
-/// Puts `scope` in front of every selector of `css` (as syntect writes it:
-/// selectors on the line that opens a rule).
-fn scope_css(css: &str, scope: &str) -> String {
-    css.lines()
-        .map(|line| match line.strip_suffix('{') {
-            Some(selectors) if !line.trim_start().starts_with(['/', '*']) => {
-                let scoped: Vec<String> = selectors.split(',').map(|s| format!("{scope} {}", s.trim())).collect();
-                format!("{} {{", scoped.join(", "))
-            }
-            _ => line.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn hex(c: Color) -> String {
+    if c.a == 0xff { format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b) } else { format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a) }
+}
+
+/// CSS for highlighted code (see [`Look`]), following the OS light/dark
+/// preference unless the page picks one (`data-theme`, like the site's
+/// colors). Only token colours: backgrounds come from the site theme.
+pub fn highlight_css() -> String {
+    let mut light = String::new();
+    for (n, color) in LIGHT.colors.iter().enumerate() {
+        light.push_str(&format!(".hl{n} {{ color: {}; }}\n", hex(*color)));
+    }
+    for (letter, style) in FONT_CSS {
+        light.push_str(&format!(".hl{letter} {{ {style}; }}\n"));
+    }
+    let mut dark: Vec<(String, String)> = Vec::new();
+    for (n, color) in DARK.colors.iter().enumerate() {
+        dark.push((format!(".hd{n}"), format!("color: {}", indigo(&hex(*color)))));
+    }
+    for (letter, style) in FONT_CSS {
+        dark.push((format!(".hd{letter}"), style.to_owned()));
+    }
+    // With the scope in front these weigh more than the light theme's
+    // classes, which a span on a dark page has as well.
+    let scoped = |scope: &str| dark.iter().map(|(class, style)| format!("{scope} {class} {{ {style}; }}\n")).collect::<String>();
+    format!(
+        "{light}@media (prefers-color-scheme: dark) {{\n{}}}\n{}",
+        scoped(":root:not([data-theme=\"light\"])"),
+        scoped(":root[data-theme=\"dark\"]")
+    )
 }
 
 /// Highlights `text` and returns one self-contained HTML fragment per line,
@@ -82,78 +253,76 @@ pub fn highlight_lines(filename: &str, text: &str) -> Vec<String> {
     let Some(syntax) = syntax else {
         return plain_lines(text);
     };
-    let mut generator = ClassedHTMLGenerator::new_with_class_style(syntax, ss, CLASS_STYLE);
+    let mut parser = ParseState::new(syntax);
+    // The syntax scopes the text at hand is in, outermost first.
+    let mut scopes = ScopeStack::new();
+    // A file has a few hundred different stacks of them, and thousands of
+    // pieces of text: the look of each stack is worked out once.
+    let mut looks: HashMap<Vec<Scope>, Look> = HashMap::new();
+    let mut lines = Vec::new();
     for line in LinesWithEndings::from(text) {
-        if generator
-            .parse_html_for_line_which_includes_newline(line)
-            .is_err()
-        {
+        let Ok(changes) = parser.parse_line(line, ss) else {
             return plain_lines(text);
+        };
+        // The line ending isn't shown.
+        let shown = line.strip_suffix('\n').unwrap_or(line);
+        let shown = shown.strip_suffix('\r').unwrap_or(shown).len();
+        let mut html = String::with_capacity(line.len() * 2);
+        let (mut at, mut open) = (0, Look::default());
+        // The text up to each change of scopes, then the rest of the line.
+        for (end, change) in changes.iter().map(|(end, change)| (*end, Some(change))).chain([(line.len(), None)]) {
+            let piece = &line[at.min(shown)..end.min(shown)];
+            at = end;
+            // Blank text looks the same in any colour: no reason to end
+            // a span for it.
+            if !piece.trim().is_empty() {
+                let look = match looks.get(scopes.as_slice()) {
+                    Some(look) => *look,
+                    None => {
+                        let elements: Vec<Vec<String>> = scopes.as_slice().iter().copied().map(classes_of).collect();
+                        let look = Look::of(&elements);
+                        looks.insert(scopes.as_slice().to_vec(), look);
+                        look
+                    }
+                };
+                if look != open {
+                    if !open.plain() {
+                        html.push_str("</span>");
+                    }
+                    if !look.plain() {
+                        html.push_str("<span class=\"");
+                        look.classes(&mut html);
+                        html.push_str("\">");
+                    }
+                    open = look;
+                }
+            }
+            escape_into(&mut html, piece);
+            if let Some(change) = change
+                && scopes.apply(change).is_err()
+            {
+                return plain_lines(text);
+            }
         }
+        if !open.plain() {
+            html.push_str("</span>");
+        }
+        lines.push(html);
     }
-    split_html_lines(&generator.finalize())
+    lines
 }
 
 pub fn plain_lines(text: &str) -> Vec<String> {
     text.lines().map(escape).collect()
 }
 
-/// Splits generated HTML at newlines, closing spans that are open at the end
-/// of a line and reopening them on the next, so every line is valid HTML.
-fn split_html_lines(html: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut open: Vec<&str> = Vec::new();
-    let mut line = String::new();
-    let mut rest = html;
-    while !rest.is_empty() {
-        if rest.starts_with("</span>") {
-            open.pop();
-            line.push_str("</span>");
-            rest = &rest["</span>".len()..];
-        } else if rest.starts_with("<span")
-            && let Some(end) = rest.find('>')
-        {
-            let tag = &rest[..=end];
-            open.push(tag);
-            line.push_str(tag);
-            rest = &rest[end + 1..];
-        } else if let Some(stripped) = rest.strip_prefix('\n') {
-            line.extend(std::iter::repeat_n("</span>", open.len()));
-            lines.push(std::mem::take(&mut line));
-            line.extend(open.iter().copied());
-            rest = stripped;
-        } else {
-            let next = rest[1..]
-                .find(['<', '\n'])
-                .map_or(rest.len(), |i| i + 1);
-            line.push_str(&rest[..next]);
-            rest = &rest[next..];
-        }
-    }
-    // Like `str::lines`: what follows the final newline only counts as a
-    // line if it has text (and not just tags).
-    if has_text(&line) {
-        line.extend(std::iter::repeat_n("</span>", open.len()));
-        lines.push(line);
-    }
-    lines
-}
-
-fn has_text(html: &str) -> bool {
-    let mut in_tag = false;
-    html.chars().any(|c| {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => return true,
-            _ => {}
-        }
-        false
-    })
-}
-
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    escape_into(&mut out, s);
+    out
+}
+
+fn escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
             '<' => out.push_str("&lt;"),
@@ -164,7 +333,6 @@ pub fn escape(s: &str) -> String {
             c => out.push(c),
         }
     }
-    out
 }
 
 /// Where relative links in a Markdown file should point.
@@ -461,26 +629,91 @@ mod tests {
     #[test]
     fn highlight_css_follows_the_theme_switch() {
         let css = highlight_css();
-        assert!(css.contains(":root[data-theme=\"dark\"] .hl-comment"), "{css}");
-        assert!(css.contains(":root:not([data-theme=\"light\"]) .hl-comment"));
-        assert_eq!(scope_css(".a, .b.c {\n color: red;\n}", "S"), "S .a, S .b.c {\n color: red;\n}");
+        assert!(css.contains(":root[data-theme=\"dark\"] .hd0 { color: #"), "{css}");
+        assert!(css.contains("@media (prefers-color-scheme: dark) {\n:root:not([data-theme=\"light\"]) .hd0 { color: #"), "{css}");
         // The dark theme's code colours are tuned to its indigo.
         let dark = &css[css.find("@media").unwrap()..];
         assert!(dark.contains("#c39bf0") && dark.contains("#5f6680"), "{dark}");
-        assert!(!dark.contains("#c678dd") && css.contains("#a626a4"), "light keeps One Half Light");
+        assert!(!dark.contains("#c678dd") && css.contains(".hl0 { color: #") && css.contains("#a626a4"), "light keeps One Half Light");
+        // A class for every colour either theme uses, and no others.
+        assert_eq!(css.matches("\n.hl").count() + 1, LIGHT.colors.len() + 3);
+        assert!(LIGHT.colors.len() > 5 && DARK.colors.len() > 5);
+    }
+
+    #[test]
+    fn colours_follow_the_stylesheet_rules() {
+        let stack = |scopes: &[&str]| -> Vec<Vec<String>> { scopes.iter().map(|s| s.split('.').map(str::to_owned).collect()).collect() };
+        let color = |sheet: &Sheet, scopes: &[&str]| -> Option<String> {
+            let elements = stack(scopes);
+            (1..=elements.len()).rev().find_map(|depth| sheet.at(&elements[..depth]).0).map(|class| hex(sheet.colors[class as usize]))
+        };
+        // A rule for the element itself; nothing for scopes no rule names.
+        assert_eq!(color(&LIGHT, &["source.c", "comment.block.c"]).as_deref(), Some("#a0a1a7"));
+        assert_eq!(color(&LIGHT, &["source.c", "meta.block.c"]), None);
+        // An element without a rule of its own takes the colour of the
+        // one around it.
+        assert_eq!(color(&LIGHT, &["source.c", "string.quoted.double.c", "punctuation.definition.string.begin.c"]).as_deref(), Some("#50a14f"));
+        // The innermost element with a rule decides, whatever is around.
+        let inner = color(&LIGHT, &["source.shell", "string.quoted.double.shell", "variable.other.readwrite.shell"]);
+        assert_eq!(inner, color(&LIGHT, &["source.shell", "variable.other.readwrite.shell"]));
+        assert_ne!(inner.as_deref(), Some("#50a14f"), "not the string's");
+        // Classes match in any order and however many more there are, as
+        // in CSS: `.hl-entity.hl-name` on `entity.other.inherited-class.name`.
+        let dark = Look::of(&stack(&["source.c", "meta.preprocessor.macro.c", "entity.name.constant.preprocessor.c"]));
+        assert!(dark.dark.is_some(), "the dark theme colours every entity.name");
+        // The look says where the themes differ.
+        assert!(Look::of(&stack(&["source.c", "meta.block.c"])).plain());
     }
 
     #[test]
     fn highlighted_lines_are_balanced() {
-        let src = "/* a\n multi-line comment */\nfn main() {\n    let s = \"<b>\";\n}\n";
+        let src = "/* a\n multi-line comment */\nfn main() {\r\n    let s = \"<b>\";\n}\n";
         let lines = highlight_lines("main.rs", src);
         assert_eq!(lines.len(), 5);
         for l in &lines {
             assert_eq!(l.matches("<span").count(), l.matches("</span>").count(), "{l}");
+            assert!(!l.contains('\n') && !l.contains('\r'), "{l:?}");
         }
-        assert!(lines[1].contains("comment"));
+        // A comment that spans lines is one span on each, in the same
+        // colour, and nothing else.
+        let comment = lines[0].split_once('>').unwrap().0;
+        assert!(comment.starts_with("<span class=\"hl") && comment.contains(" hd"), "{comment}");
+        assert_eq!(lines[0], format!("{comment}>/* a</span>"));
+        assert_eq!(lines[1], format!("{comment}> multi-line comment */</span>"));
         assert!(lines[3].contains("&lt;b&gt;"));
         assert!(!lines.concat().contains("<b>"));
+        // Only classes the stylesheet has.
+        let css = highlight_css();
+        for class in lines.concat().split('"').filter(|c| c.starts_with("hl") || c.starts_with("hd")).flat_map(|c| c.split(' ')) {
+            assert!(css.contains(&format!(".{class} {{")), "{class}");
+        }
+        // The text is all there, in order.
+        let text: String = lines.iter().map(|l| {
+            let mut out = String::new();
+            let mut in_tag = false;
+            for c in l.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    c if !in_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out + "\n"
+        }).collect();
+        assert_eq!(text, "/* a\n multi-line comment */\nfn main() {\n    let s = &quot;&lt;b&gt;&quot;;\n}\n");
+    }
+
+    #[test]
+    fn highlighting_is_compact() {
+        // Much smaller than a span for every syntax scope, which took
+        // about 650 bytes for a line like these.
+        let src = "static int count(const char *s)\n{\n\tint n = 0;\n\twhile (*s++)\n\t\tn++;\n\treturn n;\n}\n".repeat(50);
+        let lines = highlight_lines("count.c", &src);
+        assert_eq!(lines.len(), 350);
+        let html: usize = lines.iter().map(String::len).sum();
+        assert!(html < src.len() * 6, "{html} bytes for {} of code: {}", src.len(), lines[..7].join("\n"));
+        assert!(lines[2].contains("<span class=\"hl"), "{}", lines[2]);
     }
 
     #[test]

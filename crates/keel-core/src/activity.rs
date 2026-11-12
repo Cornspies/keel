@@ -14,6 +14,10 @@ use crate::{Comment, CommitStatus, Core, Issue, Label, Milestone, PullRequest, R
 
 /// Commits listed in a push payload.
 const PUSH_COMMITS: usize = 20;
+/// How far the commits a ref brought are counted, and how many are counted
+/// for all the refs of one push together.
+const PUSH_COUNT_TO: usize = 10_000;
+const PUSH_COUNT_BUDGET: usize = 10 * PUSH_COUNT_TO;
 
 #[derive(Clone, Debug)]
 pub enum Activity {
@@ -268,12 +272,16 @@ impl Core {
         let pusher_name = sender["login"].clone();
         let repo_url = format!("{}/{}/{}", self.config.base_url, repo.owner, repo.name);
         let path = self.config.repo_path(repo_id);
+        // Commits are counted up to 10,000 per ref; a push of many refs
+        // (a mirror's first, with a thousand tags) shares what ten may
+        // count, rather than walking history a thousand times.
+        let count_to = (PUSH_COUNT_BUDGET / changes.len()).clamp(PUSH_COMMITS, PUSH_COUNT_TO);
         let details = tokio::task::spawn_blocking(move || -> keel_git::Result<Vec<_>> {
             let git = GitRepo::open(&path)?;
             changes
                 .into_iter()
                 .map(|c| {
-                    let (commits, total, forced) = git.pushed_commits(&c, &before, PUSH_COMMITS)?;
+                    let (commits, total, forced) = git.pushed_commits(&c, &before, PUSH_COMMITS, count_to)?;
                     let head = match c.new {
                         Some(new) => git.commit_detail(new).ok(),
                         None => None,

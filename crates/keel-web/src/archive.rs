@@ -83,7 +83,7 @@ pub async fn download(
             _ => {}
         }
     });
-    let stream = futures_util::StreamExt::inspect(ReaderStream::new(stdout), move |_| {
+    let stream = futures_util::StreamExt::inspect(ReaderStream::with_capacity(stdout, crate::repo::STREAM_CHUNK), move |_| {
         progress.store(started.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
     });
     let mut res = Body::from_stream(stream).into_response();

@@ -80,13 +80,16 @@ pub async fn blame(
     let (repo, access) = load(&state, viewer.as_ref(), &owner, &name).await?;
     let base = format!("/{}/{}", repo.owner, repo.name);
     let link_base = base.clone();
+    let st = state.clone();
     let found = with_git(&state, &repo, move |g| {
         let r = g.resolve_rev_path(&rest).ok_or(AppError::NotFound)?;
         if r.path.is_empty() || g.is_dir(r.commit, &r.path)? {
             return Ok(Err(r));
         }
-        let blob = g.blob(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
-        let refs = RefNames::load(g, &link_base, "tree")?;
+        // A file too large to blame isn't read either.
+        let file = g.blob_info(r.commit, &r.path)?.ok_or(AppError::NotFound)?;
+        let blob = if file.size <= MAX_DISPLAY_BYTES { Some(g.read_blob(file.id)?) } else { None };
+        let refs = RefNames::load(&st, g, &link_base, "tree")?;
         let tree = crate::file_view::tree_html(g, &link_base, &r.rev, r.commit, &r.path)?;
         Ok(Ok((r, blob, refs, g.default_branch()?.unwrap_or_default(), tree)))
     })
@@ -100,24 +103,24 @@ pub async fn blame(
     };
     let filename = r.path.rsplit('/').next().unwrap_or_default().to_owned();
     let mut commit_count = 0;
-    let content = if blob.binary || keel_core::parse_pointer(&blob.data).is_some() {
-        BlameContent::Unavailable("Binary files can't be blamed.")
-    } else if blob.data.len() > MAX_DISPLAY_BYTES {
-        BlameContent::Unavailable("This file is too large to blame.")
-    } else {
-        match blame_of(&state, &repo, r.commit, &r.path).await? {
+    let content = match &blob {
+        None => BlameContent::Unavailable("This file is too large to blame."),
+        Some(blob) if blob.binary || keel_core::parse_pointer(&blob.data).is_some() => {
+            BlameContent::Unavailable("Binary files can't be blamed.")
+        }
+        Some(blob) => match blame_of(&state, &repo, r.commit, &r.path).await? {
             Some(b) => {
                 commit_count = b.commits.len();
                 let history = format!("{base}/commits/{}/{}", encode_path(&r.rev), encode_path(&r.path));
-                BlameContent::Rows(rows(&base, &history, &b, &highlighted(&state, &blob, &filename)))
+                BlameContent::Rows(rows(&base, &history, &b, &highlighted(&state, blob, &filename)))
             }
             None => BlameContent::TooSlow,
-        }
+        },
     };
     let (rev_url, path_url) = (encode_path(&r.rev), encode_path(&r.path));
     let markdown = matches!(filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref(), Some("md" | "markdown"));
     let mut bar = crate::file_view::FileBar::new(&base, &rev_url, &r.path, "blame", markdown, true);
-    bar.copyable = !blob.binary;
+    bar.copyable = blob.as_ref().is_some_and(|b| !b.binary);
     bar.meta = match commit_count {
         0 => String::new(),
         1 => "1 commit".into(),

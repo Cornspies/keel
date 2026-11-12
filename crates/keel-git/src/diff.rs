@@ -5,6 +5,10 @@ use crate::{GitRepo, Result};
 /// git's default `diff.renameLimit`: once added × deleted files are more
 /// than its square, renames are only found where the content is the same.
 const RENAME_LIMIT: usize = 1000;
+/// Files larger than this are shown as binary: changed, without their
+/// lines. Diffing one means holding both versions in memory, and a diff
+/// that long isn't read anyway.
+const MAX_DIFF_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffStatus {
@@ -113,7 +117,7 @@ impl GitRepo {
         };
 
         let mut opts = DiffOptions::new();
-        opts.context_lines(3).ignore_submodules(true);
+        opts.context_lines(3).ignore_submodules(true).max_size(MAX_DIFF_FILE_BYTES as i64);
         let mut diff = self
             .repo
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), Some(&mut opts))?;
@@ -128,8 +132,18 @@ impl GitRepo {
                 _ => {}
             }
         }
+        // Comparing reads the files whole, so also when one is large.
+        let large = added > 0 && deleted > 0 && {
+            let odb = self.repo.odb()?;
+            let large = |id: Oid| odb.read_header(id).is_ok_and(|(size, _)| size > MAX_DIFF_FILE_BYTES);
+            diff.deltas().any(|delta| match delta.status() {
+                Delta::Added => large(delta.new_file().id()),
+                Delta::Deleted => large(delta.old_file().id()),
+                _ => false,
+            })
+        };
         let mut find = DiffFindOptions::new();
-        find.renames(true).exact_match_only(added.saturating_mul(deleted) > RENAME_LIMIT * RENAME_LIMIT);
+        find.renames(true).exact_match_only(large || added.saturating_mul(deleted) > RENAME_LIMIT * RENAME_LIMIT);
         diff.find_similar(Some(&mut find))?;
 
         let mut out = CommitDiff::default();
@@ -279,6 +293,17 @@ mod tests {
 
         let d = repo.diff_commit(c, 1, 1000).unwrap();
         assert!(d.truncated);
+
+        // A very large file is reported as changed, without its lines
+        // (and without being read).
+        s.write("big.txt", &"line\n".repeat(MAX_DIFF_FILE_BYTES / 5 + 1));
+        s.write("old.txt", "back again\n");
+        std::fs::remove_file(s.dir.path().join("new.txt")).unwrap();
+        let big = s.commit("a large file");
+        let d = s.open().diff_commit(big, 100, 1000).unwrap();
+        let file = d.files.iter().find(|f| f.path() == "big.txt").unwrap();
+        assert!(file.binary && file.hunks.is_empty() && file.status == DiffStatus::Added);
+        assert_eq!(d.files.len(), 3, "the others are still shown");
         let d = repo.diff_commit(c, 100, 2).unwrap();
         assert!(d.files.iter().find(|f| f.path() == "a.txt").unwrap().collapsed);
     }

@@ -325,6 +325,16 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             }
         });
     }
+    {
+        // Packs and refs of repositories from before they were kept in
+        // shape after pushes, and of those nobody pushes to.
+        let core = core.clone();
+        tokio::spawn(async move {
+            if let Err(e) = core.tidy_repos().await {
+                tracing::warn!("tidying repositories failed: {e}");
+            }
+        });
+    }
     keel_hooks::start(core.clone());
     keel_mail::start(core.clone()).context("setting up email")?;
     keel_mirror::start(core.clone());

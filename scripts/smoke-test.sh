@@ -1386,7 +1386,7 @@ grep -v keel_theme "$T/bob" >"$T/bob-elsewhere"
 check "on other devices too" contains "$(curl -s -b "$T/bob-elsewhere" "$B/")" 'data-theme="light"'
 check "back to the system's" is "$(post "$T/bob" /theme theme=auto)" 303
 CSS=$(curl -s "$B/" | grep -o 'href="/static/style.css[^"]*"' | cut -d'"' -f2)
-check "the styles know both" bash -c "curl -s '$B$CSS' | grep -q ':root\[data-theme=\"dark\"\] .hl-comment'"
+check "the styles know both" bash -c "curl -s '$B$CSS' | grep -q ':root\[data-theme=\"dark\"\] .hd0 { color: #'"
 
 echo "== rebase and merge"
 check "a repository for it" is "$(post "$T/ada" /new name=linear)" 303
@@ -1564,6 +1564,48 @@ check "and keeps its pull requests" contains "$(curl -s "$B/acme/motor/pulls?sta
 check "move it back with the API" is "$(api_status "$RW" POST /repos/acme/motor/transfer -d '{"new_owner":"ada"}')" 202
 check "and rename it" is "$(api "$RW" PATCH /repos/ada/motor -d '{"name":"engine"}' | field '["full_name"]')" ada/engine
 check "the name is its own again" is "$(status "$B/ada/engine")" 200
+
+echo "== large files, packs and refs"
+check "create a repository" is "$(post "$T/ada" /new name=bulk)" 303
+BW=$T/bulk
+git init -q -b main "$BW"
+# Two files over 1 MiB (sent as a stream rather than from memory), one
+# binary and one text; enough small ones for git to keep the push as a pack.
+head -c 1100000 /dev/urandom >"$BW/big.bin"
+seq 1 200000 >"$BW/numbers.txt"
+mkdir "$BW/many" && for i in $(seq 1 120); do echo "file $i" >"$BW/many/$i.txt"; done
+echo "a public key" >"$BW/key.pub"
+git -C "$BW" add -A && git -C "$BW" commit -qm "Large files"
+for i in $(seq 1 40); do git -C "$BW" tag "v0.$i"; done
+# A tag of a file rather than a commit, as git.git has.
+git -C "$BW" tag -a keyfile -m "The key" "$(git -C "$BW" rev-parse HEAD:key.pub)"
+check "push it" git -C "$BW" push -q "http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/bulk.git" main --tags
+check "a large file comes whole" bash -c "curl -s '$B/ada/bulk/raw/main/big.bin' | cmp -s - '$BW/big.bin'"
+BIG=$(curl -s -o /dev/null -D - -H 'Accept-Encoding: br, gzip' "$B/ada/bulk/raw/main/big.bin" | tr -d '\r')
+check "with its length" contains "$BIG" 'content-length: 1100000'
+check "as what it is" contains "$BIG" 'content-type: application/octet-stream'
+plain() { ! grep -qi content-encoding <<<"$1" || { echo "compressed"; return 1; }; }
+check "and not compressed again" plain "$BIG"
+check "unchanged files aren't sent again" is "$(status -H "If-None-Match: \"$(git -C "$BW" rev-parse HEAD:big.bin)\"" "$B/ada/bulk/raw/main/big.bin")" 304
+check "large text comes whole too" bash -c "curl -s '$B/ada/bulk/raw/main/numbers.txt' | cmp -s - '$BW/numbers.txt'"
+check "and compressed for browsers" contains "$(curl -s -o /dev/null -D - -H 'Accept-Encoding: br' "$B/ada/bulk/raw/main/numbers.txt" | tr -d '\r')" 'content-encoding: br'
+check "its page shows it" contains "$(curl -s "$B/ada/bulk/blob/main/numbers.txt")" '200000 lines'
+check "binary files have a page" contains "$(curl -s "$B/ada/bulk/blob/main/big.bin")" 'Binary file not shown'
+check "pages are compressed" contains "$(curl -s -o /dev/null -D - -H 'Accept-Encoding: br' "$B/ada/bulk" | tr -d '\r')" 'content-encoding: br'
+check "archives aren't, again" plain "$(curl -s -o /dev/null -D - -H 'Accept-Encoding: br, gzip' "$B/ada/bulk/archive/main.tar.gz")"
+check "they still unpack" contains "$(curl -s -H 'Accept-Encoding: br, gzip' "$B/ada/bulk/archive/main.tar.gz" | tar -tz)" "bulk-main/many/120.txt"
+check "the switcher lists every tag" contains "$(curl -s "$B/ada/bulk")" 'href="/ada/bulk/tree/v0.40"'
+check "a tag of a file doesn't lose the push" feed_has 'created tag <a href="/ada/bulk/releases/tag/keyfile">keyfile</a>'
+check "nor its branch" feed_has 'created branch <a href="/ada/bulk/tree/main">main</a>'
+BULK=$T/data/repos/$(sqlite3 "$T/data/keel.db" "SELECT id FROM repositories WHERE name = 'bulk'").git
+tidied() { for _ in $(seq 1 100); do ls "$BULK"/objects/pack/*.bitmap >/dev/null 2>&1 && [ -f "$BULK/packed-refs" ] && return 0; sleep 0.1; done; ls -R "$BULK/objects/pack" "$BULK/refs"; return 1; }
+check "the pack gets a bitmap index, the refs one file" tidied
+check "no ref is a file of its own" is "$(find "$BULK/refs" -type f | wc -l)" 0
+check "nothing is left loose" is "$(find "$BULK/objects" -type f -path '*/objects/[0-9a-f][0-9a-f]/*' | wc -l)" 0
+check "it still clones" git clone -q "$B/ada/bulk.git" "$T/bulk-clone"
+check "with everything" is "$(git -C "$T/bulk-clone" rev-parse HEAD) $(git -C "$T/bulk-clone" tag | wc -l)" "$(git -C "$BW" rev-parse HEAD) 41"
+check "and takes pushes" bash -c "cd '$BW' && echo more >more.txt && git add -A && git commit -qm More && git push -q 'http://ada:password-ada@127.0.0.1:$HTTP_PORT/ada/bulk.git' main"
+check "which pages show" contains "$(curl -s "$B/ada/bulk")" 'more.txt'
 
 if [ $FAILED -ne 0 ]; then
     echo "--- server log"

@@ -210,9 +210,14 @@ pub async fn edit_form(
     let s = spot(&state, &repo, &user, rest).await?;
     let (Some(tip), false) = (s.tip, s.path.is_empty()) else { return Err(AppError::NotFound) };
     let path = s.path.clone();
-    let blob = with_git(&state, &repo, move |g| Ok(g.blob(tip, &path)?)).await?.ok_or(AppError::NotFound)?;
-    let text = match String::from_utf8(blob.data) {
-        Ok(t) if !blob.binary && t.len() <= MAX_EDIT && keel_core::parse_pointer(t.as_bytes()).is_none() => t,
+    // A file too large to edit isn't read to find that out.
+    let blob = with_git(&state, &repo, move |g| {
+        let file = g.blob_info(tip, &path)?.ok_or(AppError::NotFound)?;
+        Ok(if file.size <= MAX_EDIT { Some(g.read_blob(file.id)?) } else { None })
+    })
+    .await?;
+    let text = match blob.map(|b| (String::from_utf8(b.data), b.binary)) {
+        Some((Ok(t), false)) if keel_core::parse_pointer(t.as_bytes()).is_none() => t,
         _ => {
             return Err(AppError::BadRequest(format!(
                 "{} can't be edited in the browser: it's binary, stored with Git LFS or bigger than {}.",
@@ -306,7 +311,7 @@ pub async fn save(
 async fn folder(state: &AppState, repo: &Repo, s: &Spot) -> AppResult<()> {
     let (Some(tip), false) = (s.tip, s.path.is_empty()) else { return Ok(()) };
     let path = s.path.clone();
-    let is_file = with_git(state, repo, move |g| Ok(g.blob(tip, &path)?.is_some())).await?;
+    let is_file = with_git(state, repo, move |g| Ok(g.blob_info(tip, &path)?.is_some())).await?;
     if is_file {
         return Err(AppError::NotFound);
     }
@@ -401,7 +406,7 @@ pub async fn delete_form(
     let s = spot(&state, &repo, &user, rest).await?;
     let (Some(tip), false) = (s.tip, s.path.is_empty()) else { return Err(AppError::NotFound) };
     let path = s.path.clone();
-    if !with_git(&state, &repo, move |g| Ok(g.blob(tip, &path)?.is_some())).await? {
+    if !with_git(&state, &repo, move |g| Ok(g.blob_info(tip, &path)?.is_some())).await? {
         return Err(AppError::NotFound);
     }
     delete_page(&state, user, &repo, access, &s, CommitBox::new(&s, format!("Delete {}", file_name(&s.path))), None).await

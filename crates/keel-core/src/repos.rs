@@ -330,7 +330,8 @@ impl Core {
         let path = self.config.repo_path(repo_id);
         let core = self.clone();
         tokio::spawn(async move {
-            let maintenance = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&path)).await;
+            let maintained = path.clone();
+            let maintenance = tokio::task::spawn_blocking(move || keel_git::run_maintenance(&maintained)).await;
             if let Ok(Err(e)) = maintenance {
                 tracing::warn!(repo = repo_id, "maintenance failed: {e}");
             }
@@ -350,8 +351,55 @@ impl Core {
                 tracing::warn!(repo = repo_id, "updating pull requests failed: {e}");
             }
             core.emit(crate::RepoEvent::Pushed { repo_id });
+            // Last: it can take a while, and nothing above needs it.
+            core.repack(repo_id, path).await;
         });
         Ok(())
+    }
+
+    /// Packs the objects of repository `repo_id` (or of its wiki) at `path`
+    /// if that's due (see [`keel_git::repack_if_due`]), then measures it
+    /// again: packed, it's smaller. Failures are logged; the repository
+    /// works as before.
+    pub(crate) async fn repack(&self, repo_id: i64, path: std::path::PathBuf) {
+        let _one_at_a_time = self.repack_lock.lock().await;
+        let started = std::time::Instant::now();
+        // `7.git`, or `7.wiki.git` for its wiki.
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        match tokio::task::spawn_blocking(move || keel_git::repack_if_due(&path)).await {
+            Ok(Ok(false)) => return,
+            Ok(Ok(true)) => tracing::info!(repo = repo_id, "repacked {name} in {:.1?}", started.elapsed()),
+            Ok(Err(e)) => tracing::warn!(repo = repo_id, "repacking {name} failed: {e}"),
+            Err(e) => tracing::warn!(repo = repo_id, "repacking {name} failed: {e}"),
+        }
+        if let Err(e) = self.measure_repo(repo_id).await {
+            tracing::warn!(repo = repo_id, "measuring disk usage failed: {e}");
+        }
+    }
+
+    /// Brings every repository's packs and refs into shape (see
+    /// [`keel_git::repack_if_due`]), one after the other: those from
+    /// before keel did that after pushes, and those nobody pushes to.
+    /// Returns how many there are. Meant to run in the background after
+    /// starting.
+    pub async fn tidy_repos(&self) -> Result<usize> {
+        let ids = self.all_repo_ids().await?;
+        for &id in &ids {
+            let mut paths = vec![self.config.repo_path(id)];
+            if self.has_wiki(id) {
+                paths.push(self.wiki_path(id));
+            }
+            for path in paths {
+                let refs = path.clone();
+                match tokio::task::spawn_blocking(move || keel_git::pack_refs_if_due(&refs)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(repo = id, "packing refs failed: {e}"),
+                    Err(e) => tracing::warn!(repo = id, "packing refs failed: {e}"),
+                }
+                self.repack(id, path).await;
+            }
+        }
+        Ok(ids.len())
     }
 
     /// The repository at `owner/name`, or the one that was there before a

@@ -239,7 +239,7 @@ pub(crate) async fn serve_object(state: &AppState, oid: &str, size: u64, content
         Ok(f) => f,
         Err(e) => return internal(e),
     };
-    let mut res = Body::from_stream(ReaderStream::new(file)).into_response();
+    let mut res = Body::from_stream(ReaderStream::with_capacity(file, crate::repo::STREAM_CHUNK)).into_response();
     let h = res.headers_mut();
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     if let Ok(v) = HeaderValue::from_str(content_type) {

@@ -313,7 +313,7 @@ async fn rpc(
 
     // Answer once git does, or refuses an oversized request: git stops
     // without output when its input is cut off.
-    let mut stdout = ReaderStream::new(stdout);
+    let mut stdout = ReaderStream::with_capacity(stdout, crate::repo::STREAM_CHUNK);
     let mut oversized = None;
     let first = tokio::select! {
         biased;

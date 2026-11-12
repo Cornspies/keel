@@ -83,7 +83,7 @@ pub fn clean_path(path: &str) -> Result<String> {
 fn conflict(g: &GitRepo, base: Option<Oid>, tip: Option<Oid>, files: &[FileWrite]) -> keel_git::Result<Option<String>> {
     let blob_id = |commit: Option<Oid>, path: &str| -> keel_git::Result<Option<Oid>> {
         Ok(match commit {
-            Some(c) => g.blob(c, path)?.map(|b| b.id),
+            Some(c) => g.blob_info(c, path)?.map(|b| b.id),
             None => None,
         })
     };
@@ -242,7 +242,7 @@ mod tests {
         };
         let read = |rev: Oid, path: &str| {
             let g = GitRepo::open(&core.repo_path(&repo)).unwrap();
-            g.blob(rev, path).unwrap().map(|b| String::from_utf8(b.data).unwrap())
+            g.blob(rev, path, usize::MAX).unwrap().map(|b| String::from_utf8(b.data).unwrap())
         };
 
         // The first file of an empty repository.
